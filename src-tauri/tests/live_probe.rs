@@ -26,6 +26,7 @@ async fn detects_installed_apps_and_finds_latest_versions() {
             updater_lib::model::Source::Craft => craft::latest(i, &feed),
             updater_lib::model::Source::Blender => blender::latest(i, &all, &bfeed),
             updater_lib::model::Source::Tools => tools::latest(i, &all, &tfeed),
+            updater_lib::model::Source::Other => None,
         };
         let l = latest.as_ref().map(|l| l.version.clone()).unwrap_or_else(|| "?".into());
         let mark = if latest.as_ref().is_some_and(|l| version::newer(&l.version, &i.version)) { "UPDATE" } else { "" };
@@ -100,6 +101,7 @@ async fn version_history_works_for_every_installed_app() {
             updater_lib::sources::SourceData::Craft { key, .. } => craft::versions(key, Some(&i.version), false).await.unwrap_or_default(),
             updater_lib::sources::SourceData::Blender { .. } => blender::versions(i, &bfeed).await.unwrap_or_default(),
             updater_lib::sources::SourceData::Tools { .. } => tools::versions(i, &tfeed).await.unwrap_or_default(),
+            updater_lib::sources::SourceData::Other { .. } => vec![],
         };
         let installed = list.iter().any(|v| v.installed);
         println!("{:<26} {} versions, installed marked: {installed}", i.name, list.len());
@@ -213,4 +215,133 @@ async fn creative_cloud_updates_with_adobes_signed_setup() {
     let r = download::fetch(&d, std::sync::Arc::new(Progress::new()), std::sync::Arc::new(Throttle::new()), rx).await;
     let _ = std::fs::remove_dir_all(&dir);
     assert!(matches!(r, Ok(Outcome::Done)), "{:?}", r.err());
+}
+
+/// Other apps: how much of this PC the winget catalog covers, and with what change lists.
+/// cargo test --release --test live_probe other_apps -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn other_apps_coverage_and_changelogs() {
+    use std::collections::BTreeMap;
+    use updater_lib::sources::{other, winget};
+    let un = winutil::uninstall_entries();
+    let cat = adobe::fetch_catalog().await.ok();
+    let mut handled = adobe::scan(cat.as_ref(), &un);
+    handled.extend(craft::scan(&un));
+    handled.extend(blender::scan(&un, &std::path::PathBuf::from(std::env::var("ProgramFiles").unwrap()).join("Blender Foundation")));
+    handled.extend(tools::scan(&un, &std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Programs").join("Godot")));
+    let t0 = std::time::Instant::now();
+    let feed = other::fetch(&handled).await.expect("winget catalog");
+    println!("catalog read in {:.1} s, {} packages fetched", t0.elapsed().as_secs_f64(), feed.pkgs.len());
+    let idx = winget::Index::open(&winget::index_path()).unwrap();
+    println!("index: {} packages, {} KB on disk", idx.count(), std::fs::metadata(winget::index_path()).unwrap().len() / 1024);
+    let rep = other::match_all(&un, &idx, &handled, &winutil::msi_upgrade_codes());
+    let t1 = std::time::Instant::now();
+    let installed = other::scan(&un, &handled, Some(&feed));
+    println!("scan (index lookups and matching) took {} ms", t1.elapsed().as_millis());
+
+    println!("\n--- matched");
+    let mut unsupported: Vec<(String, String, String)> = Vec::new();
+    for m in &rep.matches {
+        let pf = feed.get(&m.pkg.id);
+        let man = pf.and_then(|p| p.latest.as_ref());
+        let shown = installed.iter().find(|i| i.id == format!("other:{}", m.pkg.id));
+        match (shown, man) {
+            (Some(i), Some(man)) => {
+                let l = other::latest(i, &feed).map(|l| l.version).unwrap_or_default();
+                let inst = other::choose(man, &other::Want::for_installed(i)).ok();
+                let mark = if other::is_newer(&l, &i.version) { "UPDATE" } else { "" };
+                println!(
+                    "{:<44} {:<36} {:<16} {:<14} -> {:<14} {:6} {:<5} {} {:?}",
+                    m.entry.display_name.chars().take(44).collect::<String>(),
+                    m.pkg.id,
+                    m.how.label(),
+                    i.version,
+                    l,
+                    mark,
+                    inst.map(other::kind_of).unwrap_or("-"),
+                    if i.uninstall.is_some() { "uninstall" } else { "-" },
+                    inst.map(|x| x.arch.as_str())
+                );
+            }
+            (None, Some(man)) => {
+                let why = other::choose(man, &other::Want::for_entry(&m.entry, m.upgrade_code.as_deref())).err().unwrap_or_default();
+                unsupported.push((m.entry.display_name.clone(), m.pkg.id.clone(), why));
+            }
+            _ => unsupported.push((m.entry.display_name.clone(), m.pkg.id.clone(), "catalog entry could not be read".into())),
+        }
+    }
+    println!("\n--- matched, but not updatable here");
+    for (n, p, why) in &unsupported {
+        println!("{n:<44} {p:<36} {why}");
+    }
+    let mut by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (e, m) in &rep.misses {
+        let key = match m {
+            other::Miss::Ambiguous(_) | other::Miss::Unconfirmed(_) | other::Miss::Duplicate(_) | other::Miss::Excluded(_) => m.label(),
+            _ => m.label(),
+        };
+        by.entry(key).or_default().push(format!("{} {}", e.display_name, e.display_version));
+    }
+    println!("\n--- not matched, by reason");
+    for (k, v) in &by {
+        println!("{k} ({}):", v.len());
+        for n in v {
+            println!("    {n}");
+        }
+    }
+
+    println!("\n--- change lists of the newest version");
+    let mut sources: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut shown_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let (mut all_versions, mut all_with_lines) = (0usize, 0usize);
+    for i in &installed {
+        let Some(man) = feed.get(match &i.data {
+            updater_lib::sources::SourceData::Other { pkg, .. } => pkg,
+            _ => "",
+        }).and_then(|p| p.latest.as_ref()) else { continue };
+        let (lines, url, src) = other::probe_notes(man).await;
+        let key = if !lines.is_empty() { src } else if url.is_some() { "link only" } else { "none" };
+        *sources.entry(key).or_default() += 1;
+        // What the version list shows (it can also use a notes page another version names).
+        let list = other::versions(i, &feed).await.unwrap_or_default();
+        let shown = list.first().map(|v| v.notes.first().cloned().unwrap_or_default()).unwrap_or_default();
+        let shown_key = if shown == other::NO_NOTES { "none" } else if shown == other::SEE_NOTES { "link only" } else { "lines" };
+        *shown_counts.entry(shown_key).or_default() += 1;
+        let with_lines = list.iter().filter(|v| v.notes.first().is_some_and(|n| n != other::NO_NOTES && n != other::SEE_NOTES)).count();
+        all_versions += list.len();
+        all_with_lines += with_lines;
+        println!("{:<36} {:<10} {:<9} {:<9} {}/{} versions with lines  {:?} {:?}", man.id, man.version, key, shown_key, with_lines, list.len(), lines.first().map(|s| s.chars().take(50).collect::<String>()), url);
+    }
+
+    println!("
+--- install plans for the updates (built, not run)");
+    for i in installed.iter().filter(|i| other::latest(i, &feed).is_some_and(|l| other::is_newer(&l.version, &i.version))) {
+        match other::plan_install(&i.id, None, updater_lib::model::JobKind::Update, Some(i), Some(&feed)).await {
+            Ok(p) => {
+                for s in &p.steps {
+                    if let updater_lib::sources::Step::Run { exe, args, elevated, .. } = s {
+                        println!("{:<36} {:?} {} elevated={} fallback={} size={:?} kind={:?}", i.id, exe.file_name().unwrap_or_default(), args.join(" "), elevated, p.fallback.is_some(), p.downloads[0].size, p.kind);
+                    }
+                }
+            }
+            Err(e) => println!("{:<36} PLAN FAILED: {e:#}", i.id),
+        }
+        if let Some(u) = &i.uninstall {
+            println!("{:<36}   uninstall: {}", "", u.join(" "));
+        }
+    }
+
+    let apps = un.iter().filter(|e| other::is_app(e)).count();
+    let handled_n = rep.misses.iter().filter(|(_, m)| *m == other::Miss::Handled).count();
+    println!("\n=== coverage");
+    println!("apps in the uninstall list: {apps} ({} system parts and updates not counted)", rep.hidden);
+    println!("handled by the full sources: {handled_n}");
+    println!("matched to the catalog: {} of {} ({:.0}%)", rep.matches.len(), apps - handled_n, 100.0 * rep.matches.len() as f64 / (apps - handled_n).max(1) as f64);
+    println!("listed as Other apps (updatable): {}", installed.len());
+    println!("updates available: {}", installed.iter().filter(|i| other::latest(i, &feed).is_some_and(|l| other::is_newer(&l.version, &i.version))).count());
+    println!("change list of the newest version, by source: {sources:?}");
+    println!("newest version as shown in the version list: {shown_counts:?}");
+    println!("all listed versions with a change list: {all_with_lines} of {all_versions}");
+    assert!(!rep.matches.is_empty());
 }

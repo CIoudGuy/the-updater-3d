@@ -11,6 +11,8 @@ pub enum Source {
     Blender,
     /// OBS Studio, Krita, FreeCAD, Godot and Unity Editor.
     Tools,
+    /// Any other app, matched from the public winget catalog.
+    Other,
 }
 
 impl Source {
@@ -20,6 +22,7 @@ impl Source {
             Source::Craft => "Craft apps",
             Source::Blender => "Blender",
             Source::Tools => "More apps",
+            Source::Other => "Other apps",
         }
     }
 }
@@ -232,6 +235,9 @@ pub struct Sources {
     /// value for it, and must keep loading: it defaults to on.
     #[serde(default = "yes")]
     pub tools: bool,
+    /// Every other app, matched from the winget catalog. Off unless turned on.
+    #[serde(default)]
+    pub other: bool,
 }
 
 fn yes() -> bool {
@@ -294,7 +300,7 @@ impl Default for Settings {
             blender_channel: "beta".into(),
             blender_keep_patch_versions: false,
             craft_prereleases: false,
-            sources: Sources { adobe: true, craft: true, blender: true, tools: true },
+            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: false },
             parallel_downloads: 2,
             silent_elevation: false,
             ui_zoom: 1.0,
@@ -361,5 +367,10 @@ mod tests {
         assert!(s.godot_install_dir.ends_with("Programs\\Godot"));
         assert_eq!(Source::Tools.group(), "More apps");
         assert_eq!(serde_json::to_string(&Source::Tools).unwrap(), "\"tools\"");
+        // Other apps came later still: off for old settings and for new ones.
+        assert!(!s.sources.other);
+        assert!(!Settings::default().sources.other);
+        assert_eq!(Source::Other.group(), "Other apps");
+        assert_eq!(serde_json::to_string(&Source::Other).unwrap(), "\"other\"");
     }
 }

@@ -8,7 +8,7 @@
   import { BRUSH } from "../lib/paths";
   import { I } from "../lib/icons";
   import { call } from "../lib/api";
-  import { store } from "../lib/store.svelte";
+  import { OTHER_NOTE, store } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { bytes, countOf, driveOf } from "../lib/format";
   import { enter, reduced } from "../lib/motion";
@@ -28,13 +28,36 @@
   const q = $derived(ui.getQuery.trim().toLowerCase());
   const s = $derived(store.settings);
 
-  type Group = "Adobe" | "Craft apps" | "Blender" | "More apps";
+  type Group = "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps";
   const SECTIONS: { group: Group; title: string; from: string; color: string; enabled: () => boolean }[] = [
     { group: "Adobe", title: "Adobe apps", from: "from Creative Cloud", color: "#D9706A", enabled: () => s.sources.adobe },
     { group: "Craft apps", title: "Craft apps", from: "from ArtCraft", color: "#D9B26A", enabled: () => s.sources.craft },
     { group: "Blender", title: "Blender", from: "from blender.org", color: "#E08A3C", enabled: () => s.sources.blender },
     { group: "More apps", title: "More apps", from: "OBS Studio, Krita, FreeCAD, Godot, Unity", color: "#6FB1E3", enabled: () => s.sources.tools },
+    { group: "Other apps", title: "Other apps", from: "from Microsoft's winget catalog", color: "#8FA3B8", enabled: () => s.sources.other },
   ];
+
+  // Other apps: a search also looks through the winget catalog. A plain flag, so settings
+  // updates that change nothing here do not restart the search.
+  const otherOn = $derived(s.sources.other);
+  let searchSeq = 0;
+  $effect(() => {
+    const query = q;
+    const on = otherOn;
+    const n = ++searchSeq;
+    if (!on || query.length < 2) {
+      ui.otherFound = [];
+      return;
+    }
+    const t = setTimeout(() => {
+      call("search_other_apps", { query })
+        .then((r) => {
+          if (n === searchSeq) ui.otherFound = r;
+        })
+        .catch(() => {});
+    }, 250);
+    return () => clearTimeout(t);
+  });
 
   /** Search and the Beta settings decide what is listed at all. */
   function listed(c: CatalogEntry): boolean {
@@ -44,7 +67,12 @@
     return true;
   }
   const onSources = $derived(SECTIONS.filter((x) => x.enabled()));
-  const found = $derived((catalog ?? []).filter(listed));
+  const found = $derived.by(() => {
+    const base = (catalog ?? []).filter(listed);
+    if (!q) return base;
+    const have = new Set(base.map((c) => c.id));
+    return [...base, ...ui.otherFound.filter((c) => !have.has(c.id))];
+  });
   const counts = $derived(Object.fromEntries(SECTIONS.map((x) => [x.group, found.filter((c) => c.group === x.group).length])) as Record<Group, number>);
   // a filter on a source that was switched off falls back to All
   const filter = $derived(ui.getGroup !== "all" && onSources.some((x) => x.group === ui.getGroup) ? ui.getGroup : "all");
@@ -62,7 +90,8 @@
         const items = x.group === "Blender" ? all : [...all.filter((c) => !c.installed), ...all.filter((c) => c.installed)];
         return { ...x, items };
       })
-      .filter((x) => x.items.length > 0),
+      // Other apps stay listed without a search: the note says how to find more.
+      .filter((x) => x.items.length > 0 || (x.group === "Other apps" && !q)),
   );
   const toInstall = $derived(sections.reduce((n, x) => n + x.items.filter((c) => !c.installed).length, 0));
   const have = $derived(sections.reduce((n, x) => n + x.items.filter((c) => c.installed).length, 0));
@@ -110,6 +139,7 @@
       <span class="from">, {sec.from}</span>
       {#if sec.group === "Adobe" && store.ccDown}<span class="warn">Creative Cloud services are not running</span>{:else}<span class="cnt">{countOf(sec.items.length, "app")}</span>{/if}
     </h2>
+    {#if sec.group === "Other apps"}<p class="srcnote">{OTHER_NOTE}{q ? "" : " Search to find more of its apps."}</p>{/if}
     <div class="grid">
       {#each sec.items as c, i (c.id)}
         <div class="slot" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
@@ -202,6 +232,11 @@
   }
   .grp .from {
     font-weight: 400;
+    color: var(--text-3);
+  }
+  .srcnote {
+    margin-top: 4px;
+    font-size: 12px;
     color: var(--text-3);
   }
   .grp .cnt,
