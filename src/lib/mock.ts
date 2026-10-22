@@ -693,6 +693,14 @@ function versionsFor(a: AppEntry): VersionInfo[] {
   return list;
 }
 
+/** The real backend serves a cached history first and refreshes it in the background; this tells the pages once per id. */
+const refreshed = new Set<string>();
+function refreshedLater(id: string) {
+  if (refreshed.has(id)) return;
+  refreshed.add(id);
+  setTimeout(() => emit("versions-changed", { id }), 3500);
+}
+
 // ---------- commands ----------
 function reorderCmp(a: string, b: string) {
   const pa = a.split(".").map(Number);
@@ -815,11 +823,13 @@ const handlers: H = {
   show_in_folder: () => {},
   get_versions: ({ appId }) => {
     const a = findApp(appId);
+    refreshedLater(appId);
     return a ? clone(versionsFor(a)) : [];
   },
   get_catalog: () => clone(catalogNow()),
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
+    refreshedLater(id);
     const cat = CATALOG.find((x) => x.id === id);
     if (!cat) return [];
     if (cat.source === "tools") {

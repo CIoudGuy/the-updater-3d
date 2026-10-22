@@ -106,15 +106,71 @@ pub fn known(sap: &str) -> Option<(&'static str, &'static str, &'static str, &'s
         "ESHR" => ("Dn", "#5EE0C8", "#062A26", "Dimension"),
         "FRSC" => ("Fr", "#FFB45C", "#2B1503", "Fresco"),
         "UXPD" => ("Ux", "#C8C8C8", "#262626", "UXP Developer Tools"),
+        // Shared components (catalog channel "sti") that Creative Cloud keeps updated too.
+        "ACR" => ("Cr", "#6EB4FF", "#0C1D33", "Camera Raw"),
+        "LIBS" => ("Lb", "#FF8A8A", "#2A0A0A", "Creative Cloud Libraries"),
+        "COSY" => ("Sy", "#C8C8C8", "#262626", "CoreSync"),
+        "CCXP" => ("Cx", "#C8C8C8", "#262626", "CCX Process"),
+        "SEPS" => ("3D", "#FF5C6C", "#2A0A10", "Substance 3D Viewer for Photoshop"),
+        "UXPW" => ("Ux", "#C8C8C8", "#262626", "UXP WebView Support"),
         _ => return None,
     })
+}
+
+/// A shared component rather than an app: it updates like an app but is not offered for
+/// uninstalling (Creative Cloud and the apps rely on it).
+pub fn is_component(sap: &str) -> bool {
+    // Not the Notification Client (KANC): the catalog stops at an older version than Creative
+    // Cloud installs, so there is nothing to compare or update with.
+    matches!(sap, "ACR" | "LIBS" | "COSY" | "CCXP" | "SEPS" | "UXPW")
+}
+
+/// Process names a component's update must wait for, from Adobe's own install record
+/// (`ConflictingProcessesXML`): "^[Pp][Hh][Oo][Tt][Oo][Ss][Hh][Oo][Pp].[Ee][Xx][Ee]$" is Photoshop.exe.
+/// Processes Adobe's installer may stop by itself (`forceKillAllowed="true"`) do not block.
+fn conflicting_names(xml: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for proc_xml in xml.split("<ConflictingProcess ").skip(1) {
+        let head = proc_xml.split('>').next().unwrap_or("");
+        if head.contains("forceKillAllowed=\"true\"") {
+            continue;
+        }
+        let Some(part) = proc_xml.split("<RegularExpression>").nth(1) else { continue };
+        let re = part.split("</RegularExpression>").next().unwrap_or("");
+        let mut name = String::new();
+        let mut chars = re.trim_start_matches('^').trim_end_matches('$').chars().peekable();
+        let mut ok = true;
+        while let Some(c) = chars.next() {
+            match c {
+                '[' => {
+                    let class: String = chars.by_ref().take_while(|&x| x != ']').collect();
+                    match class.chars().next() {
+                        Some(first) if class.chars().all(|x| x.eq_ignore_ascii_case(&first)) => name.push(first.to_ascii_lowercase()),
+                        _ => ok = false,
+                    }
+                }
+                '\\' => {
+                    if let Some(n) = chars.next() {
+                        name.push(n);
+                    }
+                }
+                '.' => name.push('.'),
+                '*' | '+' | '?' | '(' | ')' | '|' | '{' | '}' => ok = false,
+                c => name.push(c.to_ascii_lowercase()),
+            }
+        }
+        if ok && name.ends_with(".exe") && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// Catalog entries that are tools, legacy or store apps, never offered.
 fn skip_in_catalog(sap: &str) -> bool {
     matches!(
         sap,
-        "AAM" | "KCCC" | "FLBR" | "FWKS" | "GSDK" | "KEMN" | "KETK" | "MUSE" | "ASCT" | "TAPI" | "PSXUWP" | "SPRKBE" | "ANML"
+        "AAM" | "FLBR" | "FWKS" | "GSDK" | "KEMN" | "KETK" | "MUSE" | "ASCT" | "TAPI" | "PSXUWP" | "SPRKBE" | "ANML"
     )
 }
 
@@ -385,7 +441,10 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
         let updated_at = entry
             .and_then(|e| winutil::install_date_iso(&e.install_date))
             .or_else(|| exe.as_ref().and_then(|e| e.metadata().ok()).and_then(|m| m.modified().ok()).map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()));
-        let tagline = catalog.and_then(|c| c.for_sap(&p.sap).find_map(|x| x.tagline.clone()));
+        let component = is_component(&p.sap);
+        let tagline = catalog
+            .and_then(|c| c.for_sap(&p.sap).find_map(|x| x.tagline.clone()))
+            .or_else(|| component.then(|| "Shared Adobe component, used by Photoshop and other Adobe apps".to_string()));
         out.push(Installed {
             id: format!("adobe:{}:{}", p.sap, version::major(&p.version)),
             source: Source::Adobe,
@@ -396,12 +455,13 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
             version: p.version.clone(),
             install_dir: install_dir.clone(),
             exe,
-            uninstall: entry.map(|e| winutil::split_program_line(&e.uninstall_string)),
+            uninstall: if component { None } else { entry.map(|e| winutil::split_program_line(&e.uninstall_string)) },
             updated_at,
             size_hint: entry.map(|e| e.estimated_size_kb * 1024).filter(|s| *s > 0),
             tagline,
             channel: None,
-            missing,
+            // Components have no program of their own to check.
+            missing: missing && !component,
             read_only: false,
             icon_remote: catalog.and_then(|c| c.icon(&p.sap)).map(String::from),
             data: SourceData::Adobe {
@@ -491,11 +551,12 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
     }
     let mut out: Vec<CatalogEntry> = by_sap
         .into_values()
-        .filter(|p| !installed.iter().any(|i| sap_of(i).0 == p.sap))
+        // Installed apps stay listed, marked installed (with Open), so the list is the whole catalog.
         .map(|p| {
             let name = display_name(&p.sap, &p.name);
             let (code, fg, bg) = mark_for(&p.sap, &name);
             let prerelease = p.sap.ends_with("BETA") || p.sap == "ILSTPR" || name.contains("(Beta)") || name.contains("Prerelease") || name.contains("(Preview");
+            let cc = p.sap == "KCCC";
             CatalogEntry {
                 id: format!("adobe:{}:{}", p.sap, version::major(&p.version)),
                 source: Source::Adobe,
@@ -509,8 +570,9 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
                 tagline: p.tagline.clone(),
                 group: Source::Adobe.group().into(),
                 prerelease,
-                installed: false,
-                pick_version: true,
+                installed: installed.iter().any(|i| sap_of(i).0 == p.sap && !i.missing),
+                // Adobe offers only the newest Creative Cloud.
+                pick_version: !cc,
             }
         })
         .collect();
@@ -532,6 +594,18 @@ fn release_notes_url(sap: &str) -> Option<String> {
     Some(format!("https://experienceleague.adobe.com/en/docs/{slug}/using/release-notes/release-notes"))
 }
 
+/// Release notes pages that only open in the browser (helpx.adobe.com rejects apps).
+fn browser_notes_url(sap: &str) -> Option<String> {
+    Some(
+        match sap {
+            "KCCC" => CC_NOTES_URL,
+            "ACR" => "https://helpx.adobe.com/camera-raw/using/whats-new.html",
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
 pub fn versions(inst_sap: &str, platform: &str, installed_version: Option<&str>, cat: &Catalog) -> Vec<VersionInfo> {
     let mut list: Vec<&Product> = cat.for_sap(inst_sap).filter(|p| p.platform == platform).collect();
     list.sort_by(|a, b| version::cmp(&b.version, &a.version));
@@ -543,7 +617,7 @@ pub fn versions(inst_sap: &str, platform: &str, installed_version: Option<&str>,
             version: p.version.clone(),
             date: None,
             notes: vec![],
-            notes_url: release_notes_url(inst_sap).or_else(|| p.whats_new.clone()).or_else(|| (inst_sap == "KCCC").then(|| CC_NOTES_URL.to_string())),
+            notes_url: release_notes_url(inst_sap).or_else(|| p.whats_new.clone()).or_else(|| browser_notes_url(inst_sap)),
             size: p.size,
             installed: installed_version.is_some_and(|v| version::cmp(v, &p.version).is_eq()),
             latest: newest.as_deref() == Some(p.version.as_str()),
@@ -691,6 +765,12 @@ pub async fn plan_install(req: InstallRequest<'_>, cat: &Catalog) -> Result<Plan
     // An update to the newest version of an installed app: Adobe's Remote Update Manager.
     let newest = cat.newest(req.sap, req.platform, None).map(|p| p.version.clone());
     if req.kind == JobKind::Update && req.current.is_some() && newest.as_deref() == Some(product.version.as_str()) {
+        if is_component(req.sap) {
+            // A component has no window of its own; it waits for the apps that load it.
+            let mut plan = plan_rum(req.sap, &req.app_id, &req.name, &product.version, vec![]);
+            plan.block_names = component_blockers(req.sap);
+            return Ok(plan);
+        }
         return Ok(plan_rum(req.sap, &req.app_id, &req.name, &product.version, block_dirs));
     }
     // Anything else (a new app, another version, a repair): Creative Cloud installs it.
@@ -734,7 +814,7 @@ async fn plan_creative_cloud(req: &InstallRequest<'_>, to_version: &str) -> Resu
         kind: req.kind,
         name: req.name.clone(),
         to_version: to_version.to_string(),
-        downloads: vec![Download { url, dest: zip.clone(), size, sha256: None, md5, signer: None, headers: vec![] }],
+        downloads: vec![Download { url, dest: zip.clone(), size, sha256: None, md5, signer: None, sha512: None, headers: vec![] }],
         steps: vec![
             Step::ExtractZip { zip: zip.clone(), dest: dir.clone(), strip_root: false, elevated: false, label: "Unpacking Creative Cloud".into() },
             Step::Run {
@@ -755,6 +835,21 @@ async fn plan_creative_cloud(req: &InstallRequest<'_>, to_version: &str) -> Resu
     })
 }
 
+/// Apps that must be closed before a component updates, from Adobe's install database.
+fn component_blockers(sap: &str) -> Vec<String> {
+    let (db, _) = read_db();
+    db.iter()
+        .filter(|p| p.sap == sap)
+        .filter_map(|p| p.meta.get("ConflictingProcessesXML"))
+        .flat_map(|x| conflicting_names(x))
+        .fold(Vec::new(), |mut acc, n| {
+            if !acc.contains(&n) {
+                acc.push(n);
+            }
+            acc
+        })
+}
+
 /// Update through Adobe's Remote Update Manager (official admin tool, downloads by itself).
 pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dirs: Vec<PathBuf>) -> Plan {
     let dir = paths::downloads().join("rum");
@@ -765,7 +860,7 @@ pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dir
         kind: JobKind::Update,
         name: name.to_string(),
         to_version: to_version.to_string(),
-        downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, md5: None, signer: None, headers: vec![] }],
+        downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, md5: None, signer: None, sha512: None, headers: vec![] }],
         steps: vec![
             Step::ExtractZip { zip, dest: exe_dir.clone(), strip_root: false, elevated: false, label: "Preparing Adobe Remote Update Manager".into() },
             Step::Run {
@@ -819,6 +914,15 @@ pub fn cc_uri(sap: &str, version: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_updates_wait_for_the_apps_adobe_lists() {
+        // Shape of Camera Raw's ConflictingProcessesXML in Adobe's install database.
+        let xml = r#"<ConflictingProcesses><ConflictingProcess headless="false" forceKillAllowed="false" adobeOwned="true"><RegularExpression>^[Aa][Ff][Tt][Ee][Rr][Ff][Xx].[Ee][Xx][Ee]$</RegularExpression><ProcessDisplayName>Adobe After Effects 2027</ProcessDisplayName></ConflictingProcess><ConflictingProcess headless="false" forceKillAllowed="false" adobeOwned="true"><RegularExpression>^[Pp][Hh][Oo][Tt][Oo][Ss][Hh][Oo][Pp].[Ee][Xx][Ee]$</RegularExpression></ConflictingProcess><ConflictingProcess headless="false" forceKillAllowed="false" adobeOwned="true"><RegularExpression>^[Aa][Nn][Ii][Mm][Aa][Tt][Ee]\.[Ee][Xx][Ee]$</RegularExpression></ConflictingProcess><ConflictingProcess headless="false" forceKillAllowed="false" adobeOwned="true"><RegularExpression>^[Pp][Hh][Oo][Tt][Oo][Ss][Hh][Oo][Pp].[Ee][Xx][Ee]$</RegularExpression></ConflictingProcess><ConflictingProcess headless="true" forceKillAllowed="true" adobeOwned="true"><RegularExpression>^[Cc][Oo][Rr][Ee][Ss][Yy][Nn][Cc].[Ee][Xx][Ee]$</RegularExpression></ConflictingProcess><ConflictingProcess forceKillAllowed="false"><RegularExpression>^Light(room|room Classic).*$</RegularExpression></ConflictingProcess></ConflictingProcesses>"#;
+        // Photoshop once, CoreSync left to Adobe's installer, the loose pattern skipped.
+        assert_eq!(conflicting_names(xml), vec!["afterfx.exe", "photoshop.exe", "animate.exe"]);
+        assert!(is_component("ACR") && !is_component("PHSP") && !is_component("KCCC"));
+    }
 
     #[test]
     fn creative_cloud_full_build_and_offline_installer_address() {

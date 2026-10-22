@@ -220,9 +220,6 @@ pub fn note_lines(md: &str) -> Vec<String> {
         if !t.is_empty() && !t.starts_with("@") {
             out.push(t);
         }
-        if out.len() >= 12 {
-            break;
-        }
     }
     out
 }
@@ -303,9 +300,8 @@ pub fn latest(inst: &Installed, feed: &Feed) -> Option<Latest> {
 pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry> {
     let mut out = Vec::new();
     for a in APPS {
-        if installed.iter().any(|i| i.id == format!("craft:{}", a.key)) {
-            continue;
-        }
+        // Installed ones stay listed (marked installed, with Open), so the list is the whole family.
+        let is_installed = installed.iter().any(|i| i.id == format!("craft:{}", a.key));
         let Some(r) = feed.latest.get(a.key) else { continue };
         out.push(CatalogEntry {
             id: format!("craft:{}", a.key),
@@ -320,7 +316,7 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             tagline: Some(a.tagline.into()),
             group: Source::Craft.group().into(),
             prerelease: r.prerelease,
-            installed: false,
+            installed: is_installed,
             pick_version: true,
         });
     }
@@ -428,7 +424,7 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
         kind,
         name: a.name.to_string(),
         to_version: r.version.clone(),
-        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, signer: None, headers: vec![] }],
+        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] }],
         steps,
         block_dirs: current.and_then(|c| c.install_dir.clone()).into_iter().collect(),
         block_names: vec![format!("{}.exe", a.key)],

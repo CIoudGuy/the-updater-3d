@@ -75,6 +75,9 @@ pub struct Download {
     /// Required Authenticode signer ("Adobe Inc."), for vendors that publish no checksum.
     #[serde(default)]
     pub signer: Option<String>,
+    /// Lowercase hex SHA-512, for vendors that publish that (Unity Hub)
+    #[serde(default)]
+    pub sha512: Option<String>,
     pub headers: Vec<(String, String)>,
 }
 

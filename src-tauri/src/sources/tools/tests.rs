@@ -181,9 +181,9 @@ fn unity_notes_skip_known_issues() {
     let md = "### Known Issues in 6000.3.27f1\n\n- Content Build: Player stops responding\n    ([UUM-1](https://x))\n\n### 6000.3.27f1 Release Notes\n\n#### Improvements\n\n- Asset Import: Improved the security of model import [details](https://x) \u{2014} two fixes.\n    (UUM-155199)\n\n#### API Changes\n\n- Graphics: Added Graphics.disableDepthAndStencilBuffers\n";
     let v = unity_bullets(md);
     assert_eq!(v, vec!["Asset Import: Improved the security of model import details, two fixes", "Graphics: Added Graphics.disableDepthAndStencilBuffers"]);
-    // Without a release notes heading every bullet counts, 12 at most.
+    // Without a release notes heading every bullet counts, all of them.
     let many: String = (0..30).map(|i| format!("- item {i}\n")).collect();
-    assert_eq!(unity_bullets(&many).len(), 12);
+    assert_eq!(unity_bullets(&many).len(), 30);
 }
 
 #[test]
@@ -472,4 +472,30 @@ fn source_has_no_long_dashes() {
     for (name, text) in [("tools.rs", include_str!("../tools.rs")), ("tools/tests.rs", include_str!("tests.rs"))] {
         assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'), "{name} has an em or en dash");
     }
+}
+
+#[test]
+fn unity_hub_feed_gives_the_x64_installer_with_its_sha512() {
+    // Unity Hub's latest.yml as published (shortened signature lines).
+    let yml = "version: 3.22.3\nfiles:\n  - url: 3.22.3/UnityHubSetup-3.22.3-x64.exe\n    sha512: M3JBFlfmEPLel7O0iB1aUFCEqzFnY4OlpVlvyz4ckvZwF48mxgWca/AmOppd+58urHMsxPui9e8lw2jE5coFCw==\n    size: 193266120\n    isAdminRightsRequired: true\n  - url: 3.22.3/UnityHubSetup-3.22.3-arm64.exe\n    sha512: CQS+0hRW2lGch5EhUpXrD/jMNQpZLFF9bkNHs94X/e5viCPdjY3YokEHwrwkhNUtOmIUDNXSwXI7niSlucWRZA==\n    size: 183441496\nreleaseDate: 2026-10-13T20:00:51.624Z\n";
+    let r = parse_hub_feed(yml).unwrap();
+    assert_eq!(r.version, "3.22.3");
+    assert_eq!(r.url, "https://public-cdn.cloud.unity3d.com/hub/prod/3.22.3/UnityHubSetup-3.22.3-x64.exe");
+    assert_eq!(r.file, "UnityHubSetup-3.22.3-x64.exe");
+    assert_eq!(r.size, Some(193266120));
+    let sha = r.sha512.unwrap();
+    assert_eq!(sha.len(), 128);
+    assert!(sha.starts_with("33724116"));
+}
+
+#[test]
+fn unity_hub_notes_page_lists_every_version() {
+    let html = r#"<div><h2 class="x">3.22.3</h2></div><div class="portable-text-base"><p>October 13, 2026</p><p><strong>Bug fixes and improvements</strong></p><ul><li><strong>Projects</strong><ul><li>Fixed an issue where Add project from disk could reject projects.</li></ul></li><li>Fixed the sign-in window on high DPI screens.</li></ul></div><div><h2 class="x">3.22.2</h2></div><div><p>September 30, 2026</p><ul><li>Faster editor downloads for large modules.</li></ul></div>"#;
+    let v = notes::unity_hub(html);
+    assert_eq!(v.len(), 2);
+    assert_eq!(v[0].0, "3.22.3");
+    assert_eq!(v[0].1.as_deref(), Some("2026-10-13T00:00:00Z"));
+    assert!(v[0].2.iter().any(|l| l.starts_with("Fixed an issue where Add project from disk")), "{:?}", v[0].2);
+    assert!(v[0].2.iter().any(|l| l == "Fixed the sign-in window on high DPI screens"), "{:?}", v[0].2);
+    assert_eq!(v[1].2, vec!["Faster editor downloads for large modules"]);
 }
