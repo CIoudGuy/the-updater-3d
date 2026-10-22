@@ -9,9 +9,12 @@ use std::time::Duration;
 /// The whole published list; only a runaway page is cut.
 const MAX_LINES: usize = 400;
 
+#[derive(Default)]
 pub struct Notes {
     pub date: Option<String>,
     pub lines: Vec<String>,
+    /// The page of this version's own notes, when it has one (a forum post, a news item).
+    pub url: Option<String>,
 }
 
 // Change lists are plain lines. A line starting with "# ", "## " or "### " is a section heading
@@ -92,7 +95,7 @@ pub async fn blender_major(series: &str) -> Notes {
     static TOPIC: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<a[^>]*href="([a-z_\-]+/)"[^>]*>([^<]{2,80})</a>"#).unwrap());
     static RELEASED: Lazy<Regex> = Lazy::new(|| Regex::new(r"released on ([A-Z][a-z]+ \d{1,2}(?:st|nd|rd|th)?,? \d{4})").unwrap());
     let base = format!("https://developer.blender.org/docs/release_notes/{series}/");
-    let Some(html) = page(&base).await else { return Notes { date: None, lines: vec![] } };
+    let Some(html) = page(&base).await else { return Notes::default() };
     let article = ARTICLE.captures(&html).map(|c| c[1].to_string()).unwrap_or_default();
     let date = RELEASED.captures(&strip_tags(&article)).and_then(|c| parse_date(&c[1]));
     let topics: Vec<(String, String)> = TOPIC
@@ -136,7 +139,7 @@ pub async fn blender_major(series: &str) -> Notes {
         lines.extend(items.into_iter().filter(|l| !(one_top && l.starts_with("## ") && name.starts_with(l.trim_start_matches("## ")))));
     }
     lines.truncate(MAX_LINES * 3);
-    Notes { date, lines }
+    Notes { date, lines, url: None }
 }
 
 async fn page_owned(url: String) -> Option<String> {
@@ -146,18 +149,28 @@ async fn page_owned(url: String) -> Option<String> {
 fn strip_tags(s: &str) -> String {
     let re = regex::Regex::new(r"<[^>]+>").unwrap();
     let t = re.replace_all(s, "");
-    let t = t
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&nbsp;", " ")
-        .replace("&para;", "")
-        .replace('\u{2014}', ", ")
-        .replace('\u{2013}', "-");
+    // Named and numeric entities ("&#8216;Lattice Deform&#8217;"), then no long dashes.
+    let t = unescape_html(&t.replace("&para;", "")).replace('\u{2014}', ", ").replace('\u{2013}', "-");
     t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A line without the bare issue and commit references it ends with ("... name conflict #106584",
+/// "... OpenPGL 0.5.0 85c7cc898d", "[bcfe4ce3b1600931fc854f70f5146a8bb2b36a4a]").
+fn without_trailing_refs(s: &str) -> &str {
+    let is_ref = |w: &str| {
+        let w = w.trim_matches(|c| matches!(c, '(' | ')' | '[' | ']' | ','));
+        let hex = (7..=40).contains(&w.len()) && w.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_alphabetic());
+        let issue = w.len() > 1 && w.starts_with('#') && w[1..].chars().all(|c| c.is_ascii_digit());
+        hex || issue
+    };
+    let mut t = s.trim_end();
+    while let Some((head, last)) = t.rsplit_once(char::is_whitespace) {
+        if !is_ref(last) {
+            break;
+        }
+        t = head.trim_end();
+    }
+    t
 }
 
 /// List items of one HTML fragment as clean lines, without trailing issue / commit references.
@@ -173,7 +186,8 @@ fn items(fragment: &str) -> Vec<String> {
             t.truncate(cut);
             t.push_str("...");
         }
-        let t = refs.replace(&t, "").trim().trim_end_matches('.').to_string();
+        let t = refs.replace(&t, "");
+        let t = without_trailing_refs(&t).trim_end_matches('.').to_string();
         if !t.is_empty() && !out.contains(&t) {
             out.push(t);
         }
@@ -200,10 +214,15 @@ async fn page(url: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&f.body).into_owned())
 }
 
-/// Blender bug-fix lists for one series, keyed by full version ("4.5.14").
-/// LTS series: blender.org/download/lts/<x-y>/. Others: the "corrective releases" docs page.
+/// Blender bug-fix lists for one series, keyed by full version ("4.5.14"), with the full release
+/// notes for the first release (x.y.0) when `with_major` is set.
 pub async fn blender(series: &str, with_major: bool) -> HashMap<String, Notes> {
-    let mut out = blender_fixes(series).await;
+    blender_with_source(series, with_major).await.0
+}
+
+/// Like `blender`, plus the address of the page the fix lists came from.
+pub async fn blender_with_source(series: &str, with_major: bool) -> (HashMap<String, Notes>, Option<String>) {
+    let (mut out, src) = blender_fixes(series).await;
     // The first release of the series has no fix list: its notes are the whole release notes.
     let first = format!("{series}.0");
     if with_major && !out.contains_key(&first) {
@@ -212,40 +231,76 @@ pub async fn blender(series: &str, with_major: bool) -> HashMap<String, Notes> {
             out.insert(first, m);
         }
     }
+    (out, src)
+}
+
+/// The releases of a blender.org release or LTS page: "Blender 4.5.14 LTS<span>September 15,
+/// 2026</span>" or "Blender 4.2.23 LTS &#8211; July 21, 2026" summaries, each followed by its
+/// Download and Changelog lists. A release whose changelog is only a link (5.2.0) is left out.
+pub fn blender_summaries(html: &str) -> HashMap<String, Notes> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static ENTRY: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<summary[^>]*>(.*?)</summary>(.*?)</details>").unwrap());
+    static VER: Lazy<Regex> = Lazy::new(|| Regex::new(r"Blender\s+([0-9]+\.[0-9]+\.[0-9]+)").unwrap());
+    static WHEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"([A-Z][a-z]+ \d{1,2},? \d{4})").unwrap());
+    let mut out = HashMap::new();
+    for c in ENTRY.captures_iter(html) {
+        let head = strip_tags(&c[1].replace("&#8211;", " "));
+        let Some(v) = VER.captures(&head) else { continue };
+        let body = &c[2];
+        let body = body.find("Changelog").map(|i| &body[i..]).unwrap_or(body);
+        let lines = items(body);
+        if !lines.is_empty() {
+            out.insert(v[1].to_string(), Notes { date: WHEN.captures(&head).and_then(|d| parse_date(&d[1])), lines, url: None });
+        }
+    }
     out
 }
 
-async fn blender_fixes(series: &str) -> HashMap<String, Notes> {
+/// The releases of a docs "corrective releases" page: an h1 or h2 "Blender 3.5.1" per release.
+pub fn blender_corrective(html: &str) -> HashMap<String, Notes> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static HEAD: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?s)<h[12][^>]*id="blender-\d+"[^>]*>\s*Blender\s+([0-9.]+)"#).unwrap());
+    static RELEASED: Lazy<Regex> = Lazy::new(|| Regex::new(r"Released on ([A-Za-z]+ \d+(?:st|nd|rd|th)?,? \d{4})").unwrap());
+    let starts: Vec<(usize, String)> = HEAD.captures_iter(html).map(|c| (c.get(0).unwrap().start(), c[1].trim_end_matches('.').to_string())).collect();
     let mut out = HashMap::new();
-    let lts_url = format!("https://www.blender.org/download/lts/{}/", series.replace('.', "-"));
-    if let Some(html) = page(&lts_url).await {
-        // Two layouts: "Blender 4.5.14 LTS<span>September 15, 2026</span>" and
-        // "Blender 4.2.23 LTS &#8211; July 21, 2026" followed by Download and Changelog lists.
-        let re = regex::Regex::new(r"(?s)<summary[^>]*>(.*?)</summary>(.*?)</details>").unwrap();
-        let ver = regex::Regex::new(r"Blender\s+([0-9]+\.[0-9]+\.[0-9]+)").unwrap();
-        let when = regex::Regex::new(r"([A-Z][a-z]+ \d{1,2},? \d{4})").unwrap();
-        for c in re.captures_iter(&html) {
-            let head = strip_tags(&c[1].replace("&#8211;", " "));
-            let Some(v) = ver.captures(&head) else { continue };
-            let body = &c[2];
-            let body = body.find("Changelog").map(|i| &body[i..]).unwrap_or(body);
-            out.insert(v[1].to_string(), Notes { date: when.captures(&head).and_then(|d| parse_date(&d[1])), lines: items(body) });
-        }
-    }
-    if out.is_empty() {
-        let url = format!("https://developer.blender.org/docs/release_notes/{series}/corrective_releases/");
-        if let Some(html) = page(&url).await {
-            let h = regex::Regex::new(r#"(?s)<h2[^>]*id="blender-\d+"[^>]*>\s*Blender\s+([0-9.]+)"#).unwrap();
-            let starts: Vec<(usize, String)> = h.captures_iter(&html).map(|c| (c.get(0).unwrap().start(), c[1].to_string())).collect();
-            for (k, (pos, ver)) in starts.iter().enumerate() {
-                let end = starts.get(k + 1).map(|s| s.0).unwrap_or(html.len());
-                let block = &html[*pos..end];
-                let date = regex::Regex::new(r"Released on ([A-Za-z]+ \d+(?:st|nd|rd|th)?,? \d{4})").unwrap().captures(block).and_then(|c| parse_date(&c[1]));
-                out.insert(ver.clone(), Notes { date, lines: items(block) });
-            }
+    for (k, (pos, ver)) in starts.iter().enumerate() {
+        let end = starts.get(k + 1).map(|s| s.0).unwrap_or(html.len());
+        let block = &html[*pos..end];
+        let lines = items(block);
+        if !lines.is_empty() {
+            out.insert(ver.clone(), Notes { date: RELEASED.captures(block).and_then(|c| parse_date(&c[1])), lines, url: None });
         }
     }
     out
+}
+
+/// The fix lists from the first page that has them: blender.org/releases/<x-y>/ (4.5 and newer),
+/// the LTS page, then the docs' corrective releases page.
+async fn blender_fixes(series: &str) -> (HashMap<String, Notes>, Option<String>) {
+    let dash = series.replace('.', "-");
+    let mut pages = vec![];
+    if !version::newer("4.5", series) {
+        pages.push(format!("https://www.blender.org/releases/{dash}/"));
+    }
+    pages.push(format!("https://www.blender.org/download/lts/{dash}/"));
+    for url in pages {
+        if let Some(html) = page(&url).await {
+            let found = blender_summaries(&html);
+            if !found.is_empty() {
+                return (found, Some(url));
+            }
+        }
+    }
+    let url = format!("https://developer.blender.org/docs/release_notes/{series}/corrective_releases/");
+    if let Some(html) = page(&url).await {
+        let found = blender_corrective(&html);
+        if !found.is_empty() {
+            return (found, Some(url));
+        }
+    }
+    (HashMap::new(), None)
 }
 
 /// A page and the address it ended up at after redirects (Adobe's short links redirect to
@@ -334,10 +389,363 @@ fn adobe_from_version_page(html: &str, ver: &str) -> (Vec<String>, Option<String
     (vec![], None)
 }
 
-/// Adobe notes for one version. The catalog's release notes link leads to a product page that
-/// links one page per minor version ("version-12-2"); older products use one long page with a
-/// heading per version.
+/// A page that many versions read at once (25 versions of one app are filled in together): one
+/// fetch per address at a time, kept for ten minutes, so the others wait for it instead of
+/// fetching it again. A failed fetch is kept for a minute.
+async fn page_shared(url: &str) -> Option<std::sync::Arc<String>> {
+    use once_cell::sync::Lazy;
+    use std::sync::Arc;
+    use std::time::Instant;
+    type Slot = Arc<tokio::sync::Mutex<Option<(Instant, Option<Arc<String>>)>>>;
+    static PAGES: Lazy<parking_lot::Mutex<HashMap<String, Slot>>> = Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+    let slot = PAGES.lock().entry(url.to_string()).or_default().clone();
+    let mut held = slot.lock().await;
+    if let Some((at, body)) = held.as_ref() {
+        let keep = if body.is_some() { 600 } else { 60 };
+        if at.elapsed() < Duration::from_secs(keep) {
+            return body.clone();
+        }
+    }
+    let body = page(url).await.map(Arc::new);
+    *held = Some((Instant::now(), body.clone()));
+    body
+}
+
+/// Where `ver` stands in `text` as a whole version: "27.11" also written "v27.11", "16.0.0" also
+/// written "16.0". Not inside a longer version ("27.11.1", "127.11") or a build ("27.0x41").
+/// The byte range of the match.
+fn version_at(text: &str, ver: &str) -> Option<(usize, usize)> {
+    let mut forms = vec![ver.trim().to_string()];
+    let mut short = forms[0].clone();
+    while let Some(s) = short.strip_suffix(".0").filter(|s| s.contains('.')) {
+        short = s.to_string();
+        forms.push(short.clone());
+    }
+    for f in &forms {
+        let mut from = 0;
+        while let Some(i) = text[from..].find(f.as_str()) {
+            let (s, e) = (from + i, from + i + f.len());
+            from = e;
+            let mut before = text[..s].chars().rev();
+            let b = match before.next() {
+                Some('v' | 'V') => before.next(),
+                c => c,
+            };
+            let mut after = text[e..].chars();
+            let a = after.next();
+            let before_ok = b.is_none_or(|c| !c.is_alphanumeric() && c != '.');
+            let after_ok = match a {
+                None => true,
+                Some('.') => after.next().is_none_or(|c| !c.is_ascii_digit()),
+                Some(c) => !c.is_alphanumeric(),
+            };
+            if before_ok && after_ok {
+                return Some((s, e));
+            }
+        }
+    }
+    None
+}
+
+/// One announcement in an Adobe community category.
+#[derive(Clone, Debug, Default)]
+pub struct Topic {
+    pub title: String,
+    pub published: Option<String>,
+    pub url: Option<String>,
+    pub content: String,
+}
+
+/// The topics of one page of an Adobe community category ("community.adobe.com/announcements-710")
+/// and the category's number of pages. The page carries its list as JSON in the `data-props`
+/// attribute of the CategoryTopicList module, with each post's full HTML in `content`.
+pub fn community_page(html: &str) -> Option<(Vec<Topic>, u32)> {
+    let at = html.find(r#"data-preact="destination/modules/Content/TopicList/CategoryTopicList""#)?;
+    let tag_end = html[at..].find('>').map(|i| at + i)?;
+    let tag = &html[at..tag_end];
+    let props = tag.find(r#"data-props=""#).map(|i| &tag[i + 12..])?;
+    let props = &props[..props.find('"')?];
+    let v: serde_json::Value = serde_json::from_str(&unescape_html(props)).ok()?;
+    let topics = v["topics"]
+        .as_array()?
+        .iter()
+        .map(|t| Topic {
+            title: t["title"].as_str().unwrap_or("").to_string(),
+            published: t["publishedAt"].as_str().and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok()).map(|d| d.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            url: t["topicUrl"]["destination"].as_str().map(String::from),
+            content: t["content"].as_str().unwrap_or("").to_string(),
+        })
+        .collect();
+    Some((topics, v["totalPageCount"].as_u64().unwrap_or(1) as u32))
+}
+
+/// HTML entities of an attribute value: named ones and numeric (&#34; &#x22;).
+fn unescape_html(s: &str) -> String {
+    use once_cell::sync::Lazy;
+    static ENTITY: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);").unwrap());
+    ENTITY
+        .replace_all(s, |c: &regex::Captures| {
+            let e = &c[1];
+            let ch = if let Some(h) = e.strip_prefix("#x").or_else(|| e.strip_prefix("#X")) {
+                u32::from_str_radix(h, 16).ok().and_then(char::from_u32)
+            } else if let Some(d) = e.strip_prefix('#') {
+                d.parse().ok().and_then(char::from_u32)
+            } else {
+                match e {
+                    "quot" => Some('"'),
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "apos" => Some('\''),
+                    "nbsp" => Some('\u{a0}'),
+                    "ndash" => Some('\u{2013}'),
+                    "mdash" => Some('\u{2014}'),
+                    "hellip" => Some('\u{2026}'),
+                    "lsquo" => Some('\u{2018}'),
+                    "rsquo" => Some('\u{2019}'),
+                    "ldquo" => Some('\u{201c}'),
+                    "rdquo" => Some('\u{201d}'),
+                    _ => None,
+                }
+            };
+            ch.map(String::from).unwrap_or_else(|| c[0].to_string())
+        })
+        .into_owned()
+}
+
+/// How well an announcement title names release `ver` of the app called `names`: None when it
+/// does not name that exact version, or is about something else ("27.10 and above", a beta of a
+/// release app, system requirements). Higher when the app name stands right before the version
+/// ("Photoshop v27.6", "Adobe Premiere 26.5") and when the title starts with it.
+fn community_score(title: &str, ver: &str, names: &[&str], beta: bool) -> Option<u8> {
+    let low = title.to_lowercase();
+    let (s, e) = version_at(&low, ver)?;
+    let after = low[e..].trim_start();
+    if ["and above", "and later", "or later", "and newer", "or newer", "+"].iter().any(|w| after.starts_with(w)) {
+        return None;
+    }
+    if (!beta && low.contains("beta")) || ["sdk", "requirement", "no longer", "removed", "retire"].iter().any(|w| low.contains(w)) {
+        return None;
+    }
+    let before = low[..s].trim_end().trim_end_matches(['v', '(']).trim_end().trim_end_matches("version").trim_end();
+    let start = low.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let start = start.strip_prefix("adobe ").unwrap_or(start);
+    let mut score = 1;
+    if names.iter().any(|n| before.ends_with(&n.to_lowercase())) {
+        score += 2;
+    }
+    if names.iter().any(|n| start.starts_with(&n.to_lowercase())) {
+        score += 1;
+    }
+    (score >= 2).then_some(score)
+}
+
+/// The announcement of release `ver`: the best scoring title, the earliest post among equals
+/// (the release post comes before the follow-up articles).
+pub fn community_pick<'a>(topics: &'a [Topic], ver: &str, names: &[&str], beta: bool) -> Option<&'a Topic> {
+    // Posts name releases by up to three parts; Creative Cloud's newest is a full build ("6.11.0.478.6").
+    let ver = &version::trim_like(ver, "1.2.3");
+    topics
+        .iter()
+        .filter_map(|t| community_score(&t.title, ver, names, beta).map(|s| (s, t)))
+        .max_by(|(a, x), (b, y)| a.cmp(b).then_with(|| y.published.cmp(&x.published)))
+        .map(|(_, t)| t)
+}
+
+/// An announcement's body as notes: its sections and items, without the closing "Download",
+/// "Join the conversation" and feedback parts.
+pub fn community_body(content: &str) -> Vec<String> {
+    const END: &[&str] = &["join the conversation", "share your feedback", "get started", "how to update", "we want to hear", "tell us what you think"];
+    const SKIP: &[&str] = &["download", "click here", "learn more", "to get ", "to update", "update to ", "if you found this", "for the full list", "for more details", "note: as always", "read more"];
+    let mut out = Vec::new();
+    for l in outline(content) {
+        // Also past a leading emoji ("👉 Download the latest version").
+        let low = l.trim_start_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if END.iter().any(|w| low.starts_with(w)) {
+            break;
+        }
+        if !SKIP.iter().any(|w| low.starts_with(w)) {
+            out.push(l);
+        }
+    }
+    tidy_headings(out)
+}
+
+/// The announcement of `ver` in community category `id`: read page by page (at most three) until
+/// it turns up. Pages are shared by all the versions of the app and kept for half an hour.
+async fn community(id: u32, ver: &str) -> Option<Notes> {
+    use once_cell::sync::Lazy;
+    use std::sync::Arc;
+    use std::time::Instant;
+    const PAGES: u32 = 3;
+    #[derive(Default)]
+    struct Forum {
+        topics: Vec<Topic>,
+        read: u32,
+        total: u32,
+        at: Option<Instant>,
+    }
+    static FORUMS: Lazy<parking_lot::Mutex<HashMap<u32, Arc<tokio::sync::Mutex<Forum>>>>> = Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+    let (names, beta) = crate::sources::adobe::community_names(id)?;
+    let slot = FORUMS.lock().entry(id).or_default().clone();
+    let mut f = slot.lock().await;
+    if f.at.is_none_or(|t| t.elapsed() > Duration::from_secs(1800)) {
+        *f = Forum { at: Some(Instant::now()), total: 1, ..Default::default() };
+    }
+    loop {
+        if let Some(t) = community_pick(&f.topics, ver, names, beta) {
+            let lines = community_body(&t.content);
+            return Some(Notes { date: t.published.clone(), lines, url: t.url.clone() }).filter(|n| !n.lines.is_empty());
+        }
+        if f.read >= f.total.min(PAGES) {
+            return None;
+        }
+        // Plain category pages only: the site's robots rules exclude its search and sort links.
+        let url = match f.read {
+            0 => format!("https://community.adobe.com/announcements-{id}"),
+            n => format!("https://community.adobe.com/announcements-{id}/index{}.html", n + 1),
+        };
+        f.read += 1;
+        // Not kept on disk (about 2 MB a page): the topics stay in memory, the notes in core's cache.
+        let Some((topics, total)) = fetch_page(&url).await.and_then(|h| community_page(&h)) else {
+            // Tried again in a minute rather than in half an hour.
+            f.at = Instant::now().checked_sub(Duration::from_secs(1740));
+            return None;
+        };
+        f.total = total.max(1);
+        f.topics.extend(topics);
+    }
+}
+
+/// Steam news (BBCode) as markdown-like text for `text_lines`: list items as "- " lines, headings
+/// as "## " lines, every other tag dropped.
+fn bbcode_text(s: &str) -> String {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static HEAD: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)\[h[1-3]\](.*?)\[/h[1-3]\]").unwrap());
+    static IMG: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)\[(img|previewyoutube|video)[^\]]*\].*?\[/(img|previewyoutube|video)\]").unwrap());
+    static TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[/?[a-zA-Z0-9]+(=[^\]]*)?\]").unwrap());
+    let t = HEAD.replace_all(s, "\n## $1\n");
+    let t = IMG.replace_all(&t, "");
+    let t = t.replace("[*]", "\n- ").replace("[/*]", "\n").replace("[/p]", "\n").replace("[br]", "\n");
+    let t = t.replace("[list]", "\n").replace("[/list]", "\n").replace("[olist]", "\n").replace("[/olist]", "\n");
+    TAG.replace_all(&t, "").into_owned()
+}
+
+/// The Steam news item for release `ver` (a title such as "Modeler 1.22.7" or "1.18 Release"),
+/// the longest when several name it.
+pub fn steam_news(json: &str, ver: &str) -> Option<Notes> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let item = v["appnews"]["newsitems"]
+        .as_array()?
+        .iter()
+        .filter(|n| version_at(n["title"].as_str().unwrap_or(""), ver).is_some())
+        .max_by_key(|n| n["contents"].as_str().map_or(0, str::len))?;
+    let lines = text_lines(&bbcode_text(item["contents"].as_str().unwrap_or("")));
+    if lines.is_empty() {
+        return None;
+    }
+    let date = item["date"].as_i64().and_then(|d| chrono::DateTime::from_timestamp(d, 0)).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    // Not the item's own address: Steam gives a CDN redirect; the store's news page stays the link.
+    Some(Notes { date, lines, url: None })
+}
+
+/// The section for `ver` of a Substance 3D "All changes" page in markdown: "### **6.0.4**" (or
+/// "### 5.1.0 ILE FLOTTANTE"), a release date, then "**Added:**" / "**Fixed:**" blocks of
+/// "\[Area] text" lines or ASCII table "List" cells, as "## Added" sections and lines.
+pub fn substance_changes(md: &str, ver: &str) -> Option<Notes> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static RELEASED: Lazy<Regex> = Lazy::new(|| Regex::new(r"Released:?\s*([A-Z][a-z]+ \d{1,2}(?:st|nd|rd|th)?,? \d{4})").unwrap());
+    static YMD: Lazy<Regex> = Lazy::new(|| Regex::new(r"Release date:\W*(\d{4})/(\d{1,2})/(\d{1,2})").unwrap());
+    static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\*\*([^*]{2,60}?):?\*\*:?$").unwrap());
+    static ESCAPE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\([\[\]_*`#<>()+\-.!|~])").unwrap());
+    static IMG: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap());
+    static LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+    let lines: Vec<&str> = md.lines().collect();
+    let heading_ver = |l: &str| -> Option<String> {
+        let t = l.strip_prefix("### ")?.replace("**", "");
+        t.split_whitespace().next().filter(|w| is_version(w)).map(String::from)
+    };
+    let start = lines.iter().position(|l| heading_ver(l).is_some_and(|v| version::cmp(&v, ver).is_eq()))?;
+    let end = lines[start + 1..].iter().position(|l| l.starts_with('#')).map(|i| start + 1 + i).unwrap_or(lines.len());
+    let mut date = None;
+    let mut out: Vec<String> = Vec::new();
+    // An item of a table cell can wrap onto the next row.
+    let mut in_item = false;
+    for raw in &lines[start + 1..end] {
+        let l = raw.trim();
+        let table = l.starts_with('|');
+        let cell = l.trim_matches('|').trim().trim_end_matches('\\').trim();
+        if cell.is_empty() || l.starts_with("+-") || l.starts_with("+=") || l == "---" || cell == "List" {
+            in_item = false;
+            continue;
+        }
+        if date.is_none() {
+            if let Some(c) = RELEASED.captures(cell) {
+                date = parse_date(&c[1]);
+                continue;
+            }
+            if let Some(c) = YMD.captures(cell) {
+                date = Some(format!("{}-{:0>2}-{:0>2}T00:00:00Z", &c[1], &c[2], &c[3]));
+                continue;
+            }
+        }
+        if cell.starts_with("Summary:") {
+            continue;
+        }
+        if let Some(c) = BOLD.captures(cell) {
+            out.push(format!("## {}", c[1].trim()));
+            in_item = false;
+            continue;
+        }
+        let text = IMG.replace_all(cell, "");
+        let text = LINK.replace_all(&text, "$1");
+        let text = ESCAPE.replace_all(&text, "$1").replace("**", "");
+        if let Some(item) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+            out.push(item.trim().to_string());
+            in_item = table;
+        } else if table && in_item {
+            if let Some(last) = out.last_mut() {
+                last.push(' ');
+                last.push_str(text.trim());
+            }
+        } else {
+            out.push(text.trim().to_string());
+            in_item = false;
+        }
+    }
+    let out: Vec<String> = out.into_iter().map(|l| strip_tags(&l).trim_end_matches('.').trim().to_string()).filter(|l| !l.is_empty()).take(MAX_LINES).collect();
+    let out = tidy_headings(out);
+    (!out.is_empty()).then_some(Notes { date, lines: out, url: None })
+}
+
+/// Adobe notes for one version, by the kind of release notes link the app has: an Adobe community
+/// announcements category, Steam news, a Substance 3D "All changes" page, or a product page.
 pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
+    if let Some(id) = notes_url.strip_prefix("https://community.adobe.com/announcements-").and_then(|r| r.trim_end_matches('/').parse::<u32>().ok()) {
+        return community(id, ver).await;
+    }
+    if let Some(app) = notes_url.strip_prefix("https://store.steampowered.com/news/app/").and_then(|r| r.trim_end_matches('/').parse::<u32>().ok()) {
+        let api = format!("https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid={app}&count=20&maxlength=0&format=json");
+        return steam_news(&page_shared(&api).await?, ver);
+    }
+    if notes_url.starts_with("https://experienceleague.adobe.com/") && notes_url.trim_end_matches('/').ends_with("/all-changes") {
+        let md = page_shared(&format!("{}.md", notes_url.trim_end_matches('/'))).await;
+        if let Some(n) = md.and_then(|md| substance_changes(&md, ver)) {
+            return Some(n);
+        }
+        return match crate::sources::adobe::community_fallback(notes_url) {
+            Some(id) => community(id, ver).await,
+            None => None,
+        };
+    }
+    adobe_product_page(notes_url, ver).await
+}
+
+/// Notes from an Adobe product page: it links one page per minor version ("version-12-2"); older
+/// products use one long page with a heading per version.
+async fn adobe_product_page(notes_url: &str, ver: &str) -> Option<Notes> {
     let (final_url, html) = page_final(notes_url).await?;
     let p = version::parts(ver);
     let minor = format!("{}-{}", p.first().copied().unwrap_or(0), p.get(1).copied().unwrap_or(0));
@@ -356,7 +764,7 @@ pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
         if let Some((_, vp)) = page_final(&url).await {
             let (lines, date) = adobe_from_version_page(&vp, ver);
             if !lines.is_empty() {
-                return Some(Notes { date, lines });
+                return Some(Notes { date, lines, url: None });
             }
         }
     }
@@ -369,15 +777,13 @@ pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
             let stop = heads.get(k + 1).map(|n| n.2).unwrap_or(html.len());
             let lines: Vec<String> = items(&html[h.3..stop]);
             if !lines.is_empty() {
-                return Some(Notes { date: None, lines });
+                return Some(Notes { date: None, lines, url: None });
             }
         }
     }
     None
 }
 
-/// The change list of a Krita release post: the list items under its "Changelog" heading.
-/// Krita answers unknown posts with a normal page titled "404 Page not found", so that gives none.
 /// Unity Hub's release notes page: every version with its date and full change list.
 /// The page is a list of `<h2>3.22.3</h2>` headings, each followed by "October 13, 2026" and lists.
 pub fn unity_hub(html: &str) -> Vec<(String, Option<String>, Vec<String>)> {
@@ -404,29 +810,125 @@ pub fn unity_hub(html: &str) -> Vec<(String, Option<String>, Vec<String>)> {
     out
 }
 
+/// The change list of a Krita release post: the list items under its "Changelog", "Changes
+/// since ..." or "Bug fixes" heading; in posts without one, the list items between the title and
+/// the first "Download" heading. Krita answers unknown posts with a normal page titled "404 Page
+/// not found", so that gives none.
 pub fn krita_changelog(html: &str) -> Vec<String> {
     if html.contains("<title>404") {
         return vec![];
     }
     let heads = headings(html);
-    let Some(k) = heads.iter().position(|h| h.1.trim().eq_ignore_ascii_case("changelog")) else { return vec![] };
-    let level = heads[k].0;
-    let stop = heads[k + 1..].iter().find(|h| h.0 <= level).map(|h| h.2).unwrap_or(html.len());
-    items(&html[heads[k].3..stop])
+    let named = |t: &str| {
+        let t = t.trim().to_lowercase();
+        ["changelog", "changes since", "bug fixes", "bugfixes"].iter().any(|w| t.starts_with(w))
+    };
+    if let Some(k) = heads.iter().position(|h| h.0 >= 2 && named(&h.1)) {
+        let level = heads[k].0;
+        let stop = heads[k + 1..].iter().find(|h| h.0 <= level).map(|h| h.2).unwrap_or(html.len());
+        let lines = items(&html[heads[k].3..stop]);
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+    let Some(h1) = heads.iter().find(|h| h.0 == 1) else { return vec![] };
+    let Some(download) = heads.iter().find(|h| h.2 > h1.2 && h.0 == 2 && h.1.to_lowercase().contains("download")) else { return vec![] };
+    items(&html[h1.3..download.2])
 }
 
-/// Krita's post for a release. Posts are named with dots for recent releases and dashes for old
-/// ones, under the year they came out. Returns the post address and its change list.
+/// The post that announces Krita `ver`: 6.0.N comes out with 5.3.N and is announced in its post
+/// ("Download 6.0.4" under "Krita 5.3.4 Released!").
+fn krita_post_version(ver: &str) -> String {
+    match ver.strip_prefix("6.0.") {
+        Some(rest) => format!("5.3.{rest}"),
+        None => ver.to_string(),
+    }
+}
+
+/// Addresses in a sitemap.
+fn sitemap_locs(xml: &str) -> Vec<&str> {
+    use once_cell::sync::Lazy;
+    static LOC: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"<loc>\s*([^<\s]+)\s*</loc>").unwrap());
+    LOC.captures_iter(xml).map(|c| c.get(1).unwrap().as_str()).collect()
+}
+
+/// Names a Krita page may use for `ver`: "5.2.9", "5-2-9", and for x.y.0 also "5.2" and "5-2".
+fn krita_names(ver: &str) -> Vec<String> {
+    let mut forms = vec![ver.to_string()];
+    let mut short = ver.to_string();
+    while let Some(s) = short.strip_suffix(".0").filter(|s| s.contains('.')) {
+        short = s.to_string();
+        forms.push(short.clone());
+    }
+    forms.iter().flat_map(|f| [f.clone(), f.replace('.', "-")]).collect()
+}
+
+/// The release post of Krita `ver` in krita.org's sitemap ("/posts/2026/krita-5.3.4-released/",
+/// "/posts/2025/krita-5-2-9-released/").
+pub fn krita_post_url(sitemap: &str, ver: &str) -> Option<String> {
+    let locs = sitemap_locs(sitemap);
+    krita_names(ver).iter().find_map(|n| {
+        let tail = format!("/krita-{n}-released/");
+        locs.iter().find(|l| l.contains("/posts/") && l.ends_with(&tail)).map(|l| l.to_string())
+    })
+}
+
+/// The release notes page of Krita series x.y in the sitemap ("/release-notes/krita-5-3-release-notes/").
+pub fn krita_notes_url(sitemap: &str, ver: &str) -> Option<String> {
+    let p = version::parts(ver);
+    let (x, y) = (p.first().copied().unwrap_or(0), p.get(1).copied().unwrap_or(0));
+    let locs = sitemap_locs(sitemap);
+    [format!("/krita-{x}-{y}-release-notes/"), format!("/krita-{x}-{y}-0-release-notes/")]
+        .iter()
+        .find_map(|tail| locs.iter().find(|l| l.ends_with(tail.as_str())).map(|l| l.to_string()))
+}
+
+/// A Krita release notes page as notes: its sections and paragraphs, up to the contributors.
+pub fn krita_release_notes(html: &str) -> Vec<String> {
+    if html.contains("<title>404") {
+        return vec![];
+    }
+    let from = html.find("<h1").unwrap_or(0);
+    let to = html[from..].find("<footer").map(|i| from + i).unwrap_or(html.len());
+    let mut out = Vec::new();
+    for l in outline(&html[from..to]) {
+        let low = l.to_lowercase();
+        if l.starts_with('#') && (low.trim_start_matches(['#', ' ']).starts_with("contributors") || low.contains("like what we are doing")) {
+            break;
+        }
+        // The fallback text of an embedded video.
+        if !low.contains("your browser does not seem to support") {
+            out.push(l);
+        }
+    }
+    tidy_headings(out)
+}
+
+/// Krita's notes for a release: the change list of its post, found through krita.org's sitemap
+/// (or, without it, under the names posts usually have in the release year). A first release
+/// (x.y.0) whose post has no list gets the series' release notes page. Returns the page address
+/// and the lines.
 pub async fn krita(ver: &str, year: i32) -> Option<(String, Vec<String>)> {
-    for y in [year, year - 1] {
-        for name in [ver.to_string(), ver.replace('.', "-")] {
-            let url = format!("https://krita.org/en/posts/{y}/krita-{name}-released/");
-            if let Some(html) = page(&url).await {
-                let lines = krita_changelog(&html);
-                if !lines.is_empty() {
-                    return Some((url, lines));
-                }
+    let post_ver = krita_post_version(ver);
+    let sitemap = page_shared("https://krita.org/en/sitemap.xml").await;
+    let posts: Vec<String> = match &sitemap {
+        Some(s) => krita_post_url(s, &post_ver).into_iter().collect(),
+        None => [year, year - 1].iter().flat_map(|y| [post_ver.clone(), post_ver.replace('.', "-")].map(|n| format!("https://krita.org/en/posts/{y}/krita-{n}-released/"))).collect(),
+    };
+    for url in posts {
+        if let Some(html) = page(&url).await {
+            let lines = krita_changelog(&html);
+            if !lines.is_empty() {
+                return Some((url, lines));
             }
+        }
+    }
+    let p = version::parts(&post_ver);
+    if p.len() <= 3 && p.get(2).copied().unwrap_or(0) == 0 {
+        let url = krita_notes_url(sitemap.as_deref()?, &post_ver)?;
+        let lines = krita_release_notes(&page(&url).await?);
+        if !lines.is_empty() {
+            return Some((url, lines));
         }
     }
     None
@@ -770,5 +1272,160 @@ mod tests {
     fn parses_dates() {
         assert_eq!(parse_date("September 15, 2026").as_deref(), Some("2026-09-15T00:00:00Z"));
         assert_eq!(parse_date("May 19th 2026").as_deref(), Some("2026-05-19T00:00:00Z"));
+    }
+
+    /// An Adobe community category page: the topic list is JSON in an HTML-escaped attribute.
+    fn community_html(topics: serde_json::Value, pages: u32) -> String {
+        let props = serde_json::json!({ "topics": topics, "totalPageCount": pages, "nextPageUrl": null }).to_string();
+        let esc = props.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+        format!(r#"<html><body><div class="widget-placeholder"><div data-preact="destination/modules/Content/TopicList/CategoryTopicList" class="" data-props="{esc}"></div></div></body></html>"#)
+    }
+
+    #[test]
+    fn adobe_community_announcements_give_the_post_of_each_release() {
+        let body = r#"<p>The September 2026 release of Photoshop 27.11 introduces Enhance Edge&nbsp;and more.</p><p><a href="x">Click here for more details</a>.</p><h3><span>Bug fixes &#8211; Thanks to you!</span></h3><ul><li><a href="y">Canvas Size dialog did not retain the previously used units.</a></li><li>Edit &gt; Stroke used the previously selected color.</li></ul><section class="callout"><p>👉 Download the latest version of Photoshop here.<br />To get Photoshop 27.11, open the Creative Cloud desktop app.</p></section><h3>Join the conversation</h3><p>Have you tried Enhance Edge in your workflow? Tell us.</p>"#;
+        let topic = |title: &str, at: &str, content: &str| serde_json::json!({ "title": title, "publishedAt": at, "contentType": "productUpdate", "topicUrl": { "destination": format!("https://community.adobe.com/announcements-710/{}", title.len()) }, "content": content });
+        let html = community_html(
+            serde_json::json!([
+                topic("Edit your photos with a text prompt with Prompt to Edit in Photoshop 27.10 and above", "2026-09-17T20:09:27+02:00", "<p>Not the release post at all</p>"),
+                topic("Photoshop 27.11: Enhance Edge, GPT Image 2, and more!", "2026-10-05T14:43:44+00:00", body),
+                topic("Meet Photoshop's AI Assisted Editor (Beta) : Edit Images in Photoshop 27.10", "2026-09-03T19:51:46+02:00", "<p>A beta feature post, not the release</p>"),
+                topic("See your designs from a whole new angle with Rotate Objects in Photoshop 27.6", "2026-05-12T14:41:24+02:00", "<p>A follow up article about one feature</p>"),
+                topic("Photoshop v27.6 Is Live! Rotate in 3D, Clean Up Faster", "2026-04-28T15:12:36+02:00", "<p>Rotate objects in 3D and clean up faster</p>"),
+                topic("Alert: If you updated to Sonoma 14.2 please install the update", "2023-12-04T10:00:00+00:00", "<p>Not about this app's version</p>"),
+            ]),
+            2,
+        );
+        let (topics, pages) = community_page(&html).expect("topic list");
+        assert_eq!((topics.len(), pages), (6, 2));
+        assert_eq!(topics[1].published.as_deref(), Some("2026-10-05T14:43:44Z"));
+        let names = ["Photoshop"];
+        let pick = |v: &str| community_pick(&topics, v, &names, false).map(|t| t.title.clone());
+        assert_eq!(pick("27.11").as_deref(), Some("Photoshop 27.11: Enhance Edge, GPT Image 2, and more!"));
+        // The release post wins over a later article about one of its features.
+        assert_eq!(pick("27.6").as_deref(), Some("Photoshop v27.6 Is Live! Rotate in 3D, Clean Up Faster"));
+        // "27.10 and above" and a beta post are not the 27.10 release; no exact post, no notes.
+        assert_eq!(pick("27.10"), None);
+        assert_eq!(pick("27.1"), None);
+        assert_eq!(pick("14.2"), None);
+        assert_eq!(
+            community_body(&topics[1].content),
+            vec![
+                "The September 2026 release of Photoshop 27.11 introduces Enhance Edge and more",
+                "## Bug fixes - Thanks to you!",
+                "Canvas Size dialog did not retain the previously used units",
+                "Edit > Stroke used the previously selected color",
+            ]
+        );
+        // Betas: posts of beta builds, matched by the exact build.
+        let beta = vec![Topic { title: "Beta Build 30.8.28 Release Notes".into(), ..Default::default() }, Topic { title: "AE Beta 27.0x41 - Audio De-esser".into(), ..Default::default() }];
+        assert!(community_pick(&beta, "30.8.28", &["Beta Build"], true).is_some());
+        assert!(community_pick(&beta, "27.0", &["AE Beta"], true).is_none());
+        let cc = vec![Topic { title: "Creative Cloud Desktop v6.11 has been released!".into(), ..Default::default() }];
+        assert!(community_pick(&cc, "6.11.0.478.6", &["Creative Cloud Desktop"], false).is_some());
+        assert!(community_page("<html>no list</html>").is_none());
+    }
+
+    #[test]
+    fn whole_versions_in_titles() {
+        assert_eq!(version_at("Adobe Bridge 16.0 is now available", "16.0.0"), Some((13, 17)));
+        assert!(version_at("Photoshop v27.6 Is Live", "27.6").is_some());
+        assert!(version_at("Photoshop 27.6.1", "27.6").is_none());
+        assert!(version_at("Photoshop 127.6", "27.6").is_none());
+        assert!(version_at("AE Beta 27.0x41", "27.0").is_none());
+        assert!(version_at("Released 1.22.", "1.22.0").is_some());
+    }
+
+    #[test]
+    fn steam_news_items_by_version() {
+        let json = serde_json::json!({ "appnews": { "newsitems": [
+            { "title": "Security updates", "date": 1791326577, "contents": "We released a security patch for Modeler." },
+            { "title": "Modeler 1.21.0", "date": 1741711548, "contents": "Short note." },
+            { "title": "Modeler 1.21.0 Released", "date": 1741711916, "url": "https://store.steampowered.com/news/app/1745780/view/1", "contents": "[p]New in this release:[/p][list][*]Primitives can be [b]beveled[/b][/*][*]Faster [url=https://x.y]export[/url][/*][/list][img]{STEAM_CLAN_IMAGE}/x.png[/img]" },
+            { "title": "1.18 Release", "date": 1736360134, "contents": "Bug fixes and a new brush." }
+        ] } })
+        .to_string();
+        let n = steam_news(&json, "1.21.0").expect("1.21.0");
+        assert_eq!(n.lines, vec!["New in this release", "Primitives can be beveled", "Faster export"]);
+        assert_eq!(n.date.as_deref(), Some("2025-03-11T16:51:56Z"));
+        assert_eq!(steam_news(&json, "1.18.0").unwrap().lines, vec!["Bug fixes and a new brush"]);
+        assert!(steam_news(&json, "1.22.8").is_none());
+    }
+
+    #[test]
+    fn substance_all_changes_markdown() {
+        let sampler = "## Version 6\n\n### **6.0.4**\n\n*(Released: September 24th, 2026)*\n\n**Changed**\\\n\\[Engine] Update Substance Engine to 9.6.1\\\n\n**Fixed**\\\n\\[Layers] Crash when adding image to emboss mask\\\n\\[Security] General fixes\n\n### **6.0.2**\n\n*(Released: June 25th, 2026)*\n\n**Added:**\n\n+------------------------------+\n| List                         |\n+------------------------------+\n| - \\[Assets] Check sbsar      |\n|   version and warn users     |\n| - \\[Captis] Add back option \\+ more |\n+------------------------------+\n\n## Version 5\n\n### **5.1.0 \u{ce}LE FLOTTANTE**\n\n**Fixed:**\n\n\\[UI] A fix\n\n### **4.2 DORAYAKI**\n\n**Fixed:**\n\n- See [the docs](/en/docs/x) for the new filter\n";
+        let n = substance_changes(sampler, "6.0.4").expect("6.0.4");
+        assert_eq!(n.lines, vec!["## Changed", "[Engine] Update Substance Engine to 9.6.1", "## Fixed", "[Layers] Crash when adding image to emboss mask", "[Security] General fixes"]);
+        assert_eq!(n.date.as_deref(), Some("2026-09-24T00:00:00Z"));
+        // Table cells, an item wrapped onto the next row, escapes.
+        assert_eq!(substance_changes(sampler, "6.0.2").unwrap().lines, vec!["[Assets] Check sbsar version and warn users", "[Captis] Add back option + more"]);
+        // A release name after the version, and "4.2" for 4.2.0.
+        assert_eq!(substance_changes(sampler, "5.1.0").unwrap().lines, vec!["[UI] A fix"]);
+        assert_eq!(substance_changes(sampler, "4.2.0").unwrap().lines, vec!["See the docs for the new filter"]);
+        assert!(substance_changes(sampler, "6.0.3").is_none());
+        // Painter's shape: a release date line and a summary.
+        let painter = "### 12.1.5\n\nRelease date: **2026/09/15**\n\nSummary: **Minor release**\n\n**Fixed:**\n\n+----+\n| List |\n+----+\n| - Export image from shelf to a network does not work anymore |\n+----+\n\n---\n\n### 12.1.4\n";
+        let n = substance_changes(painter, "12.1.5").unwrap();
+        assert_eq!(n.lines, vec!["Export image from shelf to a network does not work anymore"]);
+        assert_eq!(n.date.as_deref(), Some("2026-09-15T00:00:00Z"));
+    }
+
+    #[test]
+    fn blender_release_pages() {
+        // blender.org/releases/5-2/: 5.2.0 only links to the release notes, so it is left for them.
+        let releases = r#"<details><summary class="d-flex">Blender 5.2.2 LTS<span class="fw-normal">September 15, 2026</span></summary><div class="box changelog"><h4>Changelog</h4><ul><li>Fix: VSE: Cannot prefetch strips <a href="x">#156001</a></li></ul></div></details>
+<details><summary class="d-flex">Blender 5.2.0 LTS<span class="fw-normal">July 14, 2026</span></summary><div class="box changelog"><h4>Changelog</h4><p><a href="https://developer.blender.org/docs/release_notes/5.2/">Release Notes</a></p></div></details>"#;
+        let m = blender_summaries(releases);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["5.2.2"].lines, vec!["Fix: VSE: Cannot prefetch strips"]);
+        assert_eq!(m["5.2.2"].date.as_deref(), Some("2026-09-15T00:00:00Z"));
+        // The 3.3 LTS page: a summary over several lines, Download before Changelog.
+        let lts = "<details><summary>\n   Blender 3.3.21 LTS <span class=\"x\"> &#8211; July 16, 2024</span>\n</summary><h3>Download</h3><ul><li><a>Windows &#8211; Installer</a></li></ul><h3>Changelog</h3><ul><li>Assert when undoing Make Single User</li></ul></details>";
+        assert_eq!(blender_summaries(lts)["3.3.21"].lines, vec!["Assert when undoing Make Single User"]);
+        assert_eq!(blender_summaries(lts)["3.3.21"].date.as_deref(), Some("2024-07-16T00:00:00Z"));
+        // Corrective releases pages with h1 (3.0 to 3.5) or h2 headings.
+        let corrective = r##"<h1 id="blender-351">Blender 3.5.1<a class="headerlink" href="#blender-351">&para;</a></h1><p>Released on April 25th 2023, Blender 3.5.1 features the following bug fixes:</p><ul><li>Active/default UV map legacy conversion with name conflict   <a href="x">#106584</a></li><li>Add support for OpenPGL 0.5.0   <a href="y">85c7cc898d</a></li></ul>
+<h2 id="blender-350">Blender 3.5.0</h2><ul><li>&#8216;Lattice Deform Selected&#8217; shows a warning</li></ul>"##;
+        let c = blender_corrective(corrective);
+        assert_eq!(c["3.5.1"].lines, vec!["Active/default UV map legacy conversion with name conflict", "Add support for OpenPGL 0.5.0"]);
+        assert_eq!(c["3.5.1"].date.as_deref(), Some("2023-04-25T00:00:00Z"));
+        assert_eq!(c["3.5.0"].lines, vec!["\u{2018}Lattice Deform Selected\u{2019} shows a warning"]);
+    }
+
+    #[test]
+    fn list_items_lose_bare_refs_and_entities() {
+        assert_eq!(without_trailing_refs("Crash on exit #119907"), "Crash on exit");
+        assert_eq!(without_trailing_refs("Release: Update license.md. [bcfe4ce3b1600931fc854f70f5146a8bb2b36a4a]"), "Release: Update license.md.");
+        assert_eq!(without_trailing_refs("Update bakers to version 3.23.0"), "Update bakers to version 3.23.0");
+        assert_eq!(without_trailing_refs("Use the 2024 defaults"), "Use the 2024 defaults");
+        assert_eq!(items("<li>&#8216;Lattice&#8217; &#8211; fixed &amp; faster &hellip;</li>"), vec!["\u{2018}Lattice\u{2019} - fixed & faster \u{2026}"]);
+    }
+
+    #[test]
+    fn krita_posts_in_their_shapes() {
+        // "Bug Fixes" or "Changes since" headings, h2 or h3.
+        let bug_fixes = "<html><title>Krita 5.2.11 Released! | Krita</title><h1>Krita 5.2.11 Released!</h1><p>Intro</p><h3 id=bug-fixes>Bug Fixes</h3><ul><li>Fix an issue updating the canvas</li></ul><h2>Download</h2><ul><li>Not a note</li></ul></html>";
+        assert_eq!(krita_changelog(bug_fixes), vec!["Fix an issue updating the canvas"]);
+        let since = "<html><h1>Krita 5.2.3 Released!</h1><h2>Changes since 5.2.3 beta:</h2><ul><li>Various fixes to tool shortcuts</li></ul><h2>Download</h2></html>";
+        assert_eq!(krita_changelog(since), vec!["Various fixes to tool shortcuts"]);
+        let colon = "<html><h1>Krita 5.2.14 bugfix release!</h1><h3>New Color Picker Preview</h3><p>x</p><h3 id=changelog>Changelog:</h3><ul><li>Fix brush preview outlines</li></ul><h2>Download</h2></html>";
+        assert_eq!(krita_changelog(colon), vec!["Fix brush preview outlines"]);
+        // No such heading: the items between the title and the first Download heading.
+        let plain = "<html><nav><ul><li>Menu entry</li></ul></nav><h1 style=margin-bottom:.5rem>Krita 5.2.9 Released!</h1><p>Today we're releasing Krita 5.2.9!</p><li>Add shortcuts to bezier curve</li><li>Fix Photobash Crash</li><h2>Download</h2><h3>Windows</h3><ul><li>64 bits installer</li></ul><footer><ul><li>Footer</li></ul></footer></html>";
+        assert_eq!(krita_changelog(plain), vec!["Add shortcuts to bezier curve", "Fix Photobash Crash"]);
+        // A post of prose only has no list.
+        assert!(krita_changelog("<html><h1>Krita 5.2.16 bugfix release!</h1><p>Only text.</p><h2>Download</h2><ul><li>64 bits installer</li></ul></html>").is_empty());
+        // The sitemap names posts with dots or dashes; 6.0.N comes with 5.3.N.
+        let sitemap = "<urlset><url><loc>https://krita.org/en/posts/2026/krita-5.3.4-released/</loc></url><url><loc>https://krita.org/en/posts/2025/krita-5-2-9-released/</loc></url><url><loc>https://krita.org/en/posts/2023/krita-5-2-released/</loc></url><url><loc>https://krita.org/en/posts/2023/first-beta-for-krita-5-2-0-released/</loc></url><url><loc>https://krita.org/en/release-notes/krita-5-3-release-notes/</loc></url></urlset>";
+        assert_eq!(krita_post_url(sitemap, &krita_post_version("6.0.4")).as_deref(), Some("https://krita.org/en/posts/2026/krita-5.3.4-released/"));
+        assert_eq!(krita_post_version("6.0.4.1"), "5.3.4.1");
+        assert_eq!(krita_post_url(sitemap, "5.2.9").as_deref(), Some("https://krita.org/en/posts/2025/krita-5-2-9-released/"));
+        assert_eq!(krita_post_url(sitemap, "5.2.0").as_deref(), Some("https://krita.org/en/posts/2023/krita-5-2-released/"));
+        assert_eq!(krita_post_url(sitemap, "5.3.4.1"), None);
+        assert_eq!(krita_notes_url(sitemap, "5.3.0").as_deref(), Some("https://krita.org/en/release-notes/krita-5-3-release-notes/"));
+        let notes = "<html><nav><ul><li>Menu entry here</li></ul></nav><h1>Krita 5.3 and 6.0 Release Notes</h1><p>Several years in the making, Krita 5.3 is a big release.</p><p>There should have been a video here but your browser does not seem to support it.</p><h2>Text Tool</h2><p>Text can now flow into shapes.</p><h2>Contributors</h2><p>Many people helped with this.</p><footer><p>Footer text goes here</p></footer></html>";
+        assert_eq!(krita_release_notes(notes), vec!["Several years in the making, Krita 5.3 is a big release", "## Text Tool", "Text can now flow into shapes"]);
+        assert!(krita_release_notes("<html><title>404 Page not found | Krita</title><h1>x</h1><p>Some text that is long</p></html>").is_empty());
     }
 }

@@ -168,3 +168,76 @@ fn the_dialog_lists_what_goes_with_sizes() {
     assert!(reg[0].registry && reg[0].size.is_none());
     cleanup(&r);
 }
+
+#[test]
+fn other_app_folder_names_are_the_apps_own() {
+    assert_eq!(other_names("7-Zip 26.04 (x64)", "7zip.7zip"), vec!["7-Zip", "7zip"]);
+    assert_eq!(other_names("LM Studio 0.4.14+4", "ElementLabs.LMStudio"), vec!["LM Studio", "LMStudio", "lm-studio"]);
+    assert_eq!(other_names("Cursor (User)", "Anysphere.Cursor"), vec!["Cursor"]);
+    // Generic or too short names are never used.
+    assert!(other_names("Google Chrome", "Google.Chrome.EXE").iter().all(|n| !n.eq_ignore_ascii_case("google")));
+    assert!(other_names("Go 1.23", "GoLang.Go").iter().all(|n| n.chars().count() >= 3));
+    assert!(other_names("Microsoft Teams", "Microsoft.Teams").iter().all(|n| !n.eq_ignore_ascii_case("microsoft")));
+}
+
+#[test]
+fn other_apps_delete_their_own_folders_only() {
+    let r = roots("other");
+    let roaming_discord = mk(r.roaming.join("discord"));
+    let install = mk(r.local.join("Discord"));
+    mk(r.local.join("Google"));
+    let mut e = crate::winutil::UninstallEntry::default();
+    e.publisher = "Discord Inc.".into();
+    let mut d = app("other:Discord.Discord", "Discord", "1.0.9", Some(install.clone()), SourceData::Other { pkg: "Discord.Discord".into(), how: crate::sources::other::How::ProductCode, entry: Box::new(e), upgrade_code: None });
+    d.source = Source::Other;
+    let t = targets(&steps(&d, &[], &r));
+    // Its settings folder goes; the folder its uninstaller handles (it holds the app) and other
+    // publishers' folders stay.
+    assert_eq!(t.iter().map(|x| x.to_lowercase()).collect::<Vec<_>>(), vec![s(&roaming_discord).to_lowercase()]);
+    cleanup(&r);
+}
+
+#[test]
+fn deleting_really_removes_them_and_keeps_the_rest() {
+    let r = roots("run");
+    let g = r.roaming.join("Godot");
+    touch(g.join("editor_settings-4.7.tres"));
+    mk(g.join("export_templates").join("4.7.2.stable"));
+    let keys = touch(g.join("keystores").join("release.keystore"));
+    let save = touch(g.join("app_userdata").join("My Game").join("save.dat"));
+    let me = app("tools:godot:4.7.2", "Godot 4.7.2", "4.7.2", Some(PathBuf::from("C:/x/Godot 4.7.2")), tools("godot", "4.7.2"));
+    let st = steps(&me, &[], &r);
+    assert!(!st.is_empty());
+    for step in &st {
+        let res = crate::elevate::execute(step);
+        assert!(res.ok, "{}", res.message);
+    }
+    assert!(!g.join("editor_settings-4.7.tres").exists() && !g.join("export_templates").join("4.7.2.stable").exists());
+    assert!(keys.exists() && save.exists(), "keystores and game data are never deleted");
+    assert!(steps(&me, &[], &r).iter().all(|st| !matches!(st, Step::RemoveFile { path } if path.ends_with("editor_settings-4.7.tres"))), "nothing left to delete");
+    cleanup(&r);
+}
+
+#[test]
+fn a_folder_two_apps_share_is_not_deleted() {
+    let r = roaming_python();
+    let py = |ver: &str| {
+        let mut e = crate::winutil::UninstallEntry::default();
+        e.publisher = "Python Software Foundation".into();
+        let mut a = app(&format!("other:Python.Python.{ver}"), &format!("Python {ver}.11 (64-bit)"), ver, None, SourceData::Other { pkg: format!("Python.Python.{ver}"), how: crate::sources::other::How::ProductCode, entry: Box::new(e), upgrade_code: None });
+        a.source = Source::Other;
+        a
+    };
+    let (p310, p312) = (py("3.10"), py("3.12"));
+    // "AppData\Roaming\Python" holds every version's packages: removing 3.10 leaves it.
+    assert!(steps(&p310, &[p312.clone()], &r.0).is_empty());
+    // With only one Python left, it is that one's own.
+    assert_eq!(targets(&steps(&p312, &[], &r.0)).len(), 1);
+    cleanup(&r.0);
+}
+
+fn roaming_python() -> (Roots,) {
+    let r = roots("python");
+    mk(r.roaming.join("Python").join("Python310"));
+    (r,)
+}

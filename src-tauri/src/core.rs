@@ -1947,6 +1947,10 @@ async fn with_adobe_notes(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
             if v.date.is_none() {
                 v.date = n.date;
             }
+            // The version's own post, rather than the list of posts it was found in.
+            if let Some(u) = n.url {
+                v.notes_url = Some(u);
+            }
         } else if version::parts(&v.version).get(2).copied().unwrap_or(0) > 0 {
             v.notes = vec!["Bug-fix release. Adobe lists no details for it.".into()];
         }

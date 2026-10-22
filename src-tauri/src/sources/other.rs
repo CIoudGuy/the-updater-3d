@@ -705,7 +705,65 @@ pub struct PkgFeed {
 pub struct Feed {
     /// Lowercase package id -> what the catalog has for it
     pub pkgs: HashMap<String, PkgFeed>,
+    /// Well-known apps offered in Get apps before any search (see `POPULAR`), with a short line
+    /// about each; only those the catalog can install silently with a checksum.
+    pub popular: Vec<(PkgFeed, &'static str)>,
 }
+
+/// Well-known apps that Get apps lists under Other apps without a search. Ids the catalog does not
+/// have, apps another source handles, Store-only apps and installers that can not run silently
+/// with a checksum drop out by themselves.
+pub const POPULAR: &[(&str, &str)] = &[
+    ("Google.Chrome", "Web browser"),
+    ("Mozilla.Firefox", "Web browser"),
+    ("Brave.Brave", "Web browser"),
+    ("Opera.Opera", "Web browser"),
+    ("VideoLAN.VLC", "Video and music player"),
+    ("Daum.PotPlayer", "Video player"),
+    ("7zip.7zip", "File archiver"),
+    ("RARLab.WinRAR", "File archiver"),
+    ("Microsoft.VisualStudioCode", "Code editor"),
+    ("Notepad++.Notepad++", "Text and code editor"),
+    ("Git.Git", "Version control"),
+    ("GitHub.GitHubDesktop", "Git client"),
+    ("OpenJS.NodeJS.LTS", "JavaScript runtime"),
+    ("Docker.DockerDesktop", "Containers"),
+    ("WinSCP.WinSCP", "File transfer"),
+    ("PuTTY.PuTTY", "SSH client"),
+    ("Discord.Discord", "Voice and text chat"),
+    ("Telegram.TelegramDesktop", "Messaging"),
+    ("OpenWhisperSystems.Signal", "Private messaging"),
+    ("SlackTechnologies.Slack", "Team chat"),
+    ("Zoom.Zoom", "Video meetings"),
+    ("Mozilla.Thunderbird", "Email"),
+    ("Valve.Steam", "Games"),
+    ("EpicGames.EpicGamesLauncher", "Games"),
+    ("GOG.Galaxy", "Games"),
+    ("Spotify.Spotify", "Music"),
+    ("GIMP.GIMP.3", "Image editor"),
+    ("dotPDN.PaintDotNet", "Image editor"),
+    ("Inkscape.Inkscape", "Vector graphics"),
+    ("darktable.darktable", "Photo editor"),
+    ("KDE.Kdenlive", "Video editor"),
+    ("HandBrake.HandBrake", "Video converter"),
+    ("Audacity.Audacity", "Audio editor"),
+    ("ShareX.ShareX", "Screenshots and screen recording"),
+    ("TheDocumentFoundation.LibreOffice", "Office suite"),
+    ("SumatraPDF.SumatraPDF", "PDF reader"),
+    ("Obsidian.Obsidian", "Notes"),
+    ("Notion.Notion", "Notes and documents"),
+    ("Figma.Figma", "Design tool"),
+    ("Microsoft.PowerToys", "Windows utilities"),
+    ("voidtools.Everything", "Instant file search"),
+    ("qBittorrent.qBittorrent", "Torrent client"),
+    ("Bitwarden.Bitwarden", "Password manager"),
+    ("Dropbox.Dropbox", "Cloud storage"),
+    ("Google.GoogleDrive", "Cloud storage"),
+    ("CPUID.CPU-Z", "System information"),
+    ("TechPowerUp.GPU-Z", "Graphics card information"),
+    ("Malwarebytes.Malwarebytes", "Malware scanner"),
+    ("Balena.Etcher", "Write disk images to USB"),
+];
 
 impl Feed {
     pub fn get(&self, id: &str) -> Option<&PkgFeed> {
@@ -738,15 +796,33 @@ async fn load_pkg(p: Pkg) -> Loaded {
 pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     let path = winget::refresh_index(Duration::from_secs(30 * 60)).await?;
     let handled: Vec<Installed> = installed.iter().filter(|i| i.source != Source::Other).cloned().collect();
-    let pkgs: Vec<Pkg> = tokio::task::spawn_blocking(move || -> Result<Vec<Pkg>> {
+    let (pkgs, popular): (Vec<Pkg>, Vec<(Pkg, &'static str)>) = tokio::task::spawn_blocking(move || -> Result<(Vec<Pkg>, Vec<(Pkg, &'static str)>)> {
         let idx = Index::open(&path)?;
         let r = match_on_disk(&winutil::uninstall_entries(), &idx, &path, &handled);
-        Ok(r.matches.into_iter().map(|m| m.pkg).collect())
+        let popular = POPULAR
+            .iter()
+            .filter(|(id, _)| !handled_package(id) && excluded_package(id).is_none())
+            .filter_map(|(id, line)| idx.by_id(id).filter(|p| !idx.is_msix(p.row)).map(|p| (p, *line)))
+            .collect();
+        Ok((r.matches.into_iter().map(|m| m.pkg).collect(), popular))
     })
     .await
     .map_err(|e| anyhow!("{e}"))??;
     let got: Vec<Loaded> = futures_util::stream::iter(pkgs).map(load_pkg).buffer_unordered(8).collect().await;
+    let lines: HashMap<String, &'static str> = popular.iter().map(|(p, l)| (p.id.to_ascii_lowercase(), *l)).collect();
+    let pop_pkgs: Vec<Pkg> = popular.into_iter().map(|(p, _)| p).collect();
+    let pop: Vec<Loaded> = futures_util::stream::iter(pop_pkgs).map(load_pkg).buffer_unordered(8).collect().await;
     let mut feed = Feed::default();
+    for (pkg, r) in pop {
+        // Only what can be installed silently with a checksum here.
+        if let Ok((versions, m)) = r {
+            if choose(&m, &Want::fresh()).is_ok() {
+                let line = lines.get(&pkg.id.to_ascii_lowercase()).copied().unwrap_or("");
+                feed.popular.push((PkgFeed { pkg, versions, latest: Some(m) }, line));
+            }
+        }
+    }
+    feed.popular.sort_by(|a, b| a.0.pkg.name.to_ascii_lowercase().cmp(&b.0.pkg.name.to_ascii_lowercase()));
     let mut failed = 0;
     for (pkg, r) in got {
         match r {
@@ -944,9 +1020,10 @@ fn entry(p: &Pkg, version: String, tagline: Option<String>, installed: bool) -> 
     }
 }
 
-/// The installed apps the catalog matched, so their pages and versions can be opened.
+/// The installed apps the catalog matched, so their pages and versions can be opened, and the
+/// well-known apps (`POPULAR`) not installed yet.
 pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry> {
-    installed
+    let mut out: Vec<CatalogEntry> = installed
         .iter()
         .filter(|i| i.source == Source::Other)
         .filter_map(|i| {
@@ -956,7 +1033,20 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             e.name = i.name.clone();
             Some(e)
         })
-        .collect()
+        .collect();
+    for (pf, line) in &feed.popular {
+        let id = format!("other:{}", pf.pkg.id);
+        if out.iter().any(|e| e.id.eq_ignore_ascii_case(&id)) || installed.iter().any(|i| pkg_of(i).eq_ignore_ascii_case(&pf.pkg.id)) {
+            continue;
+        }
+        let m = pf.latest.as_ref();
+        let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), Some(line.to_string()), false);
+        if let Some(n) = m.map(|m| m.name.clone()).filter(|n| !n.is_empty()) {
+            e.name = n;
+        }
+        out.push(e);
+    }
+    out
 }
 
 /// Packages of the catalog for a search in Get apps.

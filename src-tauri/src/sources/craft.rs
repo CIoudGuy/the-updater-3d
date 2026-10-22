@@ -229,6 +229,28 @@ pub fn note_lines(md: &str) -> Vec<String> {
     crate::notes::tidy_headings(out)
 }
 
+/// The change list of a release: its bullets, or for a release written as prose its sentences.
+/// GitHub's stock text ("See the assets below to download this version and install") and a lone
+/// "Full Changelog" link are no notes, so those show that none is published.
+pub fn release_lines(md: &str) -> Vec<String> {
+    let mut lines = note_lines(md);
+    if !lines.iter().any(|l| !l.starts_with('#')) {
+        lines = crate::notes::text_lines(md)
+            .into_iter()
+            .filter(|l| {
+                let low = l.to_ascii_lowercase();
+                !(low.contains("see the assets") || low.contains("download this version") || low.starts_with("full changelog"))
+            })
+            .collect();
+        lines = crate::notes::tidy_headings(lines);
+    }
+    if lines.iter().any(|l| !l.starts_with('#')) {
+        lines
+    } else {
+        vec![super::other::NO_NOTES.to_string()]
+    }
+}
+
 /// "## What's Changed" as a heading line; boilerplate sections (contributors, the full
 /// changelog link, downloads) are not headings worth showing.
 pub fn markdown_heading(l: &str) -> Option<String> {
@@ -354,7 +376,7 @@ pub async fn versions(key: &str, installed: Option<&str>, prereleases: bool) -> 
         .map(|r| VersionInfo {
             installed: installed.is_some_and(|v| version::cmp(v, &r.version).is_eq()),
             latest: newest.as_deref() == Some(r.version.as_str()),
-            notes: note_lines(&r.notes),
+            notes: release_lines(&r.notes),
             notes_url: r.url.clone(),
             size: r.installer().and_then(|x| x.size),
             date: r.date.clone(),
@@ -493,6 +515,17 @@ mod tests {
         // No em or en dashes anywhere in the UI.
         let v = note_lines("* Scenarios P20 (4\u{2013}5 GB PSB) \u{2014} not run yet");
         assert_eq!(v, vec!["Scenarios P20 (4-5 GB PSB), not run yet"]);
+    }
+
+    #[test]
+    fn prose_releases_keep_their_text_and_empty_ones_say_so() {
+        assert_eq!(release_lines("This is a beta release. It contains the new FAL API Key support. "), vec!["This is a beta release. It contains the new FAL API Key support"]);
+        // GitHub's stock text and a lone compare link are no notes.
+        for md in ["See the assets below to download this version and install.", "Production build of ArtCraft. See the assets below to download and install.", "**Full Changelog**: https://github.com/storytold/photocraft/compare/v0.1.0...v0.1.1", ""] {
+            assert_eq!(release_lines(md), vec![super::super::other::NO_NOTES], "{md}");
+        }
+        // Bullets as before.
+        assert_eq!(release_lines("## What's Changed\n* Add docking by @sky in https://x\n"), vec!["Add docking"]);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://download.blender.org/release/";
 const BUILDER: &str = "https://builder.blender.org/download/daily/?format=json&v=1";
-const LTS: &[&str] = &["2.83", "2.93", "3.3", "3.6", "4.2", "4.5"];
+const LTS: &[&str] = &["2.83", "2.93", "3.3", "3.6", "4.2", "4.5", "5.2"];
 const FG: &str = "#F5792A";
 const BG: &str = "#2B1607";
 pub const MARKER: &str = ".the-updater-3d.json";
@@ -129,18 +129,25 @@ fn parse_index(html: &str) -> Vec<(String, Option<String>, Option<u64>)> {
         .collect()
 }
 
+/// The version and kind ("msi" or "zip") of a 64-bit Windows release file:
+/// "blender-5.2.2-windows-x64.msi", and "blender-2.81-windows64.zip" for 2.80 to 2.92.
+fn windows_file(name: &str) -> Option<(String, &'static str)> {
+    use once_cell::sync::Lazy;
+    static FILE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"^blender-(\d+\.\d+(?:\.\d+)?)-windows(?:-x64|64)\.(msi|zip)$").unwrap());
+    let c = FILE.captures(name)?;
+    Some((c[1].to_string(), if &c[2] == "msi" { "msi" } else { "zip" }))
+}
+
 async fn series_releases(series: &str) -> Result<Vec<Release>> {
     let url = format!("{RELEASES}Blender{series}/");
     let f = http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await?;
     let html = String::from_utf8_lossy(&f.body);
     let mut by_ver: HashMap<String, Release> = HashMap::new();
-    let re = regex::Regex::new(r"^blender-(\d+\.\d+(?:\.\d+)?)-windows-x64\.(msi|zip)$").unwrap();
     for (name, date, size) in parse_index(&html) {
-        let Some(c) = re.captures(&name) else { continue };
-        let ver = c[1].to_string();
+        let Some((ver, kind)) = windows_file(&name) else { continue };
         let r = by_ver.entry(ver.clone()).or_insert(Release { version: ver, date: None, msi: None, zip: None, msi_size: None, zip_size: None });
         let full = format!("{url}{name}");
-        if &c[2] == "msi" {
+        if kind == "msi" {
             r.msi = Some(full);
             r.msi_size = size;
             r.date = date.or(r.date.take());
@@ -570,35 +577,36 @@ pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>>
         }
         return Ok(with_notes_so_far(feed.builds.iter().enumerate().map(|(i, b)| prerelease_info(b, i == 0, false)).collect()).await);
     }
-    let to_info = |r: &Release, latest: bool| {
-        let mut v = release_info(&version::series(&r.version), r, &HashMap::new());
-        v.latest = latest;
-        v
-    };
     if key == "older" {
-        // Newest bug-fix release of every series.
+        // Newest bug-fix release of every series, with the notes of its series.
         let futs = feed.all_series.iter().map(|s| async move { (s.clone(), series_releases(s).await) });
         let results = futures_util::future::join_all(futs).await;
-        let mut out = Vec::new();
-        for (i, (_s, r)) in results.into_iter().enumerate() {
-            if let Ok(list) = r {
-                if let Some(first) = list.into_iter().find(|r| r.msi.is_some() || r.zip.is_some()) {
-                    out.push(to_info(&first, i == 0));
-                }
-            }
-        }
-        return Ok(out);
+        let newest: Vec<(String, Release)> = results
+            .into_iter()
+            .filter_map(|(s, r)| r.ok().and_then(|list| list.into_iter().find(|r| r.msi.is_some() || r.zip.is_some())).map(|r| (s, r)))
+            .collect();
+        // A few series at a time: each reads one to three pages, a first release many more.
+        use futures_util::StreamExt;
+        let infos: Vec<VersionInfo> = futures_util::stream::iter(newest.into_iter().map(|(s, r)| older_info(s, r))).buffered(4).collect().await;
+        return Ok(infos
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut v)| {
+                v.latest = i == 0;
+                v
+            })
+            .collect());
     }
     let list = match feed.series.get(key) {
         Some(l) => l.clone(),
         None => series_releases(key).await?,
     };
-    let notes = crate::notes::blender(key, true).await;
+    let (notes, src) = crate::notes::blender_with_source(key, true).await;
     Ok(list
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let mut v = release_info(key, r, &notes);
+            let mut v = release_info(key, r, &notes, src.as_deref());
             v.latest = i == 0;
             v
         })
@@ -625,12 +633,12 @@ pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>>
         Some(l) => l.clone(),
         None => series_releases(&series).await?,
     };
-    let notes = crate::notes::blender(&series, true).await;
+    let (notes, src) = crate::notes::blender_with_source(&series, true).await;
     let newest = list.first().map(|r| r.version.clone());
     Ok(list
         .into_iter()
         .map(|r| {
-            let mut v = release_info(&series, &r, &notes);
+            let mut v = release_info(&series, &r, &notes, src.as_deref());
             v.installed = version::cmp(&r.version, &inst.version).is_eq();
             v.latest = newest.as_deref() == Some(r.version.as_str());
             v
@@ -638,16 +646,38 @@ pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>>
         .collect())
 }
 
-/// One Blender release with its fix list and date from blender.org when available.
-fn release_info(series: &str, r: &Release, notes: &HashMap<String, crate::notes::Notes>) -> VersionInfo {
+/// The newest release of an older series for "Older Blender versions", with its notes: its fix
+/// list, the release notes for a first release, and for a series that published no fix lists
+/// (2.83, 2.91, 2.93) the series' release notes, said so on top.
+async fn older_info(series: String, r: Release) -> VersionInfo {
+    let series = series.as_str();
     let patch = version::parts(&r.version).get(2).copied().unwrap_or(0);
-    let n = notes.get(&r.version);
+    let (mut notes, src) = crate::notes::blender_with_source(series, patch == 0).await;
+    if patch > 0 && notes.is_empty() {
+        let m = crate::notes::blender_major(series).await;
+        if !m.lines.is_empty() {
+            let mut lines = vec![format!("No separate fix list is published for {}; these are the release notes of Blender {series}", r.version)];
+            lines.extend(m.lines);
+            notes.insert(r.version.clone(), crate::notes::Notes { date: None, lines, url: None });
+        }
+    }
+    release_info(series, &r, &notes, src.as_deref())
+}
+
+/// One Blender release with its fix list and date from blender.org when available. `fixes_url`
+/// is the page the fix lists came from.
+fn release_info(series: &str, r: &Release, notes: &HashMap<String, crate::notes::Notes>, fixes_url: Option<&str>) -> VersionInfo {
+    let patch = version::parts(&r.version).get(2).copied().unwrap_or(0);
+    // The first release is "2.81" in the file names of old series and "2.81.0" in the notes.
+    let n = notes.get(&r.version).or_else(|| if patch == 0 { notes.get(&format!("{series}.0")) } else { None });
     let mut lines = n.map(|n| n.lines.clone()).unwrap_or_default();
     if lines.is_empty() {
         lines.push(if patch == 0 { format!("First release of Blender {series}. See the full notes for everything new.") } else { format!("Bug-fix release for Blender {series}") });
     }
     let notes_url = if patch == 0 || notes.is_empty() {
         format!("https://developer.blender.org/docs/release_notes/{series}/")
+    } else if let Some(u) = fixes_url {
+        u.to_string()
     } else if is_lts(series) {
         format!("https://www.blender.org/download/lts/{}/", series.replace('.', "-"))
     } else {
@@ -866,6 +896,26 @@ mod tests {
         assert_eq!(v[0].2, Some(380 * 1024 * 1024));
         assert_eq!(v[1].2, Some(410123456));
         assert!(v[0].1.as_deref().unwrap().starts_with("2026-10-21T23:27"));
+    }
+
+    #[test]
+    fn old_series_file_names_and_first_release_notes() {
+        assert_eq!(windows_file("blender-5.2.2-windows-x64.msi"), Some(("5.2.2".into(), "msi")));
+        // 2.80 to 2.92 are named "windows64".
+        assert_eq!(windows_file("blender-2.81-windows64.zip"), Some(("2.81".into(), "zip")));
+        assert_eq!(windows_file("blender-2.81-windows32.zip"), None);
+        assert_eq!(windows_file("blender-5.2.2-windows-arm64.msi"), None);
+        // "2.81" is the first release, read from the notes of "2.81.0".
+        let mut notes = HashMap::new();
+        notes.insert("2.81.0".to_string(), crate::notes::Notes { date: Some("2019-11-21T00:00:00Z".into()), lines: vec!["# Cycles".into(), "OptiX support".into()], url: None });
+        let v = release_info("2.81", &rel("2.81"), &notes, None);
+        assert_eq!(v.notes, vec!["# Cycles", "OptiX support"]);
+        assert_eq!(v.date.as_deref(), Some("2019-11-21T00:00:00Z"));
+        // Fix lists link to the page they came from.
+        notes.insert("5.2.2".to_string(), crate::notes::Notes { lines: vec!["A fix".into()], ..Default::default() });
+        let v = release_info("5.2", &rel("5.2.2"), &notes, Some("https://www.blender.org/releases/5-2/"));
+        assert_eq!(v.notes_url.as_deref(), Some("https://www.blender.org/releases/5-2/"));
+        assert!(is_lts("5.2"));
     }
 
     fn inst(series: &str, ver: &str, kind: BlenderKind) -> Installed {

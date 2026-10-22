@@ -79,10 +79,10 @@
     </p>
     {#if unApp.source === "other"}
       <div class="opt info">
-        <span class="grow">Runs {unApp.name}'s own uninstaller. Its settings stay where it keeps them.</span>
+        <span class="grow">Runs {unApp.name}'s own uninstaller.</span>
       </div>
-    {:else}
-      <div class="opt prefs">
+    {/if}
+    <div class="opt prefs">
         <Check checked={removePrefs} onchange={(v) => (removePrefs = v)}>Also delete settings and add-ons</Check>
         {#if removePrefs}
           {#if prefsItems === null}
@@ -98,8 +98,7 @@
             <span class="warnline">{prefsTotal > 0 ? `Frees ${bytes(prefsTotal)} more. ` : ""}This can't be undone. Your own files and projects stay.</span>
           {/if}
         {/if}
-      </div>
-    {/if}
+    </div>
     <div class="actions first">
       <Btn variant="raised" onclick={() => ui.closeDialog()} hint="Esc">Cancel</Btn>
       <Btn variant="danger" title="Uninstall {unApp.name}" onclick={doUninstall}>Uninstall</Btn>
