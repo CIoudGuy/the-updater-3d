@@ -563,7 +563,7 @@ pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>>
         Some(l) => l.clone(),
         None => series_releases(key).await?,
     };
-    let notes = crate::notes::blender(key).await;
+    let notes = crate::notes::blender(key, true).await;
     Ok(list
         .iter()
         .enumerate()
@@ -595,7 +595,7 @@ pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>>
         Some(l) => l.clone(),
         None => series_releases(&series).await?,
     };
-    let notes = crate::notes::blender(&series).await;
+    let notes = crate::notes::blender(&series, true).await;
     let newest = list.first().map(|r| r.version.clone());
     Ok(list
         .into_iter()

@@ -14,6 +14,135 @@ pub struct Notes {
     pub lines: Vec<String>,
 }
 
+// Change lists are plain lines. A line starting with "# ", "## " or "### " is a section heading
+// (biggest first); the window shows those as headings and every other line as a bullet.
+
+/// A page fragment in reading order: its h2/h3/h4 headings as "## " / "### " lines and every
+/// list item and paragraph as a line, with commit and issue references removed.
+pub fn outline(fragment: &str) -> Vec<String> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static TOKEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<(h[2-4]|li|p)\b[^>]*>(.*?)</(?:h[2-4]|li|p)>").unwrap());
+    static REFS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*[\(\[]\s*(?:(?:#\d+|[0-9a-f]{7,12})\s*,?\s*)+[\)\]]").unwrap());
+    let mut out: Vec<String> = Vec::new();
+    for c in TOKEN.captures_iter(fragment) {
+        let text = strip_tags(&c[2]);
+        let text = REFS.replace_all(&text, "").trim().trim_end_matches('.').trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let line = match &c[1] {
+            "h2" => format!("## {text}"),
+            "h3" | "h4" => format!("### {text}"),
+            // Image captions ("Before", "After") and other scraps are not notes.
+            _ if text.split_whitespace().count() < 3 => continue,
+            _ => text,
+        };
+        if out.last() != Some(&line) {
+            out.push(line);
+        }
+        if out.len() >= MAX_LINES {
+            break;
+        }
+    }
+    tidy_headings(out)
+}
+
+/// Drops headings with nothing under them (a heading followed by a heading of the same or a
+/// bigger level, or by the end of the list), so empty sections do not show.
+pub fn tidy_headings(lines: Vec<String>) -> Vec<String> {
+    let level = |s: &str| s.chars().take_while(|c| *c == '#').count();
+    let mut keep = vec![true; lines.len()];
+    // From the end, so a section whose subsections were all dropped is dropped too.
+    let mut next_kept: Option<usize> = None;
+    for i in (0..lines.len()).rev() {
+        let l = &lines[i];
+        if level(l) > 0 && l.chars().nth(level(l)) == Some(' ') {
+            let has_body = next_kept.is_some_and(|n| level(&lines[n]) == 0 || level(&lines[n]) > level(l));
+            if !has_body {
+                keep[i] = false;
+                continue;
+            }
+        }
+        next_kept = Some(i);
+    }
+    let mut out: Vec<String> = lines.into_iter().zip(keep).filter(|(_, k)| *k).map(|(l, _)| l).collect();
+    let is_heading = |s: &str| level(s) > 0 && s.chars().nth(level(s)) == Some(' ');
+    // One heading on top of everything ("What's Changed") says nothing.
+    if out.iter().filter(|l| is_heading(l)).count() == 1 && out.first().is_some_and(|l| is_heading(l)) {
+        out.remove(0);
+    }
+    // Top sections show as "## " whatever level the page used ("#### Improvements"); "# " stays
+    // for lists that group whole topics (Blender's release notes).
+    if let Some(min) = out.iter().filter(|l| is_heading(l)).map(|l| level(l)).min().filter(|m| *m > 2) {
+        for l in out.iter_mut().filter(|l| is_heading(l)) {
+            let lv = level(l) - (min - 2);
+            *l = format!("{} {}", "#".repeat(lv.min(3)), l[level(l)..].trim());
+        }
+    }
+    out
+}
+
+/// The full notes of a new Blender series (5.2.0): the release notes page's own lists
+/// (compatibility and the like) and every topic page it links to, as "# Topic" sections.
+pub async fn blender_major(series: &str) -> Notes {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static ARTICLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<article[^>]*>(.*?)</article>").unwrap());
+    static TOPIC: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<a[^>]*href="([a-z_\-]+/)"[^>]*>([^<]{2,80})</a>"#).unwrap());
+    static RELEASED: Lazy<Regex> = Lazy::new(|| Regex::new(r"released on ([A-Z][a-z]+ \d{1,2}(?:st|nd|rd|th)?,? \d{4})").unwrap());
+    let base = format!("https://developer.blender.org/docs/release_notes/{series}/");
+    let Some(html) = page(&base).await else { return Notes { date: None, lines: vec![] } };
+    let article = ARTICLE.captures(&html).map(|c| c[1].to_string()).unwrap_or_default();
+    let date = RELEASED.captures(&strip_tags(&article)).and_then(|c| parse_date(&c[1]));
+    let topics: Vec<(String, String)> = TOPIC
+        .captures_iter(&article)
+        .map(|c| (c[1].to_string(), strip_tags(&c[2])))
+        .filter(|(href, _)| href != "bugfixes/" && href != "corrective_releases/")
+        .fold(Vec::new(), |mut acc, t| {
+            if !acc.iter().any(|(h, _): &(String, String)| *h == t.0) {
+                acc.push(t);
+            }
+            acc
+        });
+    let link_texts: Vec<String> = TOPIC.captures_iter(&article).map(|c| strip_tags(&c[2])).collect();
+    let mut lines: Vec<String> = Vec::new();
+    // The page's own sections (Compatibility...): not its intro ("was released on...", a link to
+    // blender.org) nor its lists of topic links.
+    let mut in_section = false;
+    for l in outline(&article) {
+        if l.starts_with("## ") {
+            in_section = !l.starts_with("## Bugfixes");
+            if in_section {
+                lines.push(l.replacen("## ", "# ", 1));
+            }
+            continue;
+        }
+        if in_section && !link_texts.iter().any(|t| *t == l) {
+            lines.push(l);
+        }
+    }
+    let pages = futures_util::future::join_all(topics.iter().map(|(href, _)| page_owned(format!("{base}{href}")))).await;
+    for ((_, name), html) in topics.iter().zip(pages) {
+        let Some(html) = html else { continue };
+        let body = ARTICLE.captures(&html).map(|c| c[1].to_string()).unwrap_or_default();
+        let items = outline(&body);
+        if items.is_empty() {
+            continue;
+        }
+        lines.push(format!("# {name}"));
+        // A topic's single top heading repeats the topic name ("Modeling" under "Modeling & UV").
+        let one_top = items.iter().filter(|l| l.starts_with("## ")).count() == 1 && items.first().is_some_and(|l| l.starts_with("## "));
+        lines.extend(items.into_iter().filter(|l| !(one_top && l.starts_with("## ") && name.starts_with(l.trim_start_matches("## ")))));
+    }
+    lines.truncate(MAX_LINES * 3);
+    Notes { date, lines }
+}
+
+async fn page_owned(url: String) -> Option<String> {
+    page(&url).await
+}
+
 fn strip_tags(s: &str) -> String {
     let re = regex::Regex::new(r"<[^>]+>").unwrap();
     let t = re.replace_all(s, "");
@@ -73,7 +202,20 @@ async fn page(url: &str) -> Option<String> {
 
 /// Blender bug-fix lists for one series, keyed by full version ("4.5.14").
 /// LTS series: blender.org/download/lts/<x-y>/. Others: the "corrective releases" docs page.
-pub async fn blender(series: &str) -> HashMap<String, Notes> {
+pub async fn blender(series: &str, with_major: bool) -> HashMap<String, Notes> {
+    let mut out = blender_fixes(series).await;
+    // The first release of the series has no fix list: its notes are the whole release notes.
+    let first = format!("{series}.0");
+    if with_major && !out.contains_key(&first) {
+        let m = blender_major(series).await;
+        if !m.lines.is_empty() {
+            out.insert(first, m);
+        }
+    }
+    out
+}
+
+async fn blender_fixes(series: &str) -> HashMap<String, Notes> {
     let mut out = HashMap::new();
     let lts_url = format!("https://www.blender.org/download/lts/{}/", series.replace('.', "-"));
     if let Some(html) = page(&lts_url).await {
@@ -323,37 +465,47 @@ pub fn names_version(text: &str, ver: &str) -> bool {
     })
 }
 
-/// Release notes in plain text or markdown as short lines without markup: the bullet points, or
-/// when there are none the lines of text. At most 12.
+/// Release notes in markdown or plain text (a GitHub release, a winget manifest's notes), in
+/// full: headings as "## " / "### " lines, every other line (bullets and text) as an item, with
+/// markup, links, images and commit or issue references removed. Boilerplate sections
+/// (contributors, downloads, checksums) and code blocks and tables are left out.
 pub fn text_lines(t: &str) -> Vec<String> {
     lines_of(t, false)
 }
 
 fn lines_of(t: &str, bullets_only: bool) -> Vec<String> {
-    let img = regex::Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap();
-    let link = regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap();
-    let url = regex::Regex::new(r"\(?<?https?://[^\s)>]+>?\)?").unwrap();
-    let numbered = regex::Regex::new(r"^\d{1,3}[.)]\s+(.*)$").unwrap();
-    let handle = regex::Regex::new(r"\s+(by|thanks to)\s+@[\w-]+.*$").unwrap();
-    // Markdown escapes ("async\_hooks") and the commit or pull request a line starts with
-    // ("[b12bcc9ae1] - ", "80d23f64 ").
-    let escaped = regex::Regex::new(r"\\([\[\]_*`#<>()])").unwrap();
-    let commit = regex::Regex::new(r"^(\[[0-9a-f]{7,40}\]|[0-9a-f]{7,40}|#\d+)\s*(-\s*)?").unwrap();
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static IMG: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap());
+    static LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+    static URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(?<?https?://[^\s)>]+>?\)?").unwrap());
+    static NUMBERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\d{1,3}[.)]\s+(.*)$").unwrap());
+    static HANDLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+(by|thanks to)\s+@[\w-]+.*$").unwrap());
+    // Markdown escapes ("async\_hooks"), the commit a line starts with ("[b12bcc9ae1] - ",
+    // "80d23f64 ") and issue or commit references in brackets ("(#123)").
+    static ESCAPED: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\([\[\]_*`#<>()])").unwrap());
+    static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\[[0-9a-f]{7,40}\]|[0-9a-f]{7,40}|#\d+)\s*(-\s*)?").unwrap());
+    static REFS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*[\(\[]\s*(?:(?:#\d+|[0-9a-f]{7,12})\s*,?\s*)+[\)\]]").unwrap());
+    // GitHub emoji codes (":rocket:").
+    static EMOJI: Lazy<Regex> = Lazy::new(|| Regex::new(r":[a-z][a-z0-9_+\-]{1,30}:").unwrap());
+    // A line that is all bold ("**Bug fixes:**") titles what follows.
+    static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(?:\*\*|__)([^*_]{2,80}?)(?:\*\*|__):?$").unwrap());
     let clean = |s: &str| -> String {
-        let s = escaped.replace_all(s, "$1");
-        let s = img.replace_all(&s, "");
-        let s = link.replace_all(&s, "$1");
-        let s = url.replace_all(&s, "");
+        let s = ESCAPED.replace_all(s, "$1");
+        let s = EMOJI.replace_all(&s, "");
+        let s = IMG.replace_all(&s, "");
+        let s = LINK.replace_all(&s, "$1");
+        let s = URL.replace_all(&s, "");
         let s = s.replace("**", "").replace("__", "").replace('`', "");
-        let s = commit.replace(s.trim(), "");
-        let s = handle.replace(&s, "");
+        let s = COMMIT.replace(s.trim(), "");
+        let s = HANDLE.replace(&s, "");
+        let s = REFS.replace_all(&s, "");
         let s = strip_tags(&s);
-        let s = s.trim().trim_start_matches(['-', '*', ':', ' ']).trim_end_matches(['.', ',', ';', ':', ' ']).to_string();
-        s
+        s.trim().trim_start_matches(['-', '*', ':', ' ']).trim_end_matches(['.', ',', ';', ':', ' ']).to_string()
     };
     let useful = |s: &String| {
         let low = s.to_lowercase();
-        s.chars().filter(|c| c.is_alphanumeric()).count() >= 3 && !low.starts_with("full changelog") && !low.starts_with("what's changed") && !low.starts_with('@') && !low.starts_with("new contributors")
+        s.chars().filter(|c| c.is_alphanumeric()).count() >= 3 && !low.starts_with("full changelog") && !low.starts_with('@') && !low.starts_with("new contributors")
     };
     let bullet = |l: &str| -> Option<String> {
         for p in ["- ", "* ", "+ ", "\u{2022} ", "\u{b7} "] {
@@ -361,37 +513,53 @@ fn lines_of(t: &str, bullets_only: bool) -> Vec<String> {
                 return Some(r.to_string());
             }
         }
-        numbered.captures(l).map(|c| c[1].to_string())
+        NUMBERED.captures(l).map(|c| c[1].to_string())
     };
-    let lines: Vec<&str> = t.lines().map(str::trim).collect();
     let mut out: Vec<String> = Vec::new();
-    for l in &lines {
-        if let Some(b) = bullet(l) {
-            let c = clean(&b);
-            if useful(&c) && !out.contains(&c) {
-                out.push(c);
-            }
-        }
-        if out.len() >= MAX_LINES {
-            return out;
-        }
-    }
-    if !out.is_empty() || bullets_only {
-        return out;
-    }
-    for l in &lines {
-        if l.starts_with('#') || l.starts_with("===") || l.starts_with("---") || l.is_empty() {
+    // Inside a boilerplate section or a code block: skipped.
+    let (mut skipping, mut fence) = (false, false);
+    for raw in t.lines() {
+        let l = raw.trim();
+        if l.starts_with("```") || l.starts_with("~~~") {
+            fence = !fence;
             continue;
         }
-        let c = clean(l);
-        if useful(&c) && !out.contains(&c) {
+        if fence || l.is_empty() || l.starts_with('|') || l.starts_with("<!--") || l.starts_with("===") || l.starts_with("---") || l.starts_with("***") {
+            continue;
+        }
+        let hashes = l.chars().take_while(|c| *c == '#').count();
+        let heading = if hashes > 0 && l.chars().nth(hashes) == Some(' ') {
+            Some(EMOJI.replace_all(&ESCAPED.replace_all(l, "$1"), "").into_owned())
+        } else {
+            BOLD.captures(l).map(|c| format!("### {}", &c[1]))
+        };
+        if let Some(h) = heading {
+            match crate::sources::craft::markdown_heading(&h) {
+                Some(h) => {
+                    skipping = false;
+                    out.push(strip_tags(&h));
+                }
+                None => skipping = true,
+            }
+            continue;
+        }
+        if skipping {
+            continue;
+        }
+        let item = match bullet(l) {
+            Some(b) => b,
+            None if bullets_only => continue,
+            None => l.to_string(),
+        };
+        let c = clean(&item);
+        if useful(&c) && out.last() != Some(&c) {
             out.push(c);
         }
         if out.len() >= MAX_LINES {
             break;
         }
     }
-    out
+    tidy_headings(out)
 }
 
 /// The part of a markdown changelog under the heading for version `ver`.
@@ -421,24 +589,22 @@ pub fn text_section(text: &str, ver: &str) -> Option<String> {
     (!body.trim().is_empty()).then_some(body)
 }
 
-/// HTML as text lines: one per block, list items as "- " bullets.
+/// HTML as markdown-like text: h2 to h4 as "## " / "### " lines, list items as "- " bullets,
+/// one line per other block.
 fn html_lines(html: &str) -> String {
+    let head = regex::Regex::new(r"(?is)<h([2-4])[^>]*>(.*?)</h[2-4]>").unwrap();
     let li = regex::Regex::new(r"(?i)<li[^>]*>").unwrap();
     let block = regex::Regex::new(r"(?i)</?(p|div|br|h[1-6]|tr|dt|dd|ul|ol|summary|details|section|article|pre)[^>]*>").unwrap();
-    let t = li.replace_all(html, "\n- ");
+    let t = head.replace_all(html, |c: &regex::Captures| format!("\n{} {}\n", if &c[1] == "2" { "##" } else { "###" }, strip_tags(&c[2])));
+    let t = li.replace_all(&t, "\n- ");
     let t = block.replace_all(&t, "\n");
     t.lines().map(strip_tags).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
 }
 
-/// Text paragraphs of an HTML fragment, first sentence of each.
-fn paragraphs(html: &str) -> Vec<String> {
-    let p = regex::Regex::new(r"(?s)<p[^>]*>(.*?)</p>").unwrap();
-    p.captures_iter(html).map(|c| strip_tags(&c[1])).filter(|t| t.len() > 20).collect()
-}
-
-/// The change list for version `ver` on a publisher's release notes page: the list under the
-/// heading that names the version, or the page's own list when the whole page is about that
-/// version. A markdown or text file gives the section under its heading for the version.
+/// The change list for version `ver` on a publisher's release notes page, in full with its
+/// sections: what follows the heading or the short paragraph that names the version, or the
+/// page's own content when the whole page is about that version. A markdown or text file gives
+/// the section under its heading for the version.
 pub fn page_notes(body: &str, ver: &str) -> Vec<String> {
     let head = &body[..body.len().min(2000)].to_ascii_lowercase();
     if !(head.trim_start().starts_with('<') || head.contains("<html") || head.contains("<body")) {
@@ -448,8 +614,9 @@ pub fn page_notes(body: &str, ver: &str) -> Vec<String> {
         return text_section(body, ver).map(|s| lines_of(&s, true)).unwrap_or_default();
     }
     let mut html = body.to_string();
+    let title = regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap().captures(&html).map(|c| strip_tags(&c[1])).unwrap_or_default();
     // Not <header>: release pages put each version's heading in one.
-    for tag in ["script", "style", "nav", "svg", "noscript"] {
+    for tag in ["script", "style", "nav", "svg", "noscript", "title"] {
         let re = regex::Regex::new(&format!(r"(?is)<{tag}[\s>].*?</{tag}>")).unwrap();
         html = re.replace_all(&html, "").into_owned();
     }
@@ -457,9 +624,7 @@ pub fn page_notes(body: &str, ver: &str) -> Vec<String> {
     if let Some(k) = heads.iter().position(|h| names_version(&h.1, ver)) {
         let level = heads[k].0;
         let stop = heads[k + 1..].iter().find(|h| h.0 <= level).map(|h| h.2).unwrap_or(html.len());
-        let block = &html[heads[k].3..stop];
-        let lines = items(block);
-        return if lines.is_empty() { paragraphs(block) } else { lines };
+        return outline(&html[heads[k].3..stop]);
     }
     // A short paragraph that names the version, then its list.
     if let Some(s) = text_section(&html_lines(&html), ver) {
@@ -468,15 +633,14 @@ pub fn page_notes(body: &str, ver: &str) -> Vec<String> {
             return lines;
         }
     }
-    let title = regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap().captures(&html).map(|c| strip_tags(&c[1])).unwrap_or_default();
     let h1 = heads.iter().find(|h| h.0 == 1).map(|h| h.1.clone()).unwrap_or_default();
     if names_version(&title, ver) || names_version(&h1, ver) {
         let main = ["<main", "<article"].iter().find_map(|t| html.find(t)).map(|i| &html[i..]).unwrap_or(&html);
-        let lines = items(main);
-        return if lines.is_empty() { paragraphs(main) } else { lines };
+        return outline(main);
     }
     vec![]
 }
+
 
 /// A release notes page of any publisher (not cached: the notes read from it are).
 pub async fn fetch_page(url: &str) -> Option<String> {
@@ -500,6 +664,31 @@ mod tests {
         assert_eq!(krita_changelog(post), vec!["Fix layer thumbnails scaling when using display scaling", "Fix openening large exr files (Bug 525361)"]);
         assert!(krita_changelog("<html><title>404 Page not found | Krita</title><h2>Changelog</h2><ul><li>x</li></ul>").is_empty());
         assert!(krita_changelog("<html><h1>No list here</h1></html>").is_empty());
+    }
+
+    #[test]
+    fn release_pages_keep_their_sections() {
+        // Shape of a Blender topic page.
+        let html = r#"<h1>Blender 5.2 LTS: Modeling &amp; UV&para;</h1><h2>Modeling&para;</h2><h3>General&para;</h3><ul><li>"Circle" from the Loop Tools add-on is now built in as "To Circle".
+(<a href="x">d2fabc952a</a>)</li></ul><h3>3D Text&para;</h3><ul><li><p>Improved support for combining characters (<a>43e52c3892</a>, <a>73fa859c1f</a>).</p></li></ul><p>Before</p><h3>Empty&para;</h3><h2>UV&para;</h2><ul><li>Add Select by Winding operator (<a>1b97e5afe6</a>).</li></ul>"#;
+        assert_eq!(
+            outline(html),
+            vec![
+                "## Modeling",
+                "### General",
+                "\"Circle\" from the Loop Tools add-on is now built in as \"To Circle\"",
+                "### 3D Text",
+                "Improved support for combining characters",
+                "## UV",
+                "Add Select by Winding operator",
+            ]
+        );
+        // Sections left empty go, including a parent whose children all went.
+        let t = tidy_headings(vec!["# A".into(), "## B".into(), "# C".into(), "x".into(), "# D".into(), "y".into()]);
+        assert_eq!(t, vec!["# C", "x", "# D", "y"]);
+        // A lone heading on top of everything goes; deep headings are lifted to "## ".
+        assert_eq!(tidy_headings(vec!["## What's Changed".into(), "x".into()]), vec!["x"]);
+        assert_eq!(tidy_headings(vec!["#### Fixes".into(), "x".into(), "#### Improvements".into(), "y".into()]), vec!["## Fixes", "x", "## Improvements", "y"]);
     }
 
     #[test]
@@ -534,30 +723,45 @@ mod tests {
     }
 
     #[test]
-    fn plain_and_markdown_notes_become_short_lines() {
-        let md = "## What's Changed\n* Fixed the [export](https://x.y/z) crash by @someone in https://github.com/o/r/pull/1\n* **Faster** start up.\n* \\[b12bcc9ae1] - async\\_hooks: add a scope\n* 80d23f64 (patch: Restore the entitlements)\n\n**Full Changelog**: https://github.com/o/r/compare/a...b";
-        assert_eq!(text_lines(md), vec!["Fixed the export crash", "Faster start up", "async_hooks: add a scope", "(patch: Restore the entitlements)"]);
+    fn markdown_and_plain_notes_come_in_full_with_their_sections() {
+        let md = "## What's Changed\n### :rocket: New\n* Fixed the [export](https://x.y/z) crash by @someone in https://github.com/o/r/pull/1\n* **Faster** start up. It now opens in half the time, even with many files.\n\n**Bug fixes:**\n* \\[b12bcc9ae1] - async\\_hooks: add a scope\n* 80d23f64 (patch: Restore the entitlements)\n* Fixed saving (#1234)\n```\ncode that is not a note\n```\n| table | row |\n## New Contributors\n* @someone made their first contribution\n\n**Full Changelog**: https://github.com/o/r/compare/a...b";
+        assert_eq!(
+            text_lines(md),
+            vec![
+                "## What's Changed",
+                "### New",
+                "Fixed the export crash",
+                "Faster start up. It now opens in half the time, even with many files",
+                "### Bug fixes",
+                "async_hooks: add a scope",
+                "(patch: Restore the entitlements)",
+                "Fixed saving",
+            ]
+        );
         let plain = "This release fixes a crash when saving.\nIt also updates translations.";
         assert_eq!(text_lines(plain), vec!["This release fixes a crash when saving", "It also updates translations"]);
         assert_eq!(text_lines("1. First fix\n2) Second fix"), vec!["First fix", "Second fix"]);
         assert!(text_lines("\n\n").is_empty());
+        // No cap: a long list stays whole.
+        let long: String = (0..60).map(|i| format!("- Fixed problem number {i}\n")).collect();
+        assert_eq!(text_lines(&long).len(), 60);
     }
 
     #[test]
     fn notes_for_one_version_from_a_page() {
-        let html = r#"<html><head><title>Changelog</title></head><body><nav><ul><li>Home</li></ul></nav>
-<h2>Version 2.1.0</h2><ul><li>New export dialog</li><li>Fixed a crash when saving. More words here.</li></ul>
-<h2>Version 2.0.9</h2><ul><li>Older fix</li></ul></body></html>"#;
-        assert_eq!(page_notes(html, "2.1.0"), vec!["New export dialog", "Fixed a crash when saving. More words here"]);
-        assert_eq!(page_notes(html, "2.0.9"), vec!["Older fix"]);
+        let html = r#"<html><head><title>Changelog</title></head><body><nav><ul><li>Home page link here</li></ul></nav>
+<h2>Version 2.1.0</h2><h3>New</h3><ul><li>New export dialog for images</li></ul><h3>Fixed</h3><ul><li>Fixed a crash when saving. More words here.</li></ul>
+<h2>Version 2.0.9</h2><ul><li>An older fix for loading</li></ul></body></html>"#;
+        assert_eq!(page_notes(html, "2.1.0"), vec!["## New", "New export dialog for images", "## Fixed", "Fixed a crash when saving. More words here"]);
+        assert_eq!(page_notes(html, "2.0.9"), vec!["An older fix for loading"]);
         assert!(page_notes(html, "3.0").is_empty(), "a page without the version gives nothing");
-        let release = r#"<html><title>App 5.4 released</title><main><p>Intro text that is long enough to count.</p><ul><li>Better colors</li></ul></main></html>"#;
-        assert_eq!(page_notes(release, "5.4"), vec!["Better colors"]);
+        let release = r#"<html><title>App 5.4 released</title><main><p>Intro text that is long enough to count.</p><ul><li>Better colors in dark mode</li></ul></main></html>"#;
+        assert_eq!(page_notes(release, "5.4"), vec!["Intro text that is long enough to count", "Better colors in dark mode"]);
         let inno = r#"<html><body><details open=""><summary>Tool 6.7</summary><p><a name="6.7.3"></a><span class="ver">6.7.3 </span><span class="date">(2026-05-26)</span></p><p><b>Using it at work?</b> Buy a license.</p><ul><li>Improved the startup</li><li>Fix: the example script</li></ul><p><a name="6.7.2"></a><span class="ver">6.7.2 </span></p><ul><li>Older</li></ul></details></body></html>"#;
         assert_eq!(page_notes(inno, "6.7.3"), vec!["Improved the startup", "Fix: the example script"]);
         assert_eq!(page_notes(inno, "6.7.2"), vec!["Older"]);
-        let changelog = "# Changelog\n\n## 1.4.0\n- Added dark mode\n- Fixed login\n\n## 1.3.2\n- Old fix\n";
-        assert_eq!(page_notes(changelog, "1.4.0"), vec!["Added dark mode", "Fixed login"]);
+        let changelog = "# Changelog\n\n## 1.4.0\n### Added\n- Added dark mode\n### Fixed\n- Fixed login\n\n## 1.3.2\n- Old fix\n";
+        assert_eq!(page_notes(changelog, "1.4.0"), vec!["## Added", "Added dark mode", "## Fixed", "Fixed login"]);
         assert_eq!(page_notes(changelog, "1.3.2"), vec!["Old fix"]);
         assert!(page_notes(changelog, "1.5").is_empty());
     }

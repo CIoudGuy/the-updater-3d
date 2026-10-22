@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { flip } from "svelte/animate";
   import Splash from "../components/Splash.svelte";
+  import NotesList from "../components/NotesList.svelte";
   import Btn from "../components/Btn.svelte";
   import Mark from "../components/Mark.svelte";
   import Dab from "../components/Dab.svelte";
@@ -215,11 +216,7 @@
                 {/if}
               </div>
               {#if v.notes.length}
-                <ul class="notes selectable">
-                  {#each v.notes as n, ni (ni)}
-                    <li><svg viewBox="0 0 20 20" width="5" height="5" aria-hidden="true"><path d={DAB} fill="#6E6E6E" /></svg>{n}</li>
-                  {/each}
-                </ul>
+                <div class="notes"><NotesList notes={v.notes} /></div>
               {/if}
             </article>
           {/each}
@@ -434,22 +431,6 @@
   }
   .notes {
     margin: 8px 0 0 86px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .notes {
-    cursor: text;
-  }
-  .notes li {
-    display: flex;
-    gap: 10px;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--text-2);
-  }
-  .notes svg {
-    margin-top: 8px;
   }
   .skel {
     display: flex;

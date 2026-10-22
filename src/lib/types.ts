@@ -204,6 +204,8 @@ export interface Settings {
   blenderKeepPatchVersions: boolean;
   /** Show Craft app pre-releases */
   craftPrereleases: boolean;
+  /** Get apps also lists apps that are already installed */
+  showInstalledInGetApps: boolean;
   /** Which sources are enabled */
   /** `other`: every other app, matched from the public winget catalog (off by default) */
   sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean };

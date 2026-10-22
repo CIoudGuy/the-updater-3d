@@ -217,8 +217,11 @@
           <SRow label="Blender" desc="Every installed series is listed. New versions install next to the old ones.">
             {#snippet control()}<Toggle checked={s.sources.blender} label="Blender" onchange={(v) => store.patchSettings({ sources: { ...s.sources, blender: v } })} />{/snippet}
           </SRow>
-          <SRow label="More apps" desc="OBS Studio, Krita, FreeCAD, Godot, Unity. The Unity Editor download is about 4 GB.">
-            {#snippet control()}<Toggle checked={s.sources.tools} label="More apps: OBS Studio, Krita, FreeCAD, Godot, Unity" onchange={(v) => store.patchSettings({ sources: { ...s.sources, tools: v } })} />{/snippet}
+          <SRow label="More apps" desc="OBS Studio, Krita, FreeCAD, Godot, Unity and Unity Hub. The Unity Editor download is about 4 GB.">
+            {#snippet control()}<Toggle checked={s.sources.tools} label="More apps: OBS Studio, Krita, FreeCAD, Godot, Unity and Unity Hub" onchange={(v) => store.patchSettings({ sources: { ...s.sources, tools: v } })} />{/snippet}
+          </SRow>
+          <SRow label="Show installed apps in Get apps" desc="Get apps also lists apps you already have, marked Installed, with Open." id="show-installed">
+            {#snippet control()}<Toggle checked={s.showInstalledInGetApps} labelledby="show-installed" onchange={(v) => store.patchSettings({ showInstalledInGetApps: v })} />{/snippet}
           </SRow>
           <SRow label="Other apps" desc="Every other app on this PC that Microsoft's public winget catalog lists, updated with its publisher's own installer. Matched from the catalog, so less complete than the apps above.">
             {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}

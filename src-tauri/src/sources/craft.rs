@@ -204,12 +204,17 @@ pub async fn releases(a: &AppDef, prereleases: bool) -> Result<Vec<Release>> {
     Ok(out)
 }
 
-/// Release notes markdown to short plain bullets.
+/// Release notes markdown to plain lines: its section headings as "## " / "### " lines (see
+/// `notes`), every bullet as a line.
 pub fn note_lines(md: &str) -> Vec<String> {
     let link = regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap();
     let mut out = Vec::new();
     for line in md.lines() {
         let l = line.trim();
+        if let Some(h) = markdown_heading(l) {
+            out.push(h);
+            continue;
+        }
         let Some(item) = l.strip_prefix("* ").or_else(|| l.strip_prefix("- ")) else { continue };
         let mut t = link.replace_all(item, "$1").to_string();
         if let Some(i) = t.find(" by @") {
@@ -221,7 +226,23 @@ pub fn note_lines(md: &str) -> Vec<String> {
             out.push(t);
         }
     }
-    out
+    crate::notes::tidy_headings(out)
+}
+
+/// "## What's Changed" as a heading line; boilerplate sections (contributors, the full
+/// changelog link, downloads) are not headings worth showing.
+pub fn markdown_heading(l: &str) -> Option<String> {
+    let level = l.chars().take_while(|c| *c == '#').count();
+    if level == 0 || l.chars().nth(level) != Some(' ') {
+        return None;
+    }
+    let link = regex::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap();
+    let text = link.replace_all(l[level..].trim(), "$1").replace("**", "").replace('`', "").trim().trim_end_matches(':').to_string();
+    let low = text.to_ascii_lowercase();
+    if text.is_empty() || ["contributor", "full changelog", "download", "checksum", "sha256", "assets", "installation"].iter().any(|w| low.contains(w)) {
+        return None;
+    }
+    Some(format!("{} {text}", if level <= 2 { "##" } else { "###" }))
 }
 
 // ---------------------------------------------------------------- installed apps
