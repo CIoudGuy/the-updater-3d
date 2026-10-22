@@ -1,5 +1,5 @@
 fn main() {
-    // Release settings that are not part of the source (both files are git-ignored):
+    // Release settings, kept in their own files so forks can point at their own feed:
     //   .update-feed  address of the app's own release feed
     //   .update-key   key for that feed when it is private
     // Environment variables with the same meaning win over the files.

@@ -1,7 +1,7 @@
 //! Updates for The Updater 3D itself, from a JSON release feed (format in the README).
 //!
-//! The feed address and its key are build settings, not part of the source: `build.rs` reads
-//! them from `src-tauri/.update-feed` and `src-tauri/.update-key` (both git-ignored) or from the
+//! The feed address and its key are build settings: `build.rs` reads them from
+//! `src-tauri/.update-feed` and `src-tauri/.update-key`, or from the
 //! UPDATER3D_FEED_URL / UPDATER3D_UPDATE_KEY environment variables. A key in
 //! `<data>\update-key.txt` overrides the built-in one. Without a feed the app never offers
 //! self-updates. Installers are checked against the SHA-256 the feed lists.
