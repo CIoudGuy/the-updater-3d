@@ -16,6 +16,7 @@
   import { openApp, repairApp, updateOne } from "../lib/actions";
   import { reduced } from "../lib/motion";
   import { splitVersion } from "../lib/format";
+  import { canCancel, canPause, cancelTip, pauseTip } from "../lib/jobs";
   import type { AppEntry } from "../lib/types";
 
   let { app, compact = false }: { app: AppEntry; compact?: boolean } = $props();
@@ -98,10 +99,10 @@
         {:else if failedJob}
           <Btn variant="raised" size="sm" title="Retry  R" onclick={() => retryFor(app)}>Retry</Btn>
         {:else if hasJob}
-          <button class="ib" aria-label={job?.state === "paused" ? "Resume" : "Pause"} title="{job?.state === 'paused' ? 'Resume' : 'Pause'}  Space" onclick={() => job && send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}>
+          <button class="ib" aria-label={job?.state === "paused" ? "Resume" : "Pause"} title={job ? pauseTip(job, "  Space") : ""} disabled={!job || !canPause(job)} onclick={() => job && send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}>
             <Icon d={job?.state === "paused" ? I.play : I.pause} />
           </button>
-          <button class="ib" aria-label="Cancel" title="Cancel  Esc" onclick={() => job && send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
+          <button class="ib" aria-label="Cancel" title={job ? cancelTip(job, "Cancel", "  Esc") : ""} disabled={!job || !canCancel(job)} onclick={() => job && send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
         {:else}
           <span class="hov"><Btn variant="raised" size="sm" title="Open  O" onclick={() => openApp(app.id)}>Open</Btn></span>
         {/if}
@@ -266,11 +267,11 @@
     justify-content: center;
     transition: background-color var(--t-fast), color var(--t-fast), opacity var(--t-base), transform var(--t-fast) var(--ease);
   }
-  .ib:hover {
+  .ib:hover:not(:disabled) {
     background: var(--raised);
     color: var(--text);
   }
-  .ib:active {
+  .ib:active:not(:disabled) {
     transform: scale(0.92);
   }
   .more,

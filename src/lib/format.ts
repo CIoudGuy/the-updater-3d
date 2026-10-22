@@ -160,6 +160,12 @@ export function splitVersion(v: string): [string, string] {
   return [parts.slice(0, 2).join("."), "." + parts.slice(2).join(".")];
 }
 
+/** "5.4.0 Alpha fbe82a4" -> ["5.4.0", "Alpha fbe82a4"]; a plain version stays whole. */
+export function preParts(v: string): [string, string] {
+  const i = v.indexOf(" ");
+  return i > 0 ? [v.slice(0, i), v.slice(i + 1)] : [v, ""];
+}
+
 /** "A", "A and B", "A, B and C", "A, B, C and 2 more" */
 export function nameList(names: string[], max = 3): string {
   if (names.length === 0) return "";

@@ -2,10 +2,10 @@
 //!
 //! Installed apps come from Adobe's own install database (caps\hdpim.db) checked against the
 //! files on disk, with the Add/Remove Programs entries for the uninstall commands.
-//! Latest versions come from the public Creative Cloud product catalog. Installs download the
-//! packages from Adobe's CDN and hand them to Adobe's installer (HDBox Setup.exe) with a driver
-//! file, the same way Adobe's admin packages install. If that fails, updates fall back to
-//! Adobe's Remote Update Manager.
+//! Latest versions come from the public Creative Cloud product catalog. Adobe's package server
+//! only serves Adobe's own signed-in tools, so updates run through Adobe's Remote Update Manager
+//! (the official admin updater) and new apps or other versions are handed to Creative Cloud
+//! with its install link. Both keep Adobe's sign-in and licensing in charge.
 
 use super::{Download, Installed, Latest, Plan, SourceData, Step, Verify};
 use crate::model::{CatalogEntry, JobKind, Source, VersionInfo};
@@ -13,12 +13,11 @@ use crate::{http, paths, version, winutil};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const CATALOG_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v6/products/all?_type=xml&channel=ccm&channel=sti&platform=win32,win64&productType=Desktop";
 const APP_JSON_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v3/applications";
-const CDN: &str = "https://ccmdls.adobe.com";
 const RUM_URL: &str = "https://deploymenttools.acp.adobeoobe.com/RUM/Win/RemoteUpdateManager.zip";
 const APP_ID_HEADER: (&str, &str) = ("x-adobe-app-id", "accc-apps-panel-desktop");
 const API_KEY_HEADER: (&str, &str) = ("x-api-key", "CC_HD_ESD_1_0");
@@ -575,59 +574,6 @@ fn condition_ok(cond: &str, lang: &str) -> bool {
     true
 }
 
-struct Prepared {
-    sap: String,
-    base_version: String,
-    downloads: Vec<Download>,
-    conflicting: Vec<String>,
-}
-
-/// Download list for one product into `<root>/products/<SAP>/`, and the filtered application.json.
-async fn prepare(p: &Product, root: &Path, lang: &str) -> Result<Prepared> {
-    let mut json = app_json(p).await?;
-    let dir = root.join("products").join(&p.sap);
-    std::fs::create_dir_all(&dir)?;
-    let pkgs = as_list(&json["Packages"]["Package"]);
-    let mut keep = Vec::new();
-    let mut downloads = Vec::new();
-    for pkg in pkgs {
-        let cond = pkg["Condition"].as_str().unwrap_or("");
-        if !condition_ok(cond, lang) {
-            continue;
-        }
-        let path = pkg["Path"].as_str().unwrap_or("");
-        let file = pkg["fullPackageName"].as_str().map(String::from).unwrap_or_else(|| format!("{}.zip", pkg["PackageName"].as_str().unwrap_or("package")));
-        if path.is_empty() {
-            continue;
-        }
-        let cdn = json["Cdn"]["Secure"].as_str().unwrap_or(CDN).trim_end_matches('/').to_string();
-        downloads.push(Download {
-            url: format!("{cdn}{path}"),
-            dest: dir.join(&file),
-            size: pkg["DownloadSize"].as_u64(),
-            sha256: None,
-            headers: vec![],
-        });
-        keep.push(pkg);
-    }
-    if downloads.is_empty() {
-        bail!("No packages of {} {} fit this PC", p.name, p.version);
-    }
-    json["Packages"]["Package"] = Value::Array(keep);
-    std::fs::write(dir.join("application.json"), serde_json::to_vec(&json)?)?;
-    let mut conflicting = Vec::new();
-    for c in as_list(&json["ConflictingProcesses"]["ConflictingProcess"]) {
-        if let Some(rp) = c["RelativePath"].as_str() {
-            if let Some(name) = rp.rsplit('\\').next() {
-                if c["headless"].as_bool() != Some(true) {
-                    conflicting.push(name.to_ascii_lowercase());
-                }
-            }
-        }
-    }
-    Ok(Prepared { sap: p.sap.clone(), base_version: json["BaseVersion"].as_str().unwrap_or(&p.base_version).to_string(), downloads, conflicting })
-}
-
 /// Download size of a product (all packages for this language), from its manifest.
 pub async fn download_size(p: &Product, lang: &str) -> Option<u64> {
     let json = app_json(p).await.ok()?;
@@ -659,117 +605,26 @@ pub async fn plan_install(req: InstallRequest<'_>, cat: &Catalog) -> Result<Plan
         .find(req.sap, req.version, req.platform)
         .cloned()
         .ok_or_else(|| anyhow!("Adobe does not offer {} {} any more", req.name, req.version))?;
-    let root = paths::downloads().join("adobe").join(format!("{}-{}-{}", product.sap, product.version, product.platform));
-    std::fs::create_dir_all(root.join("products"))?;
-    let main = prepare(&product, &root, req.lang).await?;
-
-    // Shared components the app needs (Camera Raw, colour profiles, CoreSync...). Only fetch
-    // the ones that are missing or older than what the catalog has for that base version.
-    let (_, latest_installed) = read_db();
-    let deps_json = app_json(&product).await?;
-    let mut deps = Vec::new();
-    for d in as_list(&deps_json["Dependencies"]["Dependency"]) {
-        let (Some(dsap), Some(dbase)) = (d["SAPCode"].as_str(), d["BaseVersion"].as_str()) else { continue };
-        let candidate = cat
-            .for_sap(dsap)
-            .filter(|p| p.base_version == dbase)
-            .filter(|p| p.platform == product.platform || p.platform == "win32" || p.platform == "win64")
-            .max_by(|a, b| version::cmp(&a.version, &b.version).then((a.platform == product.platform).cmp(&(b.platform == product.platform))))
-            .or_else(|| cat.for_sap(dsap).max_by(|a, b| version::cmp(&a.version, &b.version)));
-        let Some(candidate) = candidate.cloned() else { continue };
-        let have = latest_installed.get(&(dsap.to_string(), dbase.to_string()));
-        if let Some(h) = have {
-            if !version::newer(&candidate.version, h) {
-                continue;
-            }
-        }
-        match prepare(&candidate, &root, req.lang).await {
-            Ok(p) => deps.push(p),
-            Err(e) => log::warn!("dependency {dsap}: {e}"),
-        }
-    }
-
-    let mut driver = String::from("<DriverInfo>\n    <ProductInfo>\n");
-    driver += &format!(
-        "        <Name>Adobe {}</Name>\n        <SAPCode>{}</SAPCode>\n        <CodexVersion>{}</CodexVersion>\n        <Platform>{}</Platform>\n        <EsdDirectory>./{}</EsdDirectory>\n        <Dependencies>\n",
-        xml_escape(&product.name),
-        product.sap,
-        product.version,
-        product.platform,
-        product.sap
-    );
-    for d in &deps {
-        driver += &format!(
-            "            <Dependency>\n                <SAPCode>{}</SAPCode>\n                <BaseVersion>{}</BaseVersion>\n                <EsdDirectory>./{}</EsdDirectory>\n            </Dependency>\n",
-            d.sap, d.base_version, d.sap
-        );
-    }
-    driver += "        </Dependencies>\n    </ProductInfo>\n    <RequestInfo>\n";
-    driver += &format!(
-        "        <InstallDir>{}</InstallDir>\n        <InstallLanguage>{}</InstallLanguage>\n    </RequestInfo>\n</DriverInfo>\n",
-        xml_escape(&req.install_root.to_string_lossy()),
-        req.lang
-    );
-    let driver_path = root.join("products").join("driver.xml");
-    std::fs::write(&driver_path, driver)?;
-
-    let mut downloads = main.downloads;
-    for d in deps {
-        downloads.extend(d.downloads);
-    }
-
-    let setup = hdbox_dir().join("Setup.exe");
-    if !setup.exists() {
-        bail!("Adobe's installer is missing. Install or repair Creative Cloud first.");
-    }
-    let log = paths::logs().join(format!("adobe-{}-{}.log", product.sap, product.version));
-    let mut steps = vec![Step::Run {
-        exe: setup,
-        args: vec!["--install=1".into(), "--mode=silent".into(), format!("--driverXML={}", driver_path.display())],
-        cwd: Some(root.join("products")),
-        ok_codes: vec![0],
-        elevated: true,
-        label: format!("Installing {}", req.name),
-        log: Some(log),
-    }];
-    if let Some(old) = req.remove_after {
-        if let Some(u) = &old.uninstall {
-            steps.push(Step::Run {
-                exe: PathBuf::from(&u[0]),
-                args: u[1..].to_vec(),
-                cwd: None,
-                ok_codes: vec![0],
-                elevated: true,
-                label: format!("Removing {} {}", old.name, old.version),
-                log: None,
-            });
-        }
-    }
-
-    let mut block_dirs = Vec::new();
-    if let Some(c) = req.current {
-        if let Some(d) = &c.install_dir {
-            block_dirs.push(d.clone());
-        }
-    }
     let new_id = format!("adobe:{}:{}", product.sap, version::major(&product.version));
-    let fallback = if matches!(req.kind, JobKind::Update) && req.current.is_some() {
-        Some(Box::new(plan_rum(req.sap, &req.app_id, &req.name, &product.version, block_dirs.clone())))
-    } else {
-        None
-    };
+    let block_dirs: Vec<PathBuf> = req.current.and_then(|c| c.install_dir.clone()).into_iter().collect();
+    // An update to the newest version of an installed app: Adobe's Remote Update Manager.
+    let newest = cat.newest(req.sap, req.platform, None).map(|p| p.version.clone());
+    if req.kind == JobKind::Update && req.current.is_some() && newest.as_deref() == Some(product.version.as_str()) {
+        return Ok(plan_rum(req.sap, &req.app_id, &req.name, &product.version, block_dirs));
+    }
+    // Anything else (a new app, another version, a repair): Creative Cloud installs it.
     Ok(Plan {
         app_id: req.app_id,
         kind: req.kind,
-        name: req.name,
+        name: req.name.clone(),
         to_version: product.version.clone(),
-        downloads,
-        steps,
+        downloads: vec![],
+        steps: vec![Step::OpenUri { uri: cc_uri(&product.sap, &product.version), label: format!("Installing {} {} in Creative Cloud", req.name, product.version) }],
         block_dirs,
-        block_names: main.conflicting,
-        verify: Verify::Version { app_id: new_id, version: product.version.clone() },
-        fallback,
-        cleanup: vec![root],
+        block_names: vec![],
+        verify: Verify::Wait { app_id: new_id, version: product.version.clone(), minutes: 90 },
+        fallback: None,
+        cleanup: vec![],
     })
 }
 
@@ -832,10 +687,6 @@ pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
 /// Hand an install to the Creative Cloud app (used when direct install is not possible).
 pub fn cc_uri(sap: &str, version: &str) -> String {
     format!("aam://adobecreativecloud/?SAPCode={sap}&version={version}")
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(test)]

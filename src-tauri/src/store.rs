@@ -116,6 +116,16 @@ pub struct Persisted {
     /// Startup at sign-in was set up once (it is on by default)
     #[serde(default)]
     pub autostart_applied: bool,
+    /// How long installs of a kind took (seconds, smoothed), for a progress bar that fits
+    #[serde(default)]
+    pub install_times: std::collections::BTreeMap<String, f64>,
+    /// "Keep previous version" became off by default in 1.0.5; switched off once for copies
+    /// that only had the old default.
+    #[serde(default)]
+    pub keep_previous_default_off: bool,
+    /// Blender pre-releases became shown by default in 1.0.5; switched on once
+    #[serde(default)]
+    pub prereleases_default_on: bool,
 }
 
 pub fn load_state() -> Persisted {

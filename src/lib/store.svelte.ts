@@ -21,7 +21,7 @@ const defaultSettings: Settings = {
   language: "en_US",
   adobeInstallDir: "",
   blenderInstallDir: "",
-  blenderChannel: "stable",
+  blenderChannel: "beta",
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   sources: { adobe: true, craft: true, blender: true },

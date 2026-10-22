@@ -28,6 +28,9 @@ pub struct Marker {
     pub kind: BlenderKind,
     #[serde(default)]
     pub build: Option<String>,
+    /// "Alpha", "Beta", "Release candidate" for pre-release builds
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +54,17 @@ pub struct Beta {
     pub label: String,
 }
 
+impl Beta {
+    /// "5.4.0 Alpha fbe82a4": what the UI shows and passes back to install this build.
+    pub fn display(&self) -> String {
+        build_display(&self.version, &self.label, &self.build)
+    }
+}
+
+pub fn build_display(ver: &str, label: &str, build: &str) -> String {
+    format!("{} {} {}", version::trim_like(ver, "1.2.3"), label, &build[..build.len().min(7)]).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Feed {
     /// series -> releases newest first
@@ -59,6 +73,23 @@ pub struct Feed {
     pub beta: Option<Beta>,
     /// Every release series on download.blender.org, newest first (2.80 and later).
     pub all_series: Vec<String>,
+    /// Every pre-release build for Windows (alpha, beta, release candidate), newest first.
+    pub builds: Vec<Beta>,
+}
+
+impl Feed {
+    /// The build a "-beta" app id or a picked version means: an exact build when the version
+    /// string ends with its hash, else the newest build of that series, else the featured beta.
+    pub fn build_for(&self, id: &str, ver: Option<&str>) -> Option<&Beta> {
+        if let Some(v) = ver {
+            let hash = v.split_whitespace().last().unwrap_or("");
+            if let Some(b) = self.builds.iter().find(|b| !hash.is_empty() && b.build.starts_with(hash)) {
+                return Some(b);
+            }
+        }
+        let series = id.trim_start_matches("blender:").trim_end_matches("-beta");
+        self.builds.iter().find(|b| b.series == series).or(self.beta.as_ref())
+    }
 }
 
 impl Feed {
@@ -169,29 +200,38 @@ pub async fn fetch(installed: &[Installed], beta_channel: bool) -> Result<Feed> 
     // Betas are always listed in Get apps (marked Beta); the channel setting decides updates.
     let _ = beta_channel;
     {
-        feed.beta = fetch_beta().await.unwrap_or_else(|e| {
-            log::warn!("blender beta: {e}");
-            None
+        feed.builds = fetch_builds().await.unwrap_or_else(|e| {
+            log::warn!("blender pre-releases: {e}");
+            vec![]
         });
+        // The featured pre-release: the newest beta or release candidate of a new series.
+        feed.beta = feed
+            .builds
+            .iter()
+            .find(|b| b.label != "Alpha" && version::parts(&b.version).get(2).copied().unwrap_or(0) == 0)
+            .or(feed.builds.first())
+            .cloned();
     }
     Ok(feed)
 }
 
-async fn fetch_beta() -> Result<Option<Beta>> {
+async fn fetch_builds() -> Result<Vec<Beta>> {
     let f = http::get_cached(BUILDER, &[], Duration::from_secs(30 * 60)).await?;
     let v: serde_json::Value = serde_json::from_slice(&f.body)?;
-    let mut best: Option<(Beta, i64)> = None;
+    let mut builds: Vec<(Beta, i64)> = Vec::new();
     for b in v.as_array().into_iter().flatten() {
         let platform_ok = b["platform"] == "windows" && matches!(b["architecture"].as_str(), Some("amd64") | Some("x86_64"));
         let risk = b["risk_id"].as_str().unwrap_or("");
-        if !platform_ok || b["file_extension"] != "zip" || !matches!(risk, "beta" | "rc" | "candidate") {
+        let label = match risk {
+            "alpha" => "Alpha",
+            "beta" => "Beta",
+            "rc" | "candidate" => "Release candidate",
+            _ => continue,
+        };
+        if !platform_ok || b["file_extension"] != "zip" {
             continue;
         }
         let ver = b["version"].as_str().unwrap_or("").to_string();
-        // A "candidate" of an already released series is a bug-fix preview, skip those.
-        if risk == "candidate" && version::parts(&ver).get(2).copied().unwrap_or(0) > 0 {
-            continue;
-        }
         let mtime = b["file_mtime"].as_i64().unwrap_or(0);
         let cand = Beta {
             series: version::series(&ver),
@@ -199,14 +239,18 @@ async fn fetch_beta() -> Result<Option<Beta>> {
             url: b["url"].as_str().unwrap_or("").to_string(),
             size: b["file_size"].as_u64(),
             date: chrono::DateTime::from_timestamp(mtime, 0).map(|d| d.to_rfc3339()),
-            label: if risk == "beta" { "Beta".into() } else { "Release candidate".into() },
+            label: label.into(),
             version: ver,
         };
-        if best.as_ref().is_none_or(|(b, t)| version::newer(&cand.version, &b.version) || (version::cmp(&cand.version, &b.version).is_eq() && mtime > *t)) {
-            best = Some((cand, mtime));
+        // One build per version and kind: the newest.
+        match builds.iter_mut().find(|(o, _)| o.version == cand.version && o.label == cand.label) {
+            Some(slot) if mtime > slot.1 => *slot = (cand, mtime),
+            Some(_) => {}
+            None => builds.push((cand, mtime)),
         }
     }
-    Ok(best.map(|(b, _)| b))
+    builds.sort_by(|a, b| version::cmp(&b.0.version, &a.0.version).then(b.1.cmp(&a.1)));
+    Ok(builds.into_iter().map(|(b, _)| b).collect())
 }
 
 // ---------------------------------------------------------------- installed copies
@@ -324,11 +368,12 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], install_root: &Path) -> Vec<I
             seen_dirs.push(norm(&dir));
             let series = version::series(&ver);
             let (id, name, channel) = if kind == BlenderKind::Beta {
-                (format!("blender:{series}-beta"), format!("Blender {series} Beta"), "beta".to_string())
+                (format!("blender:{series}-beta"), dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("Blender {series} Beta")), "beta".to_string())
             } else {
                 (format!("blender:{ver}"), format!("Blender {}", version::trim_like(&ver, "1.2.3")), if is_lts(&series) { "lts".into() } else { "stable".into() })
             };
-            let display_ver = if kind == BlenderKind::Beta { format!("{} {}", version::trim_like(&ver, "1.2.3"), build.as_deref().map(|b| &b[..b.len().min(7)]).unwrap_or("")).trim().to_string() } else { ver.clone() };
+            let label = marker.as_ref().and_then(|m| m.label.clone()).unwrap_or_else(|| "Beta".into());
+            let display_ver = if kind == BlenderKind::Beta { build_display(&ver, &label, build.as_deref().unwrap_or("")) } else { ver.clone() };
             out.push(Installed {
                 id,
                 source: Source::Blender,
@@ -342,7 +387,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], install_root: &Path) -> Vec<I
                 exe: Some(exe),
                 uninstall: None,
                 size_hint: None,
-                tagline: Some(if kind == BlenderKind::Beta { "Beta build, for testing".into() } else { "Portable copy".into() }),
+                tagline: Some(if kind == BlenderKind::Beta { "Pre-release build, for testing".into() } else { "Portable copy".into() }),
                 channel: Some(channel),
                 missing: false,
                 read_only: false,
@@ -394,14 +439,10 @@ pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest
     match kind {
         BlenderKind::Steam => None,
         BlenderKind::Beta => {
-            let b = feed.beta.as_ref()?;
-            let installed_build = inst.version.split_whitespace().nth(1).unwrap_or("");
-            let newer = version::newer(&b.version, &inst.version) || (!installed_build.is_empty() && !b.build.starts_with(installed_build));
-            Some(Latest {
-                version: if newer { format!("{} {}", version::trim_like(&b.version, "1.2.3"), &b.build[..b.build.len().min(7)]) } else { inst.version.clone() },
-                size: b.size,
-                note: None,
-            })
+            let b = feed.builds.iter().find(|b| b.series == series)?;
+            let installed_hash = inst.version.split_whitespace().last().unwrap_or("");
+            let same = !installed_hash.is_empty() && b.build.starts_with(installed_hash);
+            Some(Latest { version: if same { inst.version.clone() } else { b.display() }, size: b.size, note: None })
         }
         BlenderKind::Msi | BlenderKind::Zip => {
             let newest_patch = feed.newest_in(&series)?;
@@ -470,7 +511,7 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool
     }
     if let Some(b) = &feed.beta {
         let inst = installed.iter().any(|i| i.id == format!("blender:{}-beta", b.series));
-        offer(format!("blender:{}-beta", b.series), format!("Blender {} {}", b.series, b.label), version::trim_like(&b.version, "1.2.3"), b.size, "Next release, for testing", true, inst, false);
+        offer(format!("blender:{}-beta", b.series), format!("Blender {} {}", b.series, b.label), b.display(), b.size, "Pre-release builds for testing: alpha, beta and release candidates", true, inst, true);
     }
     if !feed.all_series.is_empty() {
         offer("blender:older".into(), "Older Blender versions".into(), format!("{} and earlier", feed.all_series.get(1).cloned().unwrap_or_default()), None, "Any release back to 2.80, installed next to the others", false, false, true);
@@ -478,12 +519,27 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool
     out
 }
 
+fn prerelease_info(b: &Beta, latest: bool, installed: bool) -> VersionInfo {
+    VersionInfo {
+        version: b.display(),
+        date: b.date.clone(),
+        notes: vec![format!("{} build of Blender {}", b.label, version::trim_like(&b.version, "1.2.3"))],
+        notes_url: Some(format!("https://developer.blender.org/docs/release_notes/{}/", b.series)),
+        size: b.size,
+        installed,
+        latest,
+        prerelease: true,
+    }
+}
+
 /// Versions offered by the Get apps version picker for a Blender entry.
 pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>> {
     let key = id.trim_start_matches("blender:");
     if key.ends_with("-beta") {
-        let b = feed.beta.as_ref().ok_or_else(|| anyhow!("No beta build right now"))?;
-        return Ok(vec![VersionInfo { version: version::trim_like(&b.version, "1.2.3"), date: b.date.clone(), notes: vec![], notes_url: None, size: b.size, installed: false, latest: true, prerelease: true }]);
+        if feed.builds.is_empty() {
+            return Err(anyhow!("No pre-release builds right now"));
+        }
+        return Ok(feed.builds.iter().enumerate().map(|(i, b)| prerelease_info(b, i == 0, false)).collect());
     }
     let to_info = |r: &Release, latest: bool| {
         let mut v = release_info(&version::series(&r.version), r, &HashMap::new());
@@ -523,17 +579,18 @@ pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>>
 pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>> {
     let (series, kind) = kind_of(inst);
     if kind == BlenderKind::Beta {
-        let b = feed.beta.as_ref().ok_or_else(|| anyhow!("No beta build right now"))?;
-        return Ok(vec![VersionInfo {
-            version: format!("{} {}", version::trim_like(&b.version, "1.2.3"), &b.build[..b.build.len().min(7)]),
-            date: b.date.clone(),
-            notes: vec![format!("{} build of Blender {}", b.label, b.series)],
-            notes_url: Some(format!("https://developer.blender.org/docs/release_notes/{}/", b.series)),
-            size: b.size,
-            installed: inst.version.contains(&b.build[..b.build.len().min(7)]),
-            latest: true,
-            prerelease: true,
-        }]);
+        let hash = inst.version.split_whitespace().last().unwrap_or("").to_string();
+        let list: Vec<VersionInfo> = feed
+            .builds
+            .iter()
+            .filter(|b| b.series == series)
+            .enumerate()
+            .map(|(i, b)| prerelease_info(b, i == 0, !hash.is_empty() && b.build.starts_with(&hash)))
+            .collect();
+        if list.is_empty() {
+            return Err(anyhow!("No pre-release builds of Blender {series} right now"));
+        }
+        return Ok(list);
     }
     let list = match feed.series.get(&series) {
         Some(l) => l.clone(),
@@ -626,17 +683,17 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
 
     // Beta builds (always portable, replaced in place on update).
     if id.ends_with("-beta") {
-        let b = feed.beta.clone().ok_or_else(|| anyhow!("There is no Blender beta build right now"))?;
-        let name = format!("Blender {} Beta", b.series);
+        let b = feed.build_for(id, ver).cloned().ok_or_else(|| anyhow!("There is no Blender pre-release build right now"))?;
+        let name = format!("Blender {} {}", b.series, b.label);
         let dir = ctx.root.join(&name);
         let zip = paths::downloads().join("blender").join(b.url.rsplit('/').next().unwrap_or("blender-beta.zip"));
         let sha = http::get_cached(&format!("{}.sha256", b.url), &[], Duration::from_secs(3600)).await.ok().and_then(|f| String::from_utf8_lossy(&f.body).split_whitespace().next().map(|s| s.to_ascii_lowercase()));
-        let marker = Marker { version: b.version.clone(), kind: BlenderKind::Beta, build: Some(b.build.clone()) };
+        let marker = Marker { version: b.version.clone(), kind: BlenderKind::Beta, build: Some(b.build.clone()), label: Some(b.label.clone()) };
         return Ok(Plan {
             app_id: format!("blender:{}-beta", b.series),
             kind,
             name: name.clone(),
-            to_version: format!("{} {}", version::trim_like(&b.version, "1.2.3"), &b.build[..b.build.len().min(7)]),
+            to_version: b.display(),
             downloads: vec![Download { url: b.url.clone(), dest: zip.clone(), size: b.size, sha256: sha, headers: vec![] }],
             steps: zip_steps(&zip, &dir, &marker, &name, dir.exists()),
             block_dirs: vec![dir],
@@ -708,7 +765,7 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
     }
     let zip = paths::downloads().join("blender").join(url.rsplit('/').next().unwrap_or("blender.zip"));
     let sha = sha_for(&target.version, &url).await;
-    let marker = Marker { version: target.version.clone(), kind: BlenderKind::Zip, build: None };
+    let marker = Marker { version: target.version.clone(), kind: BlenderKind::Zip, build: None, label: None };
     let mut steps = zip_steps(&zip, &dir, &marker, &name, false);
     // A portable copy replaced by a newer bug-fix copy goes away when versions are not kept.
     if let Some(c) = current {
@@ -807,6 +864,29 @@ mod tests {
 
     fn rel(v: &str) -> Release {
         Release { version: v.into(), date: None, msi: Some(format!("m{v}")), zip: Some(format!("z{v}")), msi_size: Some(1), zip_size: Some(2) }
+    }
+
+    fn build(ver: &str, label: &str, hash: &str) -> Beta {
+        Beta { version: ver.into(), series: version::series(ver), build: hash.into(), url: String::new(), size: None, date: None, label: label.into() }
+    }
+
+    #[test]
+    fn prerelease_builds_are_picked_by_hash_or_series() {
+        let mut feed = Feed::default();
+        feed.builds = vec![build("5.4.0", "Alpha", "fbe82a461016"), build("5.3.0", "Beta", "873fa9640966"), build("4.5.15", "Release candidate", "ef05e168f531")];
+        feed.beta = Some(feed.builds[1].clone());
+        assert_eq!(feed.builds[0].display(), "5.4.0 Alpha fbe82a4");
+        // An exact build from the picker.
+        assert_eq!(feed.build_for("blender:5.3-beta", Some("5.4.0 Alpha fbe82a4")).unwrap().build, "fbe82a461016");
+        // No pick: the newest build of that series.
+        assert_eq!(feed.build_for("blender:4.5-beta", None).unwrap().label, "Release candidate");
+        // An installed 5.3 beta is offered the newer 5.3 build only, never the 5.4 alpha.
+        let mut i = inst("5.3", "5.3.0 Beta 1111111", BlenderKind::Beta);
+        i.id = "blender:5.3-beta".into();
+        let l = latest(&i, std::slice::from_ref(&i), &feed).unwrap();
+        assert_eq!(l.version, "5.3.0 Beta 873fa96");
+        i.version = "5.3.0 Beta 873fa96".into();
+        assert_eq!(latest(&i, std::slice::from_ref(&i), &feed).unwrap().version, i.version);
     }
 
     #[test]

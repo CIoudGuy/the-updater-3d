@@ -16,7 +16,7 @@
   import { router, appHref } from "../lib/router.svelte";
   import { checkNow, repairApp, togglePauseAll, updateAll, updateOne, isPaused, updateSelf } from "../lib/actions";
   import { bytes, checkedLine, clock, countOf, duration, inUnit, nameList, splitVersion, unitFor } from "../lib/format";
-  import { jobStatus, pct } from "../lib/jobs";
+  import { NO_STOP_TIP, canPause, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import type { ServiceInfo } from "../lib/types";
 
@@ -248,7 +248,7 @@
         <Btn variant="primary" hint="Ctrl U" title="Update all  Ctrl U" onclick={updateAll}>Update all</Btn>
         <Btn variant="secondary" title="Review in Installed  Ctrl 2" onclick={review}>Review updates</Btn>
       {:else if hs === "updating"}
-        <Btn variant="secondary" hint="Ctrl P" title={paused ? "Resume all  Ctrl P" : "Pause all  Ctrl P"} onclick={togglePauseAll}>{paused ? "Resume all" : "Pause all"}</Btn>
+        <Btn variant="secondary" hint="Ctrl P" title={store.openJobs.some(canPause) ? (paused ? "Resume all  Ctrl P" : "Pause all  Ctrl P") : NO_STOP_TIP} disabled={!store.openJobs.some(canPause)} onclick={togglePauseAll}>{paused ? "Resume all" : "Pause all"}</Btn>
         <Btn variant="ghost" href="#/queue" title="Open queue  Ctrl 4">Open queue</Btn>
       {:else if hs === "offline"}
         <Btn variant="secondary" hint="F5" title="Try again  F5" onclick={checkNow}>Try again</Btn>
@@ -329,7 +329,7 @@
             </div>
             <span class="jstat ellipsis" style:color={j.state === "paused" ? "var(--warn)" : "var(--text-2)"}>{jobStatus(j)}</span>
             <span class="jpct"><Num value={pct(j)} />%</span>
-            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title="{j.state === 'paused' ? 'Resume' : 'Pause'}  Space" onclick={() => pauseJob(j.id, j.state)} disabled={j.state === "blocked"}>
+            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j, "  Space")} onclick={() => pauseJob(j.id, j.state)} disabled={!canPause(j)}>
               <Icon d={j.state === "paused" ? I.play : I.pause} />
             </button>
             <span class="jbar2"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>

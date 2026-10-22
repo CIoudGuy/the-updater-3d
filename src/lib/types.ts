@@ -194,7 +194,7 @@ export interface Settings {
   adobeInstallDir: string;
   /** Root that new Blender versions go into */
   blenderInstallDir: string;
-  /** "stable" or "beta" (beta also shows Blender betas) */
+  /** "beta" (default) also lists Blender alpha, beta and release candidate builds; "stable" hides them */
   blenderChannel: "stable" | "beta";
   /** Bug-fix releases (5.2.2 -> 5.2.3) keep the old copy instead of replacing it */
   blenderKeepPatchVersions: boolean;

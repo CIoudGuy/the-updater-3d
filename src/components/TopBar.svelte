@@ -23,7 +23,7 @@
     { id: "settings", label: "Settings", href: "#/settings", key: "Ctrl ,", d: I.settings },
   ] as const;
 
-  const active = $derived(router.route.name === "detail" ? "installed" : router.route.name);
+  const active = $derived(router.route.name === "detail" ? "installed" : router.route.name === "getdetail" ? "get" : router.route.name);
   const compact = $derived(ui.compact);
 
   const hasJobs = $derived(store.openJobs.length > 0);

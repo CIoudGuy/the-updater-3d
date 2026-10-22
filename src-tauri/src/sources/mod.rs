@@ -117,6 +117,8 @@ pub enum Verify {
     Removed { app_id: String },
     /// Hand-off to another program, nothing to check.
     None,
+    /// Hand-off to another program (Creative Cloud): wait up to `minutes` for this version.
+    Wait { app_id: String, version: String, minutes: u64 },
 }
 
 #[derive(Clone, Debug)]

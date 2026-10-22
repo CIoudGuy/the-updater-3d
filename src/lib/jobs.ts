@@ -41,3 +41,24 @@ export function jobWhat(j: Job): string {
 }
 
 export const pct = (j: Job) => Math.round(j.progress * 100);
+
+/** Tooltip for a job control that does nothing right now. */
+export const NO_STOP_TIP = "Installing now. It can't be stopped safely.";
+
+/** The backend only pauses a job that is downloading (or one that already is paused or still waiting). */
+export function canPause(j: Pick<Job, "state">): boolean {
+  return j.state === "downloading" || j.state === "paused" || j.state === "waiting";
+}
+/** The backend refuses to cancel while the installer runs. */
+export function canCancel(j: Pick<Job, "state">): boolean {
+  return j.state !== "installing" && j.state !== "verifying";
+}
+/** Tooltip for the pause or resume button: the reason when it is disabled, else the action with its key. */
+export function pauseTip(j: Pick<Job, "state">, keys = ""): string {
+  if (!canPause(j)) return j.state === "blocked" ? "Waiting for the app to close." : NO_STOP_TIP;
+  return (j.state === "paused" ? "Resume" : "Pause") + keys;
+}
+/** Tooltip for the cancel button. */
+export function cancelTip(j: Pick<Job, "state">, label = "Cancel", keys = ""): string {
+  return canCancel(j) ? label + keys : NO_STOP_TIP;
+}
