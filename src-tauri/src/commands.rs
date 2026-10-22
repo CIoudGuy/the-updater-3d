@@ -338,6 +338,12 @@ pub async fn catalog_versions(core: C<'_>, id: String) -> Res<Vec<VersionInfo>> 
 }
 
 #[tauri::command]
+pub async fn search_other_apps(core: C<'_>, query: String) -> Res<Vec<CatalogEntry>> {
+    let c = core.inner().clone();
+    Ok(c.search_other(query).await)
+}
+
+#[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }

@@ -3,7 +3,7 @@
 use crate::download::{self, Control, Outcome, Progress, Throttle};
 use crate::elevate::Elevator;
 use crate::model::*;
-use crate::sources::{self, adobe, blender, craft, tools, Installed, Latest, Plan, SourceData, Verify};
+use crate::sources::{self, adobe, blender, craft, other, tools, Installed, Latest, Plan, SourceData, Verify};
 use crate::store::{self, Persisted};
 use crate::{paths, procs, version, winutil};
 use anyhow::{anyhow, Result};
@@ -55,6 +55,7 @@ pub struct Core {
     pub craft: RwLock<Option<Arc<craft::Feed>>>,
     pub blender: RwLock<Option<Arc<blender::Feed>>>,
     pub tools: RwLock<Option<Arc<tools::Feed>>>,
+    pub other: RwLock<Option<Arc<other::Feed>>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
     pub throttle: Arc<Throttle>,
@@ -110,6 +111,7 @@ impl Core {
             craft: RwLock::new(None),
             blender: RwLock::new(None),
             tools: RwLock::new(None),
+            other: RwLock::new(None),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
             throttle,
@@ -296,6 +298,7 @@ impl Core {
     pub async fn rescan(self: &Arc<Self>) {
         let s = self.settings.read().clone();
         let cat = self.adobe.read().clone();
+        let of = self.other.read().clone();
         let installed = tokio::task::spawn_blocking(move || {
             let un = winutil::uninstall_entries();
             let mut v = Vec::new();
@@ -310,6 +313,10 @@ impl Core {
             }
             if s.sources.tools {
                 v.extend(tools::scan(&un, &PathBuf::from(&s.godot_install_dir)));
+            }
+            if s.sources.other {
+                let found = other::scan(&un, &v, of.as_deref());
+                v.extend(found);
             }
             // Leftover registrations whose files are gone are not installed apps (Adobe kept
             // listing a deleted Photoshop). They show up in Get apps instead.
@@ -329,6 +336,7 @@ impl Core {
         let cf = self.craft.read().clone();
         let bf = self.blender.read().clone();
         let tf = self.tools.read().clone();
+        let of = self.other.read().clone();
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
         for i in &installed {
@@ -337,6 +345,7 @@ impl Core {
                 Source::Craft => cf.as_ref().and_then(|f| craft::latest(i, f)),
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest(i, &installed, f)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
+                Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
             };
             if let Some(l) = l {
                 latest.insert(i.id.clone(), l);
@@ -395,6 +404,11 @@ impl Core {
         let mut measured = false;
         for i in &installed {
             if self.st.lock().sizes.contains_key(&i.id) || i.missing {
+                continue;
+            }
+            // Other apps report their size in the uninstall list; their folders can be huge
+            // (a game launcher with its games), so they are not walked.
+            if i.source == Source::Other && i.size_hint.is_some() {
                 continue;
             }
             let Some(dir) = i.install_dir.clone() else { continue };
@@ -511,7 +525,19 @@ impl Core {
                 }
             }
         };
-        let (a, c, b, t) = tokio::join!(adobe_f, craft_f, blender_f, tools_f);
+        let other_f = async {
+            if !settings.sources.other {
+                return None;
+            }
+            match other::fetch(&installed).await {
+                Ok(f) => Some(Arc::new(f)),
+                Err(e) => {
+                    log::warn!("other apps: {e:#}");
+                    None
+                }
+            }
+        };
+        let (a, c, b, t, o) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f);
         if a.is_some() {
             *self.adobe.write() = a;
         } else if settings.sources.adobe {
@@ -531,6 +557,11 @@ impl Core {
             *self.tools.write() = t;
         } else if settings.sources.tools {
             unknown.insert("tools");
+        }
+        if o.is_some() {
+            *self.other.write() = o;
+        } else if settings.sources.other {
+            unknown.insert("other");
         }
         self.st.lock().unknown_sources = unknown.clone();
         self.rescan().await;
@@ -560,7 +591,7 @@ impl Core {
             s.scan_step = None;
         });
         let meta = if !unknown.is_empty() {
-            let names: Vec<&str> = unknown.iter().map(|s| match *s { "adobe" => "Adobe", "craft" => "Craft apps", "tools" => "More apps", _ => "Blender" }).collect();
+            let names: Vec<&str> = unknown.iter().map(|s| match *s { "adobe" => "Adobe", "craft" => "Craft apps", "tools" => "More apps", "other" => "Other apps", _ => "Blender" }).collect();
             Some(format!("Could not reach {}", names.join(", ")))
         } else {
             None
@@ -738,11 +769,12 @@ impl Core {
         let settings = self.settings.read().clone();
         self.rescan().await;
         let installed = self.st.lock().installed.clone();
-        let (a, c, b, t) = tokio::join!(
+        let (a, c, b, t, o) = tokio::join!(
             async { if settings.sources.adobe { adobe::fetch_catalog().await.ok() } else { None } },
             async { if settings.sources.craft { craft::fetch(settings.craft_prereleases).await.ok() } else { None } },
             async { if settings.sources.blender { blender::fetch(&installed, settings.blender_channel == "beta").await.ok() } else { None } },
             async { if settings.sources.tools { tools::fetch(&installed).await.ok() } else { None } },
+            async { if settings.sources.other { other::fetch(&installed).await.ok() } else { None } },
         );
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
         if let Some(a) = a {
@@ -756,6 +788,9 @@ impl Core {
         }
         if let Some(t) = t {
             *self.tools.write() = Some(Arc::new(t));
+        }
+        if let Some(o) = o {
+            *self.other.write() = Some(Arc::new(o));
         }
         self.rescan().await;
         let me = self.clone();
@@ -836,6 +871,14 @@ impl Core {
                 out.extend(tools::catalog_entries(f, &st.installed));
             }
         }
+        if s.sources.other {
+            if let Some(f) = self.other.read().as_ref() {
+                out.extend(other::catalog_entries(f, &st.installed).into_iter().map(|mut e| {
+                    e.icon_url = st.icons.get(&e.id).cloned();
+                    e
+                }));
+            }
+        }
         for e in &mut out {
             if let Some(u) = st.catalog_icons.get(&e.id) {
                 e.icon_url = Some(u.clone());
@@ -854,6 +897,18 @@ impl Core {
             }
         }
         out
+    }
+
+    /// Packages of the winget catalog for a search in Get apps (Other apps on only).
+    pub async fn search_other(&self, q: String) -> Vec<CatalogEntry> {
+        if !self.settings.read().sources.other {
+            return vec![];
+        }
+        let installed = self.st.lock().installed.clone();
+        let show_installed = self.settings.read().show_installed_in_get_apps;
+        let found = tokio::task::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default();
+        // Like the rest of Get apps: installed apps only when the setting asks for them.
+        found.into_iter().filter(|e| show_installed || !e.installed).collect()
     }
 
     /// Get apps version list: the saved copy at once when there is one (refreshed in the
@@ -936,6 +991,11 @@ impl Core {
                 let installed = self.st.lock().installed.clone();
                 tools::catalog_versions(parts.next().unwrap_or(""), &feed, &installed).await
             }
+            "other" => {
+                let feed = self.other.read().clone();
+                let installed = self.st.lock().installed.clone();
+                other::catalog_versions(id, feed.as_deref(), &installed).await
+            }
             _ => Err(anyhow!("Unknown app {id}")),
         }
     }
@@ -957,6 +1017,10 @@ impl Core {
             SourceData::Tools { .. } => {
                 let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists are not loaded yet"))?;
                 tools::versions(&inst, &feed).await
+            }
+            SourceData::Other { .. } => {
+                let feed = self.other.read().clone().unwrap_or_default();
+                other::versions(&inst, &feed).await
             }
         }
     }
@@ -1244,6 +1308,11 @@ impl Core {
                         let target = if repair { Some(inst.version.clone()) } else { version.clone().or(latest) };
                         tools::plan_install(&inst.id, target.as_deref(), kind, Some(&inst), &installed, &feed, tools::Ctx { godot_root: std::path::Path::new(&s.godot_install_dir) }).await
                     }
+                    SourceData::Other { .. } => {
+                        let feed = self.other.read().clone();
+                        let kind = if repair { JobKind::Repair } else if version.as_ref().is_some_and(|v| tools::cmp_ver(&inst.version, v).is_gt()) { JobKind::Rollback } else { JobKind::Update };
+                        other::plan_install(&inst.id, if repair { None } else { version.as_deref() }, kind, Some(&inst), feed.as_deref()).await
+                    }
                     SourceData::Blender { .. } => {
                         if repair {
                             return Err(anyhow!("Repair is not available for Blender. Install the same version again from its page."));
@@ -1314,6 +1383,10 @@ impl Core {
                         let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists could not be loaded"))?;
                         tools::plan_install(id, version.as_deref(), JobKind::Install, None, &installed, &feed, tools::Ctx { godot_root: std::path::Path::new(&s.godot_install_dir) }).await
                     }
+                    "other" => {
+                        let feed = self.other.read().clone();
+                        other::plan_install(id, version.as_deref(), JobKind::Install, None, feed.as_deref()).await
+                    }
                     _ => Err(anyhow!("Unknown app {id}")),
                 }
             }
@@ -1324,11 +1397,13 @@ impl Core {
                     Source::Craft => craft::plan_uninstall(inst),
                     Source::Blender => blender::plan_uninstall(inst),
                     Source::Tools => tools::plan_uninstall(inst),
+                    Source::Other => other::plan_uninstall(inst),
                 }?;
-                // Whatever the vendor's uninstaller leaves in the app's own folder goes too.
+                // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Not for
+                // Other apps: nothing is known about what they keep there.
                 let others: Vec<PathBuf> = installed.iter().filter(|i| i.id != inst.id).filter_map(|i| i.install_dir.clone()).collect();
                 let removed_already = |d: &std::path::Path| plan.steps.iter().any(|s| matches!(s, sources::Step::RemoveDir { path, .. } if path.as_path() == d));
-                if let Some(dir) = inst.install_dir.as_deref().and_then(|d| leftover_dir(d, &others)).filter(|d| !removed_already(d)) {
+                if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source != Source::Other).and_then(|d| leftover_dir(d, &others)).filter(|d| !removed_already(d)) {
                     plan.steps.push(sources::Step::RemoveDir { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
                 }
                 if *remove_prefs {
@@ -1379,10 +1454,20 @@ impl Core {
                 return;
             }
         };
-        self.set_job(id, |j| j.to_version = plan.to_version.clone());
+        self.set_job(id, |j| {
+            j.to_version = plan.to_version.clone();
+            // Other apps pick a package version, which can read differently from the version in the
+            // uninstall list; the plan knows whether it is an update or a roll back.
+            if plan.app_id.starts_with("other:") && j.kind != JobKind::Install {
+                j.kind = plan.kind;
+            }
+        });
         let mut result = self.execute(id, &plan).await;
         if let Err(e) = &result {
-            if let Some(fb) = &plan.fallback {
+            // Other apps try again with admin rights only when Windows would not start the
+            // installer without them (error 740), never after an installer that ran.
+            let retry = !plan.app_id.starts_with("other:") || other::needs_elevation(&format!("{e:#}"));
+            if let (Some(fb), true) = (&plan.fallback, retry) {
                 log::warn!("{}: {e:#}; trying fallback", plan.name);
                 self.set_job(id, |j| {
                     j.state = JobState::Downloading;
@@ -1801,6 +1886,7 @@ impl Core {
             || new.sources.craft != old.sources.craft
             || new.sources.blender != old.sources.blender
             || new.sources.tools != old.sources.tools
+            || new.sources.other != old.sources.other
             || new.godot_install_dir != old.godot_install_dir
             || new.blender_channel != old.blender_channel
             || new.craft_prereleases != old.craft_prereleases
@@ -2022,6 +2108,8 @@ fn install_estimate(plan: &Plan, bytes: u64) -> (String, f64) {
             let key = plan.app_id.split(':').nth(1).unwrap_or("");
             (format!("tools:{key}"), tools::install_seconds(key, mb))
         }
+        // Learned per package: apps differ a lot.
+        "other" => (plan.app_id.clone(), other::install_seconds(mb)),
         other => (other.to_string(), 30.0),
     }
 }
