@@ -26,6 +26,7 @@ const defaultSettings: Settings = {
   blenderChannel: "beta",
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
+  showInstalledInGetApps: false,
   sources: { adobe: true, craft: true, blender: true, tools: true },
   parallelDownloads: 3,
   silentElevation: false,

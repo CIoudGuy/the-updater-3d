@@ -184,7 +184,14 @@ pub fn unity_bullets(md: &str) -> Vec<String> {
     let md = md.replace("\r\n", "\n");
     let start = md.lines().position(|l| l.starts_with('#') && l.contains("Release Notes")).unwrap_or(0);
     let mut out = Vec::new();
-    for l in md.lines().skip(start) {
+    // The "6000.3.27f1 Release Notes" heading itself is the title, not a section.
+    for (i, l) in md.lines().skip(start).enumerate() {
+        if i > 0 {
+            if let Some(h) = super::craft::markdown_heading(l.trim()) {
+                out.push(h);
+                continue;
+            }
+        }
         let Some(item) = l.strip_prefix("- ") else { continue };
         let t = link.replace_all(item, "$1").replace(" \u{2014} ", ", ").replace('\u{2014}', ", ").replace('\u{2013}', "-");
         let t = t.trim().trim_end_matches('.').to_string();
@@ -192,7 +199,7 @@ pub fn unity_bullets(md: &str) -> Vec<String> {
             out.push(t);
         }
     }
-    out
+    notes::tidy_headings(out)
 }
 
 // ---------------------------------------------------------------- GitHub

@@ -287,3 +287,18 @@ async fn unity_hub_comes_with_unity_and_has_full_notes() {
         Err(e) => println!("Unity plan: {e}"),
     }
 }
+
+/// The first release of a Blender series carries its whole release notes, by topic.
+#[tokio::test]
+#[ignore]
+async fn blender_first_release_has_the_full_notes() {
+    let m = updater_lib::notes::blender_major("5.2").await;
+    let topics: Vec<&String> = m.lines.iter().filter(|l| l.starts_with("# ")).collect();
+    let items = m.lines.iter().filter(|l| !l.starts_with('#')).count();
+    println!("Blender 5.2.0: {} topics, {} items, date {:?}", topics.len(), items, m.date);
+    for l in m.lines.iter().take(14) {
+        println!("  {l}");
+    }
+    assert!(topics.len() >= 10 && items >= 100, "{} topics {} items", topics.len(), items);
+    assert!(m.date.is_some());
+}

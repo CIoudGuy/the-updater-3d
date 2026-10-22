@@ -204,6 +204,8 @@ export interface Settings {
   blenderKeepPatchVersions: boolean;
   /** Show Craft app pre-releases */
   craftPrereleases: boolean;
+  /** Get apps also lists apps that are already installed */
+  showInstalledInGetApps: boolean;
   /** Which sources are enabled */
   sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean };
   /** Number of parallel downloads */

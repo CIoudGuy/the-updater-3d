@@ -180,7 +180,8 @@ fn unity_release_api_is_parsed() {
 fn unity_notes_skip_known_issues() {
     let md = "### Known Issues in 6000.3.27f1\n\n- Content Build: Player stops responding\n    ([UUM-1](https://x))\n\n### 6000.3.27f1 Release Notes\n\n#### Improvements\n\n- Asset Import: Improved the security of model import [details](https://x) \u{2014} two fixes.\n    (UUM-155199)\n\n#### API Changes\n\n- Graphics: Added Graphics.disableDepthAndStencilBuffers\n";
     let v = unity_bullets(md);
-    assert_eq!(v, vec!["Asset Import: Improved the security of model import details, two fixes", "Graphics: Added Graphics.disableDepthAndStencilBuffers"]);
+    // Unity's sections come along as headings.
+    assert_eq!(v, vec!["## Improvements", "Asset Import: Improved the security of model import details, two fixes", "## API Changes", "Graphics: Added Graphics.disableDepthAndStencilBuffers"]);
     // Without a release notes heading every bullet counts, all of them.
     let many: String = (0..30).map(|i| format!("- item {i}\n")).collect();
     assert_eq!(unity_bullets(&many).len(), 30);
