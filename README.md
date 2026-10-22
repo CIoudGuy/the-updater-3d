@@ -49,14 +49,13 @@ The installer is written to `src-tauri/target/release/bundle/nsis/`.
 
 ### Self-updates (optional)
 
-The app can update itself from a JSON release feed. Both settings are read at build time from files
-that are not committed:
+The app updates itself from a JSON release feed. Both settings are read at build time:
 
-- `src-tauri/.update-feed`: the feed address
-- `src-tauri/.update-key`: the key, if the feed is private (sent as `X-Update-Key`)
+- `src-tauri/.update-feed`: the feed address (the official releases)
+- `src-tauri/.update-key`: the key for that feed (sent as `X-Update-Key`)
 
-`UPDATER3D_FEED_URL` and `UPDATER3D_UPDATE_KEY` environment variables work too. Without a feed
-address the app never offers self-updates. The feed answers with:
+`UPDATER3D_FEED_URL` and `UPDATER3D_UPDATE_KEY` environment variables override the files, so a
+fork can point at its own feed. Without a feed address the app never offers self-updates. The feed answers with:
 
 ```json
 {

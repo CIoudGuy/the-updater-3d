@@ -5,9 +5,7 @@ src-tauri/target/
 src-tauri/gen/
 installer/
 
-# Release settings and private notes (never commit)
-src-tauri/.update-key
-src-tauri/.update-feed
+# Private notes (never commit)
 *.local.md
 
 # Editor and tool folders
