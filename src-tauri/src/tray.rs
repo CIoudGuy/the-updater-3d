@@ -114,20 +114,36 @@ fn remember(w: &tauri::WebviewWindow, core: &Arc<Core>) {
         return;
     }
     let max = w.is_maximized().unwrap_or(false);
-    let mut p = core.persisted.lock();
-    if max {
-        if let Some(g) = p.window.as_mut() {
-            g.4 = true;
+    {
+        let mut p = core.persisted.lock();
+        if max {
+            if let Some(g) = p.window.as_mut() {
+                g.4 = true;
+            } else if let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) {
+                p.window = Some((pos.x, pos.y, size.width, size.height, true));
+            }
         } else if let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) {
-            p.window = Some((pos.x, pos.y, size.width, size.height, true));
-        }
-        return;
-    }
-    if let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) {
-        if size.width >= 400 && size.height >= 300 {
-            p.window = Some((pos.x, pos.y, size.width, size.height, false));
+            if size.width >= 400 && size.height >= 300 {
+                p.window = Some((pos.x, pos.y, size.width, size.height, false));
+            }
         }
     }
+    save_soon(core);
+}
+
+/// Write the window placement to disk half a second after the last move or resize, so it
+/// survives a crash, a forced close or an update restart, without writing on every pixel.
+fn save_soon(core: &Arc<Core>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    let gen = GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let core = core.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if GEN.load(Ordering::SeqCst) == gen {
+            crate::store::save_state(&core.persisted.lock());
+        }
+    });
 }
 
 fn toggle_popup(app: &AppHandle, rect: Rect) {
