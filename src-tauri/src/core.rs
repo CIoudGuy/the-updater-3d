@@ -1399,9 +1399,14 @@ impl Core {
                     Source::Tools => tools::plan_uninstall(inst),
                     Source::Other => other::plan_uninstall(inst),
                 }?;
-                // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Not for
-                // Other apps: nothing is known about what they keep there.
+                // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Other
+                // apps: nothing is known about what they keep there, so their folder only goes when
+                // nothing but the uninstaller is left (an NSIS uninstaller run in place can not
+                // delete itself).
                 let others: Vec<PathBuf> = installed.iter().filter(|i| i.id != inst.id).filter_map(|i| i.install_dir.clone()).collect();
+                if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source == Source::Other).and_then(|d| leftover_dir(d, &others)) {
+                    plan.steps.push(sources::Step::RemoveIfOnlyUninstaller { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
+                }
                 let removed_already = |d: &std::path::Path| plan.steps.iter().any(|s| matches!(s, sources::Step::RemoveDir { path, .. } if path.as_path() == d));
                 if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source != Source::Other).and_then(|d| leftover_dir(d, &others)).filter(|d| !removed_already(d)) {
                     plan.steps.push(sources::Step::RemoveDir { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });

@@ -78,11 +78,16 @@ pub async fn refresh_index(max_age: Duration) -> Result<PathBuf> {
         Ok(r) if r.status().is_success() => {
             let header = |h: reqwest::header::HeaderName| r.headers().get(h).and_then(|v| v.to_str().ok()).map(String::from);
             let (etag, last_modified) = (header(reqwest::header::ETAG), header(reqwest::header::LAST_MODIFIED));
-            let body = r.bytes().await.context("winget index download")?.to_vec();
-            let target = db.clone();
-            tokio::task::spawn_blocking(move || install_index(&body, &target)).await.map_err(|e| anyhow!("{e}"))??;
-            save(&IndexMeta { etag, last_modified, fetched: now });
-            Ok(db)
+            let got: Result<()> = async {
+                let body = r.bytes().await.context("winget index download")?.to_vec();
+                let target = db.clone();
+                tokio::task::spawn_blocking(move || install_index(&body, &target)).await.map_err(|e| anyhow!("{e}"))?
+            }
+            .await;
+            if got.is_ok() {
+                save(&IndexMeta { etag, last_modified, fetched: now });
+            }
+            keep_old_on_error(got, have, db)
         }
         Ok(r) if have => {
             log::warn!("winget index: HTTP {}, using the copy on disk", r.status());
@@ -94,6 +99,19 @@ pub async fn refresh_index(max_age: Duration) -> Result<PathBuf> {
             Ok(db)
         }
         Err(e) => Err(e).context("Could not reach cdn.winget.microsoft.com"),
+    }
+}
+
+/// A refresh that broke off (connection dropped mid-download, the file still locked) keeps the
+/// index already on disk instead of failing the whole check.
+fn keep_old_on_error(got: Result<()>, have: bool, db: PathBuf) -> Result<PathBuf> {
+    match got {
+        Ok(()) => Ok(db),
+        Err(e) if have => {
+            log::warn!("winget index: {e:#}, using the copy on disk");
+            Ok(db)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -838,6 +856,16 @@ pub fn normalize_publisher(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refresh_that_breaks_off_keeps_the_index_on_disk() {
+        let db = PathBuf::from("index.db");
+        let broke = || Err(anyhow!("error decoding response body: connection closed"));
+        assert_eq!(keep_old_on_error(broke(), true, db.clone()).unwrap(), db);
+        // Without a copy on disk there is nothing to fall back on.
+        assert!(keep_old_on_error(broke(), false, db.clone()).is_err());
+        assert_eq!(keep_old_on_error(Ok(()), false, db.clone()).unwrap(), db);
+    }
 
     #[test]
     fn normalizes_names_like_winget() {

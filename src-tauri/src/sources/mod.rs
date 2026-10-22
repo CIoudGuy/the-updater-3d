@@ -107,6 +107,9 @@ pub enum Step {
     OpenUri { uri: String, label: String },
     /// Delete a key (and everything under it) in the user's own registry hive, HKCU.
     RemoveUserRegKey { path: String, label: String },
+    /// Delete an app folder after its uninstaller ran, only when nothing but the uninstaller and
+    /// its logs is left in it (`winutil::only_uninstaller_left`); otherwise leave it as it is.
+    RemoveIfOnlyUninstaller { path: PathBuf, elevated: bool, label: String },
 }
 
 impl Step {
@@ -117,14 +120,15 @@ impl Step {
             | Step::RemoveDir { label, .. }
             | Step::Shortcut { label, .. }
             | Step::OpenUri { label, .. }
-            | Step::RemoveUserRegKey { label, .. } => label,
+            | Step::RemoveUserRegKey { label, .. }
+            | Step::RemoveIfOnlyUninstaller { label, .. } => label,
             Step::WriteFile { .. } => "Writing settings",
             Step::RemoveFile { .. } => "Cleaning up",
         }
     }
     pub fn elevated(&self) -> bool {
         match self {
-            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } => *elevated,
+            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } => *elevated,
             _ => false,
         }
     }

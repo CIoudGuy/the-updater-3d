@@ -524,6 +524,8 @@ impl Want {
             Some(_) => Some("x86"),
             None if starts_dir(&loc, &paths::program_files_x86()) => Some("x86"),
             None if starts_dir(&loc, &paths::program_files()) && !paths::program_files().to_string_lossy().contains("(x86)") => Some("x64"),
+            // Registered in the 32 bit view and installed outside Program Files: a 32 bit copy.
+            None if e.hive == "HKLM32" => Some("x86"),
             None => None,
         };
         Want {
@@ -577,8 +579,9 @@ pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static 
         "portable" => return Err("only a portable copy"),
         "pwa" | "font" => return Err("not a desktop app installer"),
         "zip" => return Err("a zip without an installer in it"),
-        // An exe without switches that the manifest says installs silently is silent by itself.
-        "exe" if i.silent.is_none() && i.silent_progress.is_none() && !i.install_modes.iter().any(|m| m.eq_ignore_ascii_case("silent")) => return Err("its installer has no silent mode"),
+        // A plain exe needs its silent switch. "InstallModes: silent" alone is often copied from a
+        // template, and such an installer opens its window and waits for clicks.
+        "exe" if i.silent.is_none() && i.silent_progress.is_none() => return Err("its installer has no silent mode"),
         "msi" | "wix" | "nsis" | "inno" | "burn" | "exe" => {}
         _ => return Err("an installer type that is not supported"),
     }
@@ -1325,7 +1328,8 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
     let (file, run_kind) = if i.kind == "zip" {
         let dir = base.join(format!("unpacked-{}", safe_name(&m.version)));
         let inner = i.nested_path.clone().ok_or_else(|| anyhow!("{name}: the zip has no installer named"))?;
-        if inner.contains("..") {
+        let rooted = inner.starts_with('/') || inner.starts_with('\\') || inner.contains(':') || Path::new(&inner).is_absolute();
+        if inner.contains("..") || rooted {
             bail!("{name}: the installer path in the zip leaves the zip");
         }
         steps.push(Step::ExtractZip { zip: dest.clone(), dest: dir.clone(), strip_root: false, elevated: false, label: format!("Unpacking {name}") });
@@ -1341,6 +1345,9 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         ok_codes.extend([3010, 1641]);
     }
     let is_msi = msi_family(&run_kind);
+    if is_msi {
+        cleanup.push(log.clone());
+    }
     let run = |elevated: bool| Step::Run { exe: exe.clone(), args: args.clone(), cwd: None, ok_codes: ok_codes.clone(), elevated, label: label.clone(), log: is_msi.then(|| log.clone()) };
     let app_id = format!("other:{}", p.id);
     let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
@@ -1362,9 +1369,10 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
     first.push(run(admin));
     let mut plan = make(first);
     // A per-user installer that Windows will only start with admin rights gets them on a second
-    // try (see `needs_elevation`).
+    // try (see `needs_elevation`). Only the installer runs again: removing the old copy already
+    // happened, and its uninstaller is gone.
     if !admin {
-        let mut again = steps;
+        let mut again: Vec<Step> = steps.into_iter().filter(|s| !matches!(s, Step::Run { label, .. } if label.starts_with("Removing the old"))).collect();
         again.push(run(true));
         plan.fallback = Some(Box::new(make(again)));
     }
