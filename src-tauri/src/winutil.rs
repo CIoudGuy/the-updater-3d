@@ -571,6 +571,11 @@ pub fn task_exists(name: &str) -> bool {
     with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name)) }).is_ok()
 }
 
+/// The XML definition of a scheduled task in the root folder.
+pub fn task_xml(name: &str) -> Option<String> {
+    with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name))?.Xml() }).ok().map(|b| b.to_string())
+}
+
 /// Start a scheduled task now.
 pub fn run_task(name: &str) -> bool {
     use windows::Win32::System::Variant::VARIANT;
@@ -680,6 +685,69 @@ pub fn kill_process(pid: u32) {
     }
 }
 
+/// Full path of a running process's exe.
+pub fn process_image(pid: u32) -> Option<PathBuf> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 32768];
+        let mut len = buf.len() as u32;
+        let r = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(h);
+        r.ok()?;
+        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+    }
+}
+
+/// The process id on the server end of a named pipe this process is a client of.
+pub fn pipe_server_pid(handle: isize) -> Option<u32> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetNamedPipeServerProcessId(pipe: isize, pid: *mut u32) -> i32;
+    }
+    let mut pid = 0u32;
+    (unsafe { GetNamedPipeServerProcessId(handle, &mut pid) } != 0).then_some(pid)
+}
+
+/// Same file path, ignoring case and the \\?\ prefix.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| {
+        let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let s = p.to_string_lossy().to_ascii_lowercase();
+        s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+    };
+    norm(a) == norm(b)
+}
+
+/// "arm64" or "x64" for an IMAGE_FILE_MACHINE value.
+pub fn arch_of_machine(machine: u16) -> &'static str {
+    // IMAGE_FILE_MACHINE_ARM64
+    if machine == 0xAA64 {
+        "arm64"
+    } else {
+        "x64"
+    }
+}
+
+/// The processor Windows itself runs on, "arm64" or "x64". An x64 build of this app running
+/// emulated on ARM64 sees "AMD64" in its environment, so the kernel is asked instead.
+pub fn native_arch() -> &'static str {
+    use once_cell::sync::Lazy;
+    static ARCH: Lazy<&'static str> = Lazy::new(|| {
+        use windows::Win32::System::SystemInformation::IMAGE_FILE_MACHINE;
+        use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+        let mut process = IMAGE_FILE_MACHINE(0);
+        let mut native = IMAGE_FILE_MACHINE(0);
+        if unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, Some(&mut native)) }.is_ok() && native.0 != 0 {
+            return arch_of_machine(native.0);
+        }
+        let a = std::env::var("PROCESSOR_ARCHITEW6432").or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE")).unwrap_or_default();
+        if a.eq_ignore_ascii_case("ARM64") { "arm64" } else { "x64" }
+    });
+    *ARCH
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,5 +820,13 @@ mod tests {
         // Quoted lines are unchanged.
         assert_eq!(split_program_line(r#""C:\Program Files\A\u.exe" --mode=3"#), vec![r"C:\Program Files\A\u.exe".to_string(), "--mode=3".to_string()]);
         assert_eq!(split_program_line("MsiExec.exe /X{ABC}"), vec!["MsiExec.exe".to_string(), "/X{ABC}".to_string()]);
+    }
+
+    #[test]
+    fn native_arch_comes_from_the_kernel() {
+        assert_eq!(super::arch_of_machine(0xAA64), "arm64");
+        assert_eq!(super::arch_of_machine(0x8664), "x64");
+        let env = std::env::var("PROCESSOR_ARCHITEW6432").or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE")).unwrap_or_default();
+        assert_eq!(super::native_arch(), if env.eq_ignore_ascii_case("ARM64") { "arm64" } else { "x64" });
     }
 }

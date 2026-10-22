@@ -1,5 +1,7 @@
 // Transient UI state: popovers, dialogs, view preferences.
 import type { AppEntry, CatalogEntry } from "./types";
+import type { BrowseState } from "./browse";
+import { focusAfterLeave } from "./keys";
 
 export interface PopItem {
   id: string;
@@ -31,6 +33,10 @@ export type DialogState =
   | {
       type: "lowdisk";
       name: string;
+      /** "Before installing X" */
+      eyebrow: string;
+      /** "needs" or "need" */
+      needs: string;
       drive: string;
       needed: number;
       free: number;
@@ -86,6 +92,12 @@ class Ui {
   catalog = $state<CatalogEntry[] | null>(null);
   /** Winget catalog packages found by the last Get apps search (Other apps) */
   otherFound = $state<CatalogEntry[]>([]);
+  /** Other apps without a search: the starter list, or the whole catalog page by page */
+  otherMode = $state<"popular" | "browse">("popular");
+  /** Browse all: the pages loaded so far, kept across visits like the catalog */
+  otherBrowse = $state<BrowseState | null>(null);
+  /** Packages in the whole winget catalog, for the note under Other apps */
+  otherPackages = $state<number | null>(null);
 
   searchEl: HTMLInputElement | null = null;
   /** app under the pointer or keyboard focus, target of the U shortcut */
@@ -93,6 +105,10 @@ class Ui {
 
   compact = $derived(this.width < 1000);
 
+  /** the pointer or focus left this app (or the screen changed) */
+  leaveApp(id: string) {
+    this.focusedApp = focusAfterLeave(this.focusedApp, id);
+  }
   setView(v: "grid" | "list") {
     this.view = v;
     save("view", v);

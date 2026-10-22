@@ -132,14 +132,86 @@ pub struct Persisted {
     /// Fewer admin prompts became on by default in 1.1.2; switched on once
     #[serde(default)]
     pub silent_elevation_default_on: bool,
+    /// Other apps package id -> day (YYYY-MM-DD) no icon was found for it, so it is not searched
+    /// for again at every start
+    #[serde(default)]
+    pub icon_misses: std::collections::BTreeMap<String, String>,
 }
 
 pub fn load_state() -> Persisted {
-    std::fs::read(paths::state_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    load_state_from(&paths::state_file())
+}
+
+fn backup_of(file: &std::path::Path) -> std::path::PathBuf {
+    file.with_extension("json.bak")
+}
+
+/// The state file, or its backup when it is damaged. When neither can be read but one exists,
+/// this is not a first start: the one-time default changes count as done, so a damaged file
+/// never switches settings the user chose back to old defaults.
+pub fn load_state_from(file: &std::path::Path) -> Persisted {
+    let bak = backup_of(file);
+    let read = |p: &std::path::Path| std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<Persisted>(&b).ok());
+    if let Some(p) = read(file).or_else(|| read(&bak)) {
+        return p;
+    }
+    let mut p = Persisted::default();
+    if file.exists() || bak.exists() {
+        p.autostart_applied = true;
+        p.keep_previous_default_off = true;
+        p.prereleases_default_on = true;
+        p.other_apps_default_on = true;
+        p.silent_elevation_default_on = true;
+    }
+    p
 }
 
 pub fn save_state(s: &Persisted) {
-    let _ = std::fs::write(paths::state_file(), serde_json::to_vec_pretty(s).unwrap_or_default());
+    save_state_to(&paths::state_file(), s);
+}
+
+/// Written to a temporary file and renamed over the old one, so a crash mid-write never
+/// leaves a damaged state file; the previous good one is kept as a backup.
+pub fn save_state_to(file: &std::path::Path, s: &Persisted) {
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(s).unwrap_or_default()).is_err() {
+        return;
+    }
+    if std::fs::read(file).ok().is_some_and(|b| serde_json::from_slice::<Persisted>(&b).is_ok()) {
+        let _ = std::fs::copy(file, backup_of(file));
+    }
+    let _ = std::fs::rename(&tmp, file);
+}
+
+/// One-time changes of defaults (each runs once per PC, recorded in the state). Returns true
+/// when start at sign-in should be turned on in Windows now.
+pub fn apply_default_changes(p: &mut Persisted, s: &mut Settings) -> bool {
+    let mut autostart = false;
+    // Fewer admin prompts became on by default in 1.1.2; the task behind it is set up (one
+    // admin prompt) when the window opens.
+    if !p.silent_elevation_default_on {
+        s.silent_elevation = true;
+        p.silent_elevation_default_on = true;
+    }
+    if !p.other_apps_default_on {
+        s.sources.other = true;
+        p.other_apps_default_on = true;
+    }
+    if !p.prereleases_default_on {
+        s.blender_channel = "beta".into();
+        p.prereleases_default_on = true;
+    }
+    if !p.keep_previous_default_off {
+        s.keep_previous_versions = false;
+        p.keep_previous_default_off = true;
+    }
+    if !p.autostart_applied {
+        // Also turns it on for copies that saved the old default (off).
+        s.launch_at_startup = true;
+        autostart = true;
+        p.autostart_applied = true;
+    }
+    autostart
 }
 
 /// Simple file logger for the app's own log (logs\app.log), rotated at 2 MB.
@@ -166,6 +238,50 @@ impl log::Log for FileLog {
 
 #[cfg(test)]
 mod tests {
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("u3d-state-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn damaged_state_does_not_bring_back_old_defaults() {
+        let dir = scratch("damaged");
+        let file = dir.join("state.json");
+        // A crash in the middle of writing left half a file.
+        std::fs::write(&file, br#"{"last_check":"2026-10-01","notif"#).unwrap();
+        let mut p = super::load_state_from(&file);
+        let mut s: crate::model::Settings = serde_json::from_str(r#"{"blenderChannel":"stable","keepPreviousVersions":true}"#).unwrap();
+        let autostart = super::apply_default_changes(&mut p, &mut s);
+        assert_eq!(s.blender_channel, "stable");
+        assert!(s.keep_previous_versions);
+        assert!(!autostart);
+        // A first start (no state file at all) still gets the new defaults.
+        let mut p = super::load_state_from(&dir.join("none.json"));
+        let mut s: crate::model::Settings = serde_json::from_str(r#"{"blenderChannel":"stable"}"#).unwrap();
+        super::apply_default_changes(&mut p, &mut s);
+        assert_eq!(s.blender_channel, "beta");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_is_saved_whole_and_the_backup_is_used() {
+        let dir = scratch("atomic");
+        let file = dir.join("state.json");
+        let mut p = super::Persisted::default();
+        p.last_check = Some("one".into());
+        super::save_state_to(&file, &p);
+        p.last_check = Some("two".into());
+        super::save_state_to(&file, &p);
+        assert_eq!(super::load_state_from(&file).last_check.as_deref(), Some("two"));
+        assert!(!file.with_extension("json.tmp").exists());
+        // The main file is damaged: the backup (the save before) is used.
+        std::fs::write(&file, b"{").unwrap();
+        assert_eq!(super::load_state_from(&file).last_check.as_deref(), Some("one"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn persisted_keeps_window_placement() {
         let mut p = super::Persisted::default();

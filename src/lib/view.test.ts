@@ -1,0 +1,57 @@
+// node --test src/lib/view.test.ts
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, lowDiskWords, timeLeft } from "./view.ts";
+
+test("a source filter whose last app is gone falls back to all", () => {
+  assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");
+  assert.equal(groupOrAll("Adobe", ["Adobe", "Craft apps"]), "Adobe");
+  assert.equal(groupOrAll("all", []), "all");
+});
+
+test("a search that only the Updates filter hides says so and offers to show all", () => {
+  const r = installedNone({ query: "photoshop", filter: "updates", matchesIgnoringFilter: 1 });
+  assert.match(r.text, /hidden by the Updates available filter/);
+  assert.equal(r.showAll, true);
+  const none = installedNone({ query: "zzz", filter: "updates", matchesIgnoringFilter: 0 });
+  assert.equal(none.text, 'No apps match "zzz".');
+  assert.equal(none.showAll, false);
+  assert.equal(installedNone({ query: "", filter: "all", matchesIgnoringFilter: 0 }).text, "Nothing here yet.");
+});
+
+test("failed uninstalls and repairs are not called failed installs or updates", () => {
+  assert.equal(failedSentence({ kind: "uninstall", name: "Krita", toVersion: "5", fromVersion: "5" }), "Krita 5 could not be uninstalled.");
+  assert.equal(failedSentence({ kind: "repair", name: "Krita", toVersion: "5", fromVersion: null }), "Krita 5 could not be repaired.");
+  assert.equal(failedSentence({ kind: "update", name: "Krita", toVersion: "6", fromVersion: "5" }), "Krita 6 could not update.");
+  assert.equal(failedSentence({ kind: "install", name: "Krita", toVersion: "6", fromVersion: null }), "Krita 6 could not install.");
+  assert.equal(failedCount([{ kind: "uninstall" }]), "1 uninstall");
+  assert.equal(failedCount([{ kind: "repair" }, { kind: "repair" }]), "2 repairs");
+  assert.equal(failedCount([{ kind: "repair" }, { kind: "update" }]), "2 jobs");
+});
+
+test("low disk dialog grammar", () => {
+  const many = lowDiskWords(Array.from({ length: 10 }, (_, i) => `App ${i}`), "update");
+  assert.equal(many.eyebrow, "Before these 10 updates");
+  assert.equal(many.name, "10 updates");
+  assert.equal(lowDiskWords(["A", "B", "C"], "install").eyebrow, "Before these 3 installs");
+  assert.equal(many.needs, "need");
+  const two = lowDiskWords(["A", "B"], "update");
+  assert.equal(two.needs, "need");
+  const one = lowDiskWords(["Blender"], "install");
+  assert.equal(one.eyebrow, "Before installing Blender");
+  assert.equal(one.needs, "needs");
+});
+
+test("time left says why there is no estimate", () => {
+  const approx = (s: number) => `About ${Math.round(s / 60)} min`;
+  assert.equal(timeLeft(600, true, approx), "About 10 min");
+  assert.equal(timeLeft(null, false, approx), "Nothing downloading");
+  assert.equal(timeLeft(null, true, approx), "Working it out");
+});
+
+test("empty library and all sources off", () => {
+  assert.equal(isEmptyLibrary(0), true);
+  assert.equal(isEmptyLibrary(3), false);
+  assert.equal(allSourcesOff({ adobe: false, craft: false, blender: false, tools: false, other: false }), true);
+  assert.equal(allSourcesOff({ adobe: false, craft: true, blender: false, tools: false, other: false }), false);
+});

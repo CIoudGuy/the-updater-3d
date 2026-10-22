@@ -1,4 +1,4 @@
-//! More apps: OBS Studio, Krita, FreeCAD, Godot and Unity Editor.
+//! More apps: OBS Studio, Krita, FreeCAD, Godot, Unity Editor, Unity Hub and the Epic Games Launcher (Preview).
 //!
 //! One small table entry per app (`APPS`), and a few lookups per app:
 //!
@@ -7,6 +7,8 @@
 //! * Krita: the KDE download index (`download.kde.org`), checksum from the `.sha256` file next to
 //!   the installer, change list from the release post on krita.org.
 //! * Unity Editor: Unity's public release API; the installer is checked by exact size and MD5.
+//! * Epic Games Launcher (Preview): the version is read from where Epic's download link leads;
+//!   no checksum is published, so the installer is checked by exact size and its Authenticode signer.
 //!
 //! Installed copies come from the Windows uninstall list, plus folders for the portable Godot
 //! copies and for editors installed by the Unity Hub.
@@ -34,6 +36,11 @@ const UNITY_API: &str = "https://services.api.unity.com/unity/editor/release/v1/
 const HUB_FEED: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/latest.yml";
 const HUB_FILES: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/";
 const HUB_NOTES: &str = "https://unity.com/unity-hub/release-notes";
+/// Epic's download link for the new launcher (it answers with a redirect to the versioned file).
+const EPIC_DOWNLOAD: &str = "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/installer/download/EpicGamesLauncherSetup-x86_64.exe";
+const EPIC_PAGE: &str = "https://launcher.epicgames.com/";
+/// The name on Epic's code signing certificate, as `winutil::authenticode_signer` returns it.
+const EPIC_SIGNER: &str = "Epic Games Inc.";
 
 pub struct AppDef {
     pub key: &'static str,
@@ -56,6 +63,8 @@ pub const APPS: &[AppDef] = &[
     AppDef { key: "unity", name: "Unity Editor", tagline: "Game engine and real-time 3D", code: "Un", fg: "#F0F0F2", bg: "#2A2F36", icon: "https://unity.com/icon-dark.svg", side_by_side: true },
     // Unity editors only start with a license, which Unity Hub signs in for and keeps.
     AppDef { key: "unityhub", name: "Unity Hub", tagline: "Signs in and licenses Unity editors", code: "Uh", fg: "#F0F0F2", bg: "#2A2F36", icon: "https://unity.com/icon-dark.svg", side_by_side: false },
+    // Epic's new launcher is a beta. The old one (MSI, version 1.x) is a different app in Other apps.
+    AppDef { key: "epic", name: "Epic Games Launcher (Preview)", tagline: "Epic's new games launcher, in preview", code: "Ep", fg: "#FFFFFF", bg: "#121214", icon: "https://launcher.epicgames.com/apple-touch-icon.png", side_by_side: false },
 ];
 
 pub fn def(key: &str) -> Option<&'static AppDef> {
@@ -293,6 +302,12 @@ pub fn parse_freecad(v: &Value) -> Vec<Rel> {
 /// Godot releases. The main repository has the stable releases; `builds` is the godot-builds
 /// repository, from which only the betas and release candidates are taken.
 pub fn parse_godot(v: &Value, builds: bool) -> Vec<Rel> {
+    parse_godot_for(v, builds, winutil::native_arch())
+}
+
+/// `parse_godot` for a PC with the `native` processor: the ARM64 build when there is one on
+/// ARM64, else the x64 one (it runs emulated).
+fn parse_godot_for(v: &Value, builds: bool, native: &str) -> Vec<Rel> {
     let mut out = Vec::new();
     for r in releases_of(v) {
         let tag = r["tag_name"].as_str().unwrap_or("");
@@ -302,13 +317,20 @@ pub fn parse_godot(v: &Value, builds: bool) -> Vec<Rel> {
             None if builds && (tag.contains("-beta") || tag.contains("-rc")) => (tag.to_string(), true),
             None => continue,
         };
-        let file = format!("Godot_v{tag}_win64.exe.zip");
+        let mut files = vec![format!("Godot_v{tag}_win64.exe.zip")];
+        if native == "arm64" {
+            files.insert(0, format!("Godot_v{tag}_windows_arm64.exe.zip"));
+        }
         let list = assets(r);
-        let Some(a) = list.iter().find(|a| a.name == file) else { continue };
+        let Some(a) = files.iter().find_map(|f| list.iter().find(|a| &a.name == f)) else { continue };
         let (notes, link) = intro_notes(r["body"].as_str().unwrap_or(""));
         let mut rel = gh_rel(r, ver, a, pre, notes);
         if link.is_some() {
             rel.notes_url = link;
+        }
+        // Older releases have no GitHub digest, but a SHA512-SUMS.txt.
+        if rel.sha256.is_none() {
+            rel.sums_url = list.iter().find(|s| s.name == "SHA512-SUMS.txt").map(|s| s.url.clone());
         }
         out.push(rel);
     }
@@ -402,8 +424,8 @@ pub async fn krita_releases(attic: bool, want: usize) -> Result<Vec<Rel>> {
 
 // ---------------------------------------------------------------- Unity
 
-/// Releases from Unity's release API, in the order the API gives them. LTS is the long-term
-/// support stream; the other streams (tech, beta, alpha) are marked pre-release.
+/// Releases from Unity's release API, in the order the API gives them. Only the BETA and ALPHA
+/// streams (and "a"/"b" builds) are pre-releases; LTS, SUPPORTED and TECH builds are final.
 pub fn parse_unity(v: &Value) -> Vec<Rel> {
     let mut out = Vec::new();
     for r in v["results"].as_array().into_iter().flatten() {
@@ -417,7 +439,7 @@ pub fn parse_unity(v: &Value) -> Vec<Rel> {
         out.push(Rel {
             version: ver.to_string(),
             date: r["releaseDate"].as_str().map(String::from),
-            prerelease: !stream.eq_ignore_ascii_case("LTS"),
+            prerelease: stream.eq_ignore_ascii_case("BETA") || stream.eq_ignore_ascii_case("ALPHA") || UNITY_PRE.is_match(ver),
             notes: vec![],
             notes_url: Some(format!("https://unity.com/releases/editor/whats-new/{ver}")),
             notes_src: r["releaseNotes"]["url"].as_str().map(String::from),
@@ -433,11 +455,30 @@ pub fn parse_unity(v: &Value) -> Vec<Rel> {
     out
 }
 
+/// Unity editor builds to ask for, best first: native ARM64 on ARM64, else x64.
+fn unity_archs(native: &str) -> &'static [&'static str] {
+    if native == "arm64" {
+        &["ARM64", "X86_64"]
+    } else {
+        &["X86_64"]
+    }
+}
+
 async fn unity_page(query: &str) -> Result<Vec<Rel>> {
-    let url = format!("{UNITY_API}?limit=25&offset=0&platform=WINDOWS&architecture=X86_64&{query}");
-    let f = http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await?;
-    let v: Value = serde_json::from_slice(&f.body).map_err(|e| anyhow!("Unity release list: {e}"))?;
-    Ok(parse_unity(&v))
+    let mut last = Ok(vec![]);
+    for arch in unity_archs(winutil::native_arch()) {
+        let url = format!("{UNITY_API}?limit=25&offset=0&platform=WINDOWS&architecture={arch}&{query}");
+        last = async {
+            let f = http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await?;
+            let v: Value = serde_json::from_slice(&f.body).map_err(|e| anyhow!("Unity release list: {e}"))?;
+            Ok(parse_unity(&v))
+        }
+        .await;
+        if last.as_ref().is_ok_and(|l: &Vec<Rel>| !l.is_empty()) {
+            break;
+        }
+    }
+    last
 }
 
 async fn unity_notes(src: &str) -> Vec<String> {
@@ -458,7 +499,7 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         s.dedup();
         s
     };
-    let (obs, fc, gd, gdb, kr, un, hub) = tokio::join!(
+    let (obs, fc, gd, gdb, kr, un, hub, epic) = tokio::join!(
         github("obsproject/obs-studio", 40),
         github("FreeCAD/FreeCAD", 100),
         github("godotengine/godot", 60),
@@ -466,6 +507,7 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         krita_releases(false, 1),
         unity_page("stream=LTS"),
         unity_hub_releases(),
+        epic_release(),
     );
     let mut put = |key: &str, r: Result<Vec<Rel>>| match r {
         Ok(l) if !l.is_empty() => {
@@ -486,6 +528,7 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     }));
     put("krita", kr);
     put("unityhub", hub);
+    put("epic", epic.map(|r| vec![r]));
     // Newest version first, so the first stable one is what is offered when no version is picked.
     put("unity", un.map(|mut l| {
         sort_newest_first(&mut l);
@@ -508,14 +551,41 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     Ok(feed)
 }
 
+/// The version in the address Epic's download link leads to:
+/// `.../Builds/EGLv2/0.100.0%2Bg9dfc3c3/Windows/EpicGamesLauncherSetup.exe?...` gives "0.100.0".
+pub fn epic_version(url: &str) -> Option<String> {
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"/EGLv2/(\d+(?:\.\d+){1,3})(?:%2[Bb]|\+|/)").unwrap());
+    RE.captures(url).map(|c| c[1].to_string())
+}
+
+/// The newest Epic Games Launcher (Preview): a HEAD request follows the redirect, so the file is
+/// not downloaded; the final address names the version and the answer gives the exact size.
+async fn epic_release() -> Result<Rel> {
+    let r = http::CLIENT.head(EPIC_DOWNLOAD).timeout(Duration::from_secs(20)).send().await?;
+    if !r.status().is_success() {
+        bail!("Epic's download link answered {}", r.status());
+    }
+    let url = r.url().to_string();
+    let version = epic_version(&url).ok_or_else(|| anyhow!("no version in Epic's download address"))?;
+    let size = r.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0);
+    Ok(Rel { version, size, url, file: "EpicGamesLauncherSetup.exe".into(), notes_url: Some(EPIC_PAGE.into()), ..Default::default() })
+}
+
 /// The newest Unity Hub from its update feed (`version`, x64 `url`, `sha512` in base64, `size`).
 pub fn parse_hub_feed(yml: &str) -> Option<Rel> {
+    parse_hub_feed_for(yml, winutil::native_arch())
+}
+
+/// `parse_hub_feed` for a PC with the `native` processor (the arm64 installer on ARM64).
+fn parse_hub_feed_for(yml: &str, native: &str) -> Option<Rel> {
     let field = |line: &str, k: &str| line.trim().trim_start_matches("- ").strip_prefix(k).map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string());
     let version = yml.lines().find_map(|l| if l.starts_with("version:") { field(l, "version:") } else { None })?;
     let date = yml.lines().find_map(|l| if l.starts_with("releaseDate:") { field(l, "releaseDate:") } else { None });
     // Each file is "- url:" followed by its sha512 and size; take the x64 one.
     let lines: Vec<&str> = yml.lines().collect();
-    let i = lines.iter().position(|l| field(l, "url:").is_some_and(|u| u.contains("-x64") || !u.contains("arm64")))?;
+    let x64 = |u: &str| u.contains("-x64") || !u.contains("arm64");
+    let arm = lines.iter().position(|l| field(l, "url:").is_some_and(|u| u.contains("-arm64"))).filter(|_| native == "arm64");
+    let i = arm.or_else(|| lines.iter().position(|l| field(l, "url:").is_some_and(|u| x64(&u))))?;
     let url = field(lines[i], "url:")?;
     let mut sha512 = None;
     let mut size = None;
@@ -728,7 +798,7 @@ fn godot_shortcut(name: &str) -> PathBuf {
 fn scan_godot(root: &Path, out: &mut Vec<Installed>) {
     let d = def("godot").unwrap();
     let Ok(rd) = std::fs::read_dir(root) else { return };
-    let loose = Regex::new(r"^Godot_v(.+)_win64\.exe$").unwrap();
+    let loose = Regex::new(r"^Godot_v(.+)_(?:win64|windows_arm64)\.exe$").unwrap();
     let mut found: Vec<Installed> = Vec::new();
     for e in rd.flatten() {
         let p = e.path();
@@ -759,6 +829,60 @@ fn unity_hub_editors() -> PathBuf {
     paths::program_files().join("Unity").join("Hub").join("Editor")
 }
 
+/// Editors the Unity Hub installed or knows of, as (version, folder with Editor\Unity.exe):
+/// the default folder, the Hub's own install folder setting (secondaryInstallPath.json) and the
+/// editors added by hand (editors.json, editors-v2.json), all in the UnityHub folder of `appdata`.
+fn hub_editors(appdata: &Path) -> Vec<(String, PathBuf)> {
+    let hub = appdata.join("UnityHub");
+    let mut roots = vec![unity_hub_editors()];
+    if let Some(p) = std::fs::read(hub.join("secondaryInstallPath.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v.as_str().map(String::from)) {
+        if !p.trim().is_empty() {
+            roots.push(winutil::pathbuf(&p));
+        }
+    }
+    fn add(ver: String, dir: PathBuf, out: &mut Vec<(String, PathBuf)>) {
+        if UNITY_VER.is_match(&ver) && dir.join("Editor").join("Unity.exe").is_file() && !out.iter().any(|(v, _)| *v == ver) {
+            out.push((ver, dir));
+        }
+    }
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for root in roots {
+        for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            add(e.file_name().to_string_lossy().to_string(), e.path(), &mut out);
+        }
+    }
+    // Each listed editor has a "location": the path of its Unity.exe (a string or a list).
+    fn walk(v: &Value, found: &mut Vec<(Option<String>, String)>) {
+        match v {
+            Value::Object(m) => {
+                let locs: Vec<String> = match m.get("location") {
+                    Some(Value::String(s)) => vec![s.clone()],
+                    Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                    _ => vec![],
+                };
+                for l in locs {
+                    found.push((m.get("version").and_then(|x| x.as_str()).map(String::from), l));
+                }
+                m.values().for_each(|x| walk(x, found));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, found)),
+            _ => {}
+        }
+    }
+    for f in ["editors-v2.json", "editors.json"] {
+        let Some(v) = std::fs::read(hub.join(f)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        let mut found = Vec::new();
+        walk(&v, &mut found);
+        for (ver, loc) in found {
+            let exe = winutil::pathbuf(&loc);
+            let Some(dir) = exe.parent().filter(|e| e.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Editor"))).and_then(|e| e.parent()) else { continue };
+            let ver = ver.unwrap_or_else(|| dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+            add(ver, dir.to_path_buf(), &mut out);
+        }
+    }
+    out
+}
+
 fn scan_unity(un: &[winutil::UninstallEntry], out: &mut Vec<Installed>) {
     let d = def("unity").unwrap();
     let name_re = Regex::new(r"^Unity\s+(\d{4}\.\d+\.\d+[abfp]\d+)").unwrap();
@@ -783,27 +907,43 @@ fn scan_unity(un: &[winutil::UninstallEntry], out: &mut Vec<Installed>) {
         found.push(from_entry(d, format!("tools:unity:{ver}"), format!("Unity {ver}"), &e2, ver.clone(), dir, exe));
     }
     // Editors installed by the Unity Hub have no entry in the uninstall list.
-    if let Ok(rd) = std::fs::read_dir(unity_hub_editors()) {
-        for e in rd.flatten() {
-            let dir = e.path();
-            let ver = e.file_name().to_string_lossy().to_string();
-            let exe = dir.join("Editor").join("Unity.exe");
-            if !UNITY_VER.is_match(&ver) || !exe.exists() || found.iter().any(|f| f.version == ver) {
-                continue;
-            }
-            let mut i = make(d, format!("tools:unity:{ver}"), format!("Unity {ver}"), ver.clone(), ver, Some(dir.clone()), Some(exe));
-            let un_exe = dir.join("Editor").join("Uninstall.exe");
-            if un_exe.exists() {
-                i.uninstall = Some(vec![un_exe.to_string_lossy().to_string(), "/S".into()]);
-            }
-            found.push(i);
+    for (ver, dir) in hub_editors(&paths::app_data()) {
+        let exe = dir.join("Editor").join("Unity.exe");
+        if found.iter().any(|f| f.version == ver) {
+            continue;
         }
+        let mut i = make(d, format!("tools:unity:{ver}"), format!("Unity {ver}"), ver.clone(), ver, Some(dir.clone()), Some(exe));
+        let un_exe = dir.join("Editor").join("Uninstall.exe");
+        if un_exe.exists() {
+            i.uninstall = Some(vec![un_exe.to_string_lossy().to_string(), "/S".into()]);
+        }
+        found.push(i);
     }
     found.sort_by(|a, b| cmp_ver(&b.version, &a.version));
     for f in found {
         if !out.iter().any(|o| o.id == f.id) {
             out.push(f);
         }
+    }
+}
+
+/// The new launcher's uninstall entry. The old launcher is an MSI package (and 1.x), this one
+/// is installed by Epic's own setup program, which is also its uninstaller.
+pub fn is_epic_preview(e: &winutil::UninstallEntry) -> bool {
+    let setup = |s: &str| s.to_ascii_lowercase().contains("epicgameslaunchersetup.exe");
+    !e.windows_installer && e.display_name.trim().eq_ignore_ascii_case("Epic Games Launcher") && (setup(&e.uninstall_string) || setup(&e.quiet_uninstall_string))
+}
+
+fn scan_epic(un: &[winutil::UninstallEntry], out: &mut Vec<Installed>) {
+    let d = def("epic").unwrap();
+    if let Some(e) = un.iter().find(|e| is_epic_preview(e) && !e.display_version.is_empty()) {
+        let dir = if !e.install_location.is_empty() {
+            winutil::pathbuf(&e.install_location)
+        } else {
+            exe_dir_of(&e.uninstall_string).or_else(|| exe_dir_of(&e.quiet_uninstall_string)).unwrap_or_else(|| paths::local_app_data().join("Epic Games").join("Launcher"))
+        };
+        let exe = dir.join("EpicGamesLauncher.exe");
+        out.push(from_entry(d, "tools:epic".into(), d.name.into(), e, String::new(), dir, exe));
     }
 }
 
@@ -823,6 +963,7 @@ fn scan_unity_hub(un: &[winutil::UninstallEntry], out: &mut Vec<Installed>) {
 pub fn scan(uninstall: &[winutil::UninstallEntry], godot_root: &Path) -> Vec<Installed> {
     let mut out = Vec::new();
     scan_unity_hub(uninstall, &mut out);
+    scan_epic(uninstall, &mut out);
     scan_obs(uninstall, &mut out);
     scan_krita(uninstall, &mut out);
     scan_freecad(uninstall, &mut out);
@@ -841,7 +982,9 @@ pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest
     let d = def(key)?;
     let list: &[Rel] = if key == "unity" { feed.unity_series.get(&version::series(&inst.version)).map(|v| v.as_slice())? } else { feed.list(key) };
     let allow_pre = is_pre(&inst.version);
-    let usable = |r: &&Rel| allow_pre || !r.prerelease;
+    // A release without a download address (a Unity Hub version the notes page lists before
+    // the update feed has it) cannot be installed, so it is never offered.
+    let usable = |r: &&Rel| !r.url.is_empty() && (allow_pre || !r.prerelease);
     let same = |r: &&Rel| !d.side_by_side || version::series(&r.version) == version::series(&inst.version);
     let up_to_date = || Some(Latest { version: inst.version.clone(), size: None, note: None });
 
@@ -861,7 +1004,7 @@ pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest
     if d.side_by_side && key != "unity" {
         let newest_installed = all.iter().filter(|o| tools_key(o) == key).map(|o| version::series(&o.version)).max_by(|a, b| version::cmp(a, b))?;
         if version::series(&inst.version) == newest_installed {
-            if let Some(m) = list.iter().find(|r| !r.prerelease) {
+            if let Some(m) = list.iter().find(|r| !r.prerelease && !r.url.is_empty()) {
                 if version::newer(&version::series(&m.version), &newest_installed) {
                     return Some(Latest { version: m.version.clone(), size: m.size, note: Some(format!("{} installs next to {}, your {} stays", m.version, inst.version, inst.version)) });
                 }
@@ -877,7 +1020,7 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
     let mut out = Vec::new();
     for d in APPS {
         let list = feed.list(d.key);
-        let Some(r) = list.iter().find(|r| !r.prerelease).or(list.first()) else { continue };
+        let Some(r) = list.iter().find(|r| !r.prerelease && !r.url.is_empty()).or(list.iter().find(|r| !r.url.is_empty())) else { continue };
         let have = installed.iter().filter(|i| tools_key(i) == d.key);
         let is_installed = match d.key {
             "freecad" => have.into_iter().any(|i| series_of(i) == version::series(&r.version)),
@@ -895,6 +1038,8 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             version: r.version.clone(),
             size: r.size,
             tagline: Some(d.tagline.into()),
+            description: super::about::tools(d.key).map(String::from),
+            blocked: None,
             group: Source::Tools.group().into(),
             prerelease: r.prerelease,
             installed: is_installed,
@@ -954,6 +1099,7 @@ fn with_fallback_notes(key: &str, list: &mut [Rel]) {
         if r.notes.is_empty() {
             r.notes.push(match key {
                 "krita" => "No change list is published for this release".to_string(),
+                "epic" => "Epic does not publish a change list for the launcher preview".to_string(),
                 _ => format!("{} release. See the full notes for the changes", if r.prerelease { "Pre-release" } else { "Maintenance" }),
             });
         }
@@ -1081,6 +1227,15 @@ fn sum_from(text: &str, name: &str) -> Option<String> {
     first
 }
 
+/// The SHA-512 for `name` in a sums file ("hash  name" lines); only an exact name counts.
+fn sha512_from(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        let h = it.next()?;
+        (h.len() == 128 && h.chars().all(|c| c.is_ascii_hexdigit()) && it.next()?.trim_start_matches('*') == name).then(|| h.to_ascii_lowercase())
+    })
+}
+
 async fn text_of(url: &str) -> Option<String> {
     let f = http::get_cached(url, &[], Duration::from_secs(24 * 3600)).await.ok()?;
     Some(String::from_utf8_lossy(&f.body).into_owned())
@@ -1116,7 +1271,7 @@ async fn find_release(key: &str, ver: Option<&str>, series: Option<&str>, feed: 
         Some(v) => list.into_iter().find(|r| r.version == v || cmp_ver(&r.version, v).is_eq()).ok_or_else(|| anyhow!("{} {} is not available from its download page", d.name, v)),
         None => list
             .into_iter()
-            .find(|r| !r.prerelease && series.is_none_or(|s| version::series(&r.version) == s))
+            .find(|r| !r.prerelease && !r.url.is_empty() && series.is_none_or(|s| version::series(&r.version) == s))
             .ok_or_else(|| anyhow!("{} has no release for Windows right now", d.name)),
     }
 }
@@ -1129,7 +1284,8 @@ fn run_installer(dest: &Path, args: Vec<String>, elevated: bool, label: String) 
 pub fn build_plan(key: &str, rel: &Rel, kind: JobKind, current: Option<&Installed>, ctx: &Ctx<'_>) -> Result<Plan> {
     let d = def(key).ok_or_else(|| anyhow!("unknown app {key}"))?;
     let dest = paths::downloads().join("tools").join(&rel.file);
-    let dl = Download { url: rel.url.clone(), dest: dest.clone(), size: rel.size, sha256: rel.sha256.clone(), md5: rel.md5.clone(), signer: None, sha512: rel.sha512.clone(), headers: vec![] };
+    let dl = Download { url: rel.url.clone(), dest: dest.clone(), size: rel.size, sha256: rel.sha256.clone(), md5: rel.md5.clone(), signer: (key == "epic").then(|| EPIC_SIGNER.to_string()), sha512: rel.sha512.clone(), headers: vec![] };
+    super::require_checked(&dl, &format!("{} {}", d.name, rel.version))?;
     let label = format!("Installing {} {}", d.name, rel.version);
     let current_dir = current.and_then(|c| c.install_dir.clone());
     let repair = kind == JobKind::Repair;
@@ -1142,6 +1298,8 @@ pub fn build_plan(key: &str, rel: &Rel, kind: JobKind, current: Option<&Installe
             }
             ("tools:unityhub".to_string(), d.name.to_string(), vec![run_installer(&dest, vec!["/S".into()], true, label)], current_dir.into_iter().collect(), vec!["Unity Hub.exe".to_string()])
         }
+        // Epic's setup installs for the current user (no admin) and the launcher must be closed.
+        "epic" => ("tools:epic".to_string(), d.name.to_string(), vec![run_installer(&dest, vec!["--silent".into()], false, label)], current_dir.into_iter().collect(), vec!["EpicGamesLauncher.exe".to_string(), "EpicGamesLauncherUpdate.exe".to_string()]),
         "freecad" => {
             let series = version::series(&rel.version);
             let same = current.is_some_and(|c| series_of(c) == series);
@@ -1212,13 +1370,18 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
                 rel.sha256 = text_of(u).await.and_then(|t| sum_from(&t, &rel.file));
             }
         }
+        "godot" if rel.sha256.is_none() => {
+            if let Some(u) = &rel.sums_url {
+                rel.sha512 = text_of(u).await.and_then(|t| sha512_from(&t, &rel.file));
+            }
+        }
         _ => {}
     }
     // Installing a version of an app that is already here (OBS, Krita, a FreeCAD series) goes
     // over that copy.
     let here = current.or_else(|| {
         installed.iter().find(|i| tools_key(i) == key && match key {
-            "obs" | "krita" | "unityhub" => true,
+            "obs" | "krita" | "unityhub" | "epic" => true,
             "freecad" => series_of(i) == version::series(&rel.version),
             _ => false,
         })
@@ -1260,6 +1423,18 @@ fn nsis_uninstall(inst: &Installed) -> Result<Vec<Step>> {
     Ok(steps)
 }
 
+/// Epic's own setup program is the uninstaller: `--silent --uninstall`, no NSIS switches.
+fn epic_uninstall(inst: &Installed) -> Result<Vec<Step>> {
+    let u = inst.uninstall.clone().filter(|u| !u.is_empty()).ok_or_else(|| anyhow!("{} has no uninstaller registered", inst.name))?;
+    let mut args: Vec<String> = u[1..].iter().filter(|a| !a.eq_ignore_ascii_case("/S")).cloned().collect();
+    for a in ["--silent", "--uninstall"] {
+        if !args.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+            args.push(a.into());
+        }
+    }
+    Ok(vec![Step::Run { exe: PathBuf::from(&u[0]), args, cwd: None, ok_codes: vec![0], elevated: needs_admin(Path::new(&u[0])), label: format!("Uninstalling {}", inst.name), log: None }])
+}
+
 fn safe_app_dir(p: &Path) -> bool {
     let low = |x: &Path| x.to_string_lossy().trim_end_matches('\\').to_ascii_lowercase();
     let me = low(p);
@@ -1269,7 +1444,9 @@ fn safe_app_dir(p: &Path) -> bool {
 
 pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
     let key = tools_key(inst);
-    let steps = if key == "godot" {
+    let steps = if key == "epic" {
+        epic_uninstall(inst)?
+    } else if key == "godot" {
         match &inst.install_dir {
             Some(d) => vec![Step::RemoveDir { path: d.clone(), elevated: needs_admin(d), label: format!("Removing {}", inst.name) }, Step::RemoveFile { path: godot_shortcut(&inst.name) }],
             None => {

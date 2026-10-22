@@ -1,0 +1,61 @@
+# Builds the app, runs the tests, then starts the built app and fails if it does not stay up.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install
+        run: npm ci
+
+      - name: Check the interface
+        run: |
+          npm run check
+          npm test
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test --release --lib
+
+      - name: Build the app
+        run: npx tauri build --no-bundle
+
+      - name: Start the app and make sure it stays up
+        shell: pwsh
+        run: |
+          $exe = "src-tauri/target/release/the-updater-3d.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 20
+          $log = Join-Path $env:LOCALAPPDATA "app.theupdater3d/data/logs/app.log"
+          if (Test-Path $log) { Get-Content $log -Tail 40 }
+          if ($p.HasExited) { throw "The app closed by itself within 20 seconds (exit code $($p.ExitCode))." }
+          if ((Test-Path $log) -and (Select-String -Path $log -Pattern "CRASH" -Quiet)) { throw "The app logged a crash." }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "The app started and stayed up."

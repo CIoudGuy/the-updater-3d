@@ -1,13 +1,14 @@
 {
   "name": "the-updater-3d",
   "private": true,
-  "version": "1.1.2",
+  "license": "MIT",
+  "version": "1.1.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --test src/lib/batch.test.ts src/lib/blocked.test.ts",
+    "test": "node --test src/lib/batch.test.ts src/lib/blocked.test.ts src/lib/view.test.ts src/lib/jobs.test.ts src/lib/keys.test.ts src/lib/load.test.ts src/lib/format.test.ts src/lib/browse.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const CATALOG_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v6/products/all?_type=xml&channel=ccm&channel=sti&platform=win32,win64&productType=Desktop";
+const CATALOG_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v6/products/all?_type=xml&channel=ccm&channel=sti&platform=win32,win64,winarm64&productType=Desktop";
 const APP_JSON_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v3/applications";
 /// Creative Cloud's own update service: with no version it answers the newest full build
 /// ("6.11.0.478.6"); the product catalog only says "6.11.0".
@@ -286,7 +286,8 @@ fn parse_catalog(body: &[u8]) -> Result<Catalog> {
             }
             for pl in p.descendants().filter(|n| n.has_tag_name("platform")) {
                 let platform = pl.attribute("id").unwrap_or("").to_string();
-                if platform != "win64" && platform != "win32" {
+                // winarm64: native builds for Windows on ARM (Photoshop, Lightroom, ...).
+                if platform != "win64" && platform != "win32" && platform != "winarm64" {
                     continue;
                 }
                 let Some(ls) = pl.descendants().find(|n| n.has_tag_name("languageSet")) else { continue };
@@ -442,8 +443,9 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
             .and_then(|e| winutil::install_date_iso(&e.install_date))
             .or_else(|| exe.as_ref().and_then(|e| e.metadata().ok()).and_then(|m| m.modified().ok()).map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()));
         let component = is_component(&p.sap);
-        let tagline = catalog
-            .and_then(|c| c.for_sap(&p.sap).find_map(|x| x.tagline.clone()))
+        let tagline = super::about::adobe(&p.sap, &name)
+            .map(|a| a.0)
+            .or_else(|| catalog.and_then(|c| c.for_sap(&p.sap).find_map(|x| x.tagline.clone())))
             .or_else(|| component.then(|| "Shared Adobe component, used by Photoshop and other Adobe apps".to_string()));
         out.push(Installed {
             id: format!("adobe:{}:{}", p.sap, version::major(&p.version)),
@@ -503,7 +505,7 @@ fn creative_cloud(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntr
         exe: Some(exe),
         uninstall: None,
         size_hint: Some(e.estimated_size_kb * 1024).filter(|s| *s > 0),
-        tagline: catalog.and_then(|c| c.for_sap("KCCC").find_map(|x| x.tagline.clone())),
+        tagline: super::about::adobe("KCCC", "Creative Cloud").map(|a| a.0).or_else(|| catalog.and_then(|c| c.for_sap("KCCC").find_map(|x| x.tagline.clone()))),
         channel: None,
         missing: false,
         read_only: false,
@@ -557,6 +559,7 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
             let (code, fg, bg) = mark_for(&p.sap, &name);
             let prerelease = p.sap.ends_with("BETA") || p.sap == "ILSTPR" || name.contains("(Beta)") || name.contains("Prerelease") || name.contains("(Preview");
             let cc = p.sap == "KCCC";
+            let about = super::about::adobe(&p.sap, &name);
             CatalogEntry {
                 id: format!("adobe:{}:{}", p.sap, version::major(&p.version)),
                 source: Source::Adobe,
@@ -567,7 +570,9 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
                 icon_url: p.icon.clone(),
                 version: p.version.clone(),
                 size: p.size,
-                tagline: p.tagline.clone(),
+                tagline: about.as_ref().map(|a| a.0.clone()).or_else(|| p.tagline.clone()),
+                description: about.map(|a| a.1),
+                blocked: None,
                 group: Source::Adobe.group().into(),
                 prerelease,
                 installed: installed.iter().any(|i| sap_of(i).0 == p.sap && !i.missing),
@@ -752,7 +757,8 @@ fn condition_ok(cond: &str, lang: &str) -> bool {
         return true;
     }
     if let Some(rest) = c.strip_prefix("[OSArchitecture]") {
-        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+        // The processor Windows runs on: this app may itself run emulated as x64 on ARM64.
+        let arch = winutil::native_arch();
         if let Some(v) = rest.trim().strip_prefix("==") {
             return v.trim().eq_ignore_ascii_case(arch) || (arch == "x64" && v.trim() == "64");
         }
@@ -887,6 +893,10 @@ fn component_blockers(sap: &str) -> Vec<String> {
         })
 }
 
+/// The name on Adobe's code signing certificate, as `winutil::authenticode_signer` returns it
+/// (read from RemoteUpdateManager.exe).
+pub const ADOBE_SIGNER: &str = "Adobe Inc.";
+
 /// Update through Adobe's Remote Update Manager (official admin tool, downloads by itself).
 pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dirs: Vec<PathBuf>) -> Plan {
     let dir = paths::downloads().join("rum");
@@ -900,6 +910,8 @@ pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dir
         downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, md5: None, signer: None, sha512: None, headers: vec![] }],
         steps: vec![
             Step::ExtractZip { zip, dest: exe_dir.clone(), strip_root: false, elevated: false, label: "Preparing Adobe Remote Update Manager".into() },
+            // Adobe publishes no checksum for the zip: the program in it must carry Adobe's signature.
+            Step::CheckSigner { path: exe_dir.join("RemoteUpdateManager.exe"), signer: ADOBE_SIGNER.into(), label: "Checking Adobe's signature".into() },
             Step::Run {
                 exe: exe_dir.join("RemoteUpdateManager.exe"),
                 args: vec!["--action=install".into(), format!("--productVersions={sap}")],
@@ -1017,5 +1029,18 @@ mod tests {
         assert_eq!(p.size, Some(2713516793));
         assert_eq!(p.base_version, "7.2.0");
         assert_eq!(c.newest("SBSTP", "win64", None).unwrap().version, "12.2.0");
+    }
+
+    #[test]
+    fn native_arm64_builds_are_read_from_the_catalog() {
+        let xml = r#"<?xml version='1.0'?><response><channels><channel name="ccm"><products>
+        <product version="27.1" id="PHSP"><displayName>Photoshop</displayName>
+        <platforms><platform id="win64"><languageSet buildGuid="a" productVersion="27.1.0"><esdData><size>1</size></esdData></languageSet></platform>
+        <platform id="winarm64"><languageSet buildGuid="b" productVersion="27.1.0"><esdData><size>2</size></esdData></languageSet></platform></platforms>
+        </product></products></channel></channels></response>"#;
+        let c = parse_catalog(xml.as_bytes()).unwrap();
+        assert_eq!(c.newest("PHSP", "winarm64", None).unwrap().build_guid, "b");
+        assert_eq!(c.newest("PHSP", "win64", None).unwrap().build_guid, "a");
+        assert!(CATALOG_URL.contains("winarm64"));
     }
 }

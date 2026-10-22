@@ -41,8 +41,9 @@
     if (menuBtn) openMenuFor(app, menuBtn, { x: e.clientX, y: e.clientY });
   }}
   onpointerenter={() => (ui.focusedApp = app.id)}
-  onpointerleave={() => ui.focusedApp === app.id && (ui.focusedApp = null)}
+  onpointerleave={() => ui.leaveApp(app.id)}
   onfocusin={() => (ui.focusedApp = app.id)}
+  onfocusout={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && ui.leaveApp(app.id)}
 >
   <span role="cell" class="c app">
     <Mark app={app} size={28} />
@@ -67,8 +68,8 @@
     {:else if app.status === "failed"}
       <Btn variant="raised" size="sm" title="Retry  R" onclick={() => retryFor(app)}>Retry</Btn>
     {:else if job}
-      <button class="ib" aria-label={job.state === "paused" ? "Resume" : "Pause"} title={pauseTip(job, "  Space")} disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}><Icon d={job.state === "paused" ? I.play : I.pause} /></button>
-      <button class="ib" aria-label="Cancel" title={cancelTip(job, "Cancel", "  Esc")} disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
+      <button class="ib" aria-label={job.state === "paused" ? "Resume" : "Pause"} title={pauseTip(job)} disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}><Icon d={job.state === "paused" ? I.play : I.pause} /></button>
+      <button class="ib" aria-label="Cancel" title={cancelTip(job)} disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
     {:else}
       <Btn variant="ghost" size="sm" title="Open {app.name}  O" onclick={() => openApp(app.id)}>Open</Btn>
     {/if}

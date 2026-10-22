@@ -1,4 +1,4 @@
-import { bytes, bytesParts, speed as fmtSpeed, unitFor } from "./format";
+import { bytes, bytesParts, speed as fmtSpeed, unitFor } from "./format.ts";
 import type { Job } from "./types";
 
 /** "Downloading 1.3 of 2.9 GB at 22 MB/s", "Installing, step 3 of 4", "Waiting" */
@@ -42,6 +42,12 @@ export function jobWhat(j: Job): string {
 
 export const pct = (j: Job) => Math.round(j.progress * 100);
 
+/** The small line under a job that is running or waiting its turn: what it does right now. Nothing for finished jobs. */
+export function jobDetail(j: Pick<Job, "state" | "detail">): string {
+  if (j.state === "done" || j.state === "failed" || j.state === "canceled") return "";
+  return (j.detail ?? "").trim();
+}
+
 /** Tooltip for a job control that does nothing right now. */
 export const NO_STOP_TIP = "Installing now. It can't be stopped safely.";
 
@@ -61,4 +67,13 @@ export function pauseTip(j: Pick<Job, "state">, keys = ""): string {
 /** Tooltip for the cancel button. */
 export function cancelTip(j: Pick<Job, "state" | "cancelable">, label = "Cancel", keys = ""): string {
   return canCancel(j) ? label + keys : NO_STOP_TIP;
+}
+
+/** Status of a failed job in a list row: "Failed, files in use" from the message, the code only if there is no message. */
+export function failedLine(j: Pick<Job, "error">): string {
+  if (!j.error) return "Failed";
+  const first = j.error.message.trim().split(/\.\s/)[0].replace(/\.$/, "");
+  if (!first) return `Failed, ${j.error.code}`;
+  const lower = /^[A-Z][a-z]/.test(first) ? first[0].toLowerCase() + first.slice(1) : first;
+  return `Failed, ${lower}`;
 }

@@ -144,9 +144,9 @@
               <div class="detail" transition:reveal>
                 <pre class="selectable">{e.error.detail}</pre>
                 <div class="da">
-                  {#if canRetry(e)}<Btn variant="primary" size="sm" title="Retry  R" onclick={() => retry(e)}>Retry</Btn>{/if}
-                  {#if e.error.logPath}<Btn variant="raised" size="sm" title="View log  L" onclick={() => send("open_log", { path: e.error!.logPath! })}>View log</Btn>{/if}
-                  <Btn variant="ghost" size="sm" title="Copy details  Ctrl C" onclick={() => copy(e)}>Copy details</Btn>
+                  {#if canRetry(e)}<Btn variant="primary" size="sm" title="Retry" onclick={() => retry(e)}>Retry</Btn>{/if}
+                  {#if e.error.logPath}<Btn variant="raised" size="sm" title="View log" onclick={() => send("open_log", { path: e.error!.logPath! })}>View log</Btn>{/if}
+                  <Btn variant="ghost" size="sm" title="Copy details" onclick={() => copy(e)}>Copy details</Btn>
                 </div>
               </div>
             {/if}

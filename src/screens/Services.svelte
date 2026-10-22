@@ -51,7 +51,7 @@
       <h1 class="h1">Background services</h1>
       <span class="desc">Adobe processes running on this PC. A stopped service frees its memory until Creative Cloud starts it again.</span>
     </div>
-    <Btn variant="secondary" size="md" title="Stop all safe services  Ctrl Shift S" disabled={!anySafe || busy === "*"} onclick={stopSafe}>Stop all safe services</Btn>
+    <Btn variant="secondary" size="md" title="Stop all safe services" disabled={!anySafe || busy === "*"} onclick={stopSafe}>Stop all safe services</Btn>
   </div>
 
   <div class="stats">

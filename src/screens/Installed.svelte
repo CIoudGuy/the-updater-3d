@@ -12,6 +12,7 @@
   import { ui, type InstalledFilter, type InstalledGroup, type SortKey } from "../lib/ui.svelte";
   import { enter, reduced, rise } from "../lib/motion";
   import type { AppEntry, AppStatus } from "../lib/types";
+  import { groupOrAll, installedNone } from "../lib/view";
 
   let searchInput = $state<HTMLInputElement>();
   onMount(() => {
@@ -25,10 +26,13 @@
   const STATUS_RANK: Record<AppStatus, number> = { failed: 0, missing: 1, blocked: 2, update: 3, updating: 4, queued: 5, unknown: 6, current: 7 };
 
   const q = $derived(ui.query.trim().toLowerCase());
+  // a source filter whose last app was uninstalled falls back to All, like in Get apps
+  const presentGroups = $derived(GROUPS.filter((g) => store.apps.some((a) => a.group === g)));
+  const group = $derived(groupOrAll(ui.group, presentGroups));
   const scoped = $derived(
     store.apps.filter(
       (a) =>
-        (ui.group === "all" || a.group === ui.group) &&
+        (group === "all" || a.group === group) &&
         (!q || a.name.toLowerCase().includes(q) || a.version.toLowerCase().includes(q) || a.code.toLowerCase() === q || a.group.toLowerCase().includes(q)),
     ),
   );
@@ -57,11 +61,11 @@
     });
     return list;
   });
-  const showSections = $derived(ui.view === "grid" && ui.filter === "all" && ui.group === "all" && sorted.length > 0);
+  const showSections = $derived(ui.view === "grid" && ui.filter === "all" && group === "all" && sorted.length > 0);
   const sections = $derived(
     GROUPS.map((g) => ({ name: g, items: sorted.filter((a) => a.group === g) })).filter((s) => s.items.length > 0),
   );
-  const presentGroups = $derived(GROUPS.filter((g) => store.apps.some((a) => a.group === g)));
+  const none = $derived(installedNone({ query: ui.query, filter: ui.filter, matchesIgnoringFilter: scoped.length }));
   const updatesCount = $derived(store.updates.length);
 
   const filterOpts = $derived([
@@ -100,16 +104,17 @@
       <Segmented variant="chip" options={filterOpts} value={ui.filter} onchange={(v) => (ui.filter = v)} label="Filter" />
       {#if presentGroups.length > 1}
         <span class="vsep" aria-hidden="true"></span>
-        <Segmented variant="chip" options={groupOpts} value={ui.group} onchange={(v) => (ui.group = v)} label="Source" />
+        <Segmented variant="chip" options={groupOpts} value={group} onchange={(v) => (ui.group = v)} label="Source" />
       {/if}
     </div>
     <Select options={sortOpts} value={ui.sort} onchange={(v) => ui.setSort(v as SortKey)} width={ui.compact ? 150 : 190} height={30} label="Sort" title="Sort" />
   </div>
 
-  {#if ui.group === "Other apps" && sorted.length > 0}<p class="srcnote solo">{OTHER_NOTE}</p>{/if}
+  {#if group === "Other apps" && sorted.length > 0}<p class="srcnote solo">{OTHER_NOTE}</p>{/if}
   {#if sorted.length === 0}
     <p class="none" in:rise>
-      {#if q}No apps match "{ui.query}".{:else if ui.filter === "updates"}No updates available. Everything here is current.{:else}Nothing here yet.{/if}
+      {none.text}
+      {#if none.showAll}<button class="lnk" onclick={() => (ui.filter = "all")}>Show all apps</button>{/if}
     </p>
   {:else if ui.view === "grid"}
     {#if showSections}
@@ -250,6 +255,16 @@
     margin-top: 48px;
     font-size: 13px;
     color: var(--text-3);
+  }
+  .none .lnk {
+    margin-left: 6px;
+    color: var(--text);
+    text-decoration: underline;
+    text-decoration-color: var(--text-4);
+    text-underline-offset: 3px;
+  }
+  .none .lnk:hover {
+    text-decoration-color: var(--text);
   }
   .table {
     margin-top: 20px;

@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, CatalogEntry, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, BrowsePage, CatalogEntry, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 
 export interface Commands {
   /** Everything the UI needs on start. */
@@ -19,6 +19,9 @@ export interface Commands {
   uninstall_app: { args: { appId: string; removePrefs: boolean }; ret: void };
   prefs_preview: { args: { appId: string }; ret: PrefsItem[] };
   window_ready: { args: {}; ret: void };
+  /** The screen the tray asked for, once; null when there is none. */
+  take_route: { args: {}; ret: string | null };
+  open_logs_folder: { args: {}; ret: void };
   repair_app: { args: { appId: string }; ret: void };
 
   open_app: { args: { appId: string }; ret: void };
@@ -30,6 +33,8 @@ export interface Commands {
   catalog_versions: { args: { id: string }; ret: VersionInfo[] };
   /** Packages of the winget catalog matching a Get apps search (Other apps on only). */
   search_other_apps: { args: { query: string }; ret: CatalogEntry[] };
+  /** A page of the whole winget catalog; category and letter ("A" to "Z", "#") null for all. */
+  browse_other_apps: { args: { category: string | null; letter: string | null; offset: number; limit: number }; ret: BrowsePage };
 
   pause_job: { args: { jobId: string }; ret: void };
   resume_job: { args: { jobId: string }; ret: void };

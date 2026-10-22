@@ -136,6 +136,12 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
     println!("OBS Studio detected as {}", obs.version);
     assert_eq!(obs.version, "32.2.2");
     assert!(!obs.missing);
+    // Epic's new launcher (Preview) is installed here as 0.97.0, per user. It is found by its own
+    // setup program as uninstaller, never as the old MSI launcher.
+    let epic = inst.iter().find(|i| i.id == "tools:epic").expect("Epic Games Launcher (Preview) is installed here");
+    println!("Epic Games Launcher (Preview) detected as {} in {:?}", epic.version, epic.install_dir);
+    assert_eq!(epic.version, "0.97.0");
+    assert!(!epic.missing && epic.exe.as_ref().is_some_and(|e| e.ends_with("EpicGamesLauncher.exe")));
 
     let feed = tools::fetch(&inst).await.expect("more apps feed");
     println!("--- latest versions");
@@ -148,6 +154,14 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
         let l = tools::latest(i, &inst, &feed);
         println!("{:<28} {} -> {:?}", i.id, i.version, l.as_ref().map(|l| (l.version.clone(), l.size, l.note.clone())));
     }
+    let epic_rel = feed.list("epic").first().expect("Epic's latest launcher version resolves");
+    println!("epic latest {} size {:?} url {}", epic_rel.version, epic_rel.size, epic_rel.url);
+    assert!(epic_rel.size.is_some_and(|n| n > 50_000_000));
+    let up = tools::latest(epic, &inst, &feed).expect("epic latest");
+    assert!(updater_lib::version::newer(&up.version, &epic.version), "an update is offered for the installed 0.97.0: {}", up.version);
+    let ep = tools::plan_install("tools:epic", None, updater_lib::model::JobKind::Update, Some(epic), &inst, &feed, tools::Ctx { godot_root: &godot_root }).await.expect("epic plan");
+    println!("epic plan: {:?} signer {:?} size {:?}", ep.steps.iter().map(|s| s.label().to_string()).collect::<Vec<_>>(), ep.downloads[0].signer, ep.downloads[0].size);
+    assert_eq!(ep.downloads[0].signer.as_deref(), Some("Epic Games Inc."));
     println!("--- catalog");
     for c in tools::catalog_entries(&feed, &inst) {
         println!("{:<16} {:<14} size={:?} installed={} pre={}", c.id, c.version, c.size, c.installed, c.prerelease);
@@ -304,14 +318,51 @@ async fn other_apps_coverage_and_changelogs() {
     handled.extend(blender::scan(&un, &std::path::PathBuf::from(std::env::var("ProgramFiles").unwrap()).join("Blender Foundation")));
     handled.extend(tools::scan(&un, &std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Programs").join("Godot")));
     let t0 = std::time::Instant::now();
-    let feed = other::fetch(&handled).await.expect("winget catalog");
+    let mut feed = other::fetch(&handled).await.expect("winget catalog");
+    // The first start may not read the whole starter list in time; the next read has the rest.
+    for _ in 0..3 {
+        if !feed.unfinished {
+            break;
+        }
+        feed = other::fetch(&handled).await.expect("winget catalog");
+    }
     println!("catalog read in {:.1} s, {} packages fetched", t0.elapsed().as_secs_f64(), feed.pkgs.len());
+    // Apps that are also in the Store (they have a package family name) but have a normal
+    // installer stay in the starter list, with a checksum.
+    for id in ["Mozilla.Firefox", "SlackTechnologies.Slack", "Microsoft.PowerToys", "Notion.Notion", "Rufus.Rufus"] {
+        let Some((pf, _)) = feed.popular.iter().find(|(p, _)| p.pkg.id.eq_ignore_ascii_case(id)) else {
+            // Not in the list: only right when the catalog has no installer that can run silently.
+            let idx = winget::Index::open(&winget::index_path()).unwrap();
+            let p = idx.by_id(id).unwrap_or_else(|| panic!("{id} is not in the catalog"));
+            let v = winget::versions(&p).await.unwrap();
+            let m = winget::manifest(v.first().unwrap()).await.unwrap();
+            let why = other::choose(&m, &other::Want::fresh()).err().unwrap_or_else(|| panic!("{id} has a usable installer but is missing"));
+            let kinds: Vec<&str> = m.installers.iter().map(other::kind_of).collect();
+            println!("starter {id:<26} left out: {why} (installers: {kinds:?})");
+            continue;
+        };
+        let m = pf.latest.as_ref().expect("manifest");
+        let i = other::choose(m, &other::Want::fresh()).expect("a usable installer");
+        println!("starter {id:<26} {:<6} {:<14} sha256 {} {}", other::kind_of(i), m.version, i.sha256, i.url);
+        assert!(i.sha256.len() == 64 && i.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{id}: no checksum");
+    }
     let idx = winget::Index::open(&winget::index_path()).unwrap();
     println!("index: {} packages, {} KB on disk", idx.count(), std::fs::metadata(winget::index_path()).unwrap().len() / 1024);
     let rep = other::match_all(&un, &idx, &handled, &winutil::msi_upgrade_codes());
     let t1 = std::time::Instant::now();
     let installed = other::scan(&un, &handled, Some(&feed));
     println!("scan (index lookups and matching) took {} ms", t1.elapsed().as_millis());
+
+    // Every update gets a download size from its server, so the update total is real.
+    let urls = other::update_urls(&installed, &feed);
+    let mut sized = 0;
+    for (key, url) in &urls {
+        let s = other::download_size(url).await;
+        println!("size {key:<60} {s:?}");
+        sized += s.is_some() as usize;
+    }
+    println!("download sizes: {sized} of {} updates", urls.len());
+    assert!(urls.is_empty() || sized * 10 >= urls.len() * 8, "most updates have a size");
 
     println!("\n--- matched");
     let mut unsupported: Vec<(String, String, String)> = Vec::new();
@@ -419,6 +470,47 @@ async fn other_apps_coverage_and_changelogs() {
     println!("newest version as shown in the version list: {shown_counts:?}");
     println!("all listed versions with a change list: {all_with_lines} of {all_versions}");
     assert!(!rep.matches.is_empty());
+
+    // Browse all: a random sample of 100 entries of the whole catalog, read as the cards read
+    // them (newest manifest, then the icon search). The icons found are not saved.
+    use updater_lib::sources::{browse, icons};
+    let list = browse::list().expect("browse list");
+    let counts = browse::counts(&list, |_| true);
+    println!("\n=== browse all: {} entries of {} packages", list.items.len(), list.packages);
+    for (n, c) in browse::CATEGORIES.iter().zip(&counts) {
+        println!("    {n:<16} {c}");
+    }
+    let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 | 1;
+    let mut picked = std::collections::BTreeSet::new();
+    while picked.len() < 100.min(list.items.len()) {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        picked.insert((seed % list.items.len() as u64) as usize);
+    }
+    let sample: Vec<winget::Pkg> = picked.iter().map(|i| list.items[*i].pkg.clone()).collect();
+    use futures_util::StreamExt;
+    let got: Vec<(String, Option<browse::Detail>, bool)> = futures_util::stream::iter(sample)
+        .map(|p| async move {
+            let m = async { winget::manifest(winget::versions(&p).await.ok()?.first()?).await.ok() }.await;
+            let d = m.as_ref().map(|m| browse::Detail::from_manifest(&p.hash, m));
+            let pages: Vec<String> = m.iter().flat_map(|m| [m.package_url.clone(), m.publisher_url.clone()]).flatten().filter(|u| u.starts_with("http")).collect();
+            let icon = tokio::time::timeout(std::time::Duration::from_secs(60), icons::find(&p.id, m.as_ref().and_then(|m| m.icon_url.as_deref()), &pages)).await.ok().flatten().is_some();
+            (p.id, d, icon)
+        })
+        .buffer_unordered(6)
+        .collect()
+        .await;
+    let read = got.iter().filter(|g| g.1.is_some()).count();
+    let short = got.iter().filter(|g| g.1.as_ref().is_some_and(|d| d.short.is_some())).count();
+    let long = got.iter().filter(|g| g.1.as_ref().is_some_and(|d| d.long.is_some())).count();
+    let line = got.iter().filter(|g| g.1.as_ref().is_some_and(|d| browse::tagline_for(d.short.as_deref(), browse::popular_line(&g.0), d.publisher.as_deref()).is_some())).count();
+    let ok = got.iter().filter(|g| g.1.as_ref().is_some_and(|d| d.blocked.is_none())).count();
+    let icon = got.iter().filter(|g| g.2).count();
+    for (id, d, i) in &got {
+        println!("{id:<44} {:<5} {:<5} {:<5} {}", d.as_ref().is_some_and(|d| d.short.is_some()), d.as_ref().is_some_and(|d| d.long.is_some()), i, d.as_ref().and_then(|d| d.blocked.clone()).unwrap_or_default());
+    }
+    println!("sample of {}: manifest read {read}, short description {short}, long description {long}, card line {line}, installable silently {ok}, icon {icon}", got.len());
 }
 
 /// The first release of a Blender series carries its whole release notes, by topic.
@@ -513,4 +605,73 @@ async fn release_notes_coverage() {
     assert!(got("Adobe PHSP") >= 5 && got("Adobe SHPR") >= 10 && got("Adobe SBSTA") >= 20, "Adobe");
     assert!(got("blender:5.2") >= 3 && got("blender:older") >= 18, "Blender");
     assert!(got("Krita") >= 15, "Krita");
+}
+
+/// The starter list of Other apps: how much of it survives the filter, how long a cold read takes
+/// and how many real icons are found (nothing is written to the icon cache).
+/// cargo test --release --test live_probe other_apps_starter_list -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn other_apps_starter_list_and_icons() {
+    use futures_util::StreamExt;
+    use updater_lib::sources::{icons, other, winget};
+    let t0 = std::time::Instant::now();
+    let feed = other::fetch(&[]).await.expect("winget catalog");
+    println!("starter list read in {:.1} s (unfinished: {})", t0.elapsed().as_secs_f64(), feed.unfinished);
+    let idx = winget::Index::open(&winget::index_path()).unwrap();
+    let kept: std::collections::HashSet<String> = feed.popular.iter().map(|(p, _)| p.pkg.id.to_ascii_lowercase()).collect();
+    let mut dropped = Vec::new();
+    for (id, _) in other::POPULAR {
+        if kept.contains(&id.to_ascii_lowercase()) || other::handled_package(id) || other::excluded_package(id).is_some() {
+            continue;
+        }
+        let why = match idx.by_id(id) {
+            None => "not in the catalog".to_string(),
+            Some(p) if idx.is_msix(p.row) => "Store package".to_string(),
+            Some(p) => match winget::versions(&p).await {
+                Err(e) => format!("versions: {e}"),
+                Ok(v) => match winget::manifest(&v[0]).await {
+                    Err(e) => format!("manifest: {e}"),
+                    Ok(m) => other::choose(&m, &other::Want::fresh()).err().unwrap_or_default(),
+                },
+            },
+        };
+        dropped.push(format!("{id}: {why}"));
+    }
+    println!("starter list: {} ids, {} kept, {} dropped", other::POPULAR.len(), feed.popular.len(), dropped.len());
+    for d in &dropped {
+        println!("  DROPPED {d}");
+    }
+    let ids: Vec<String> = feed.popular.iter().map(|(p, _)| p.pkg.id.clone()).collect();
+    let t1 = std::time::Instant::now();
+    let feed_ref = &feed;
+    let results: Vec<(String, Option<(usize, &'static str, &'static str)>)> = futures_util::stream::iter(ids)
+        .map(|id| async move {
+            let src = other::icon_source_of(Some(feed_ref), &id).await;
+            let got = match src {
+                Some(s) => icons::find(&id, s.icon.as_deref(), &s.pages).await.map(|g| (g.bytes.len(), g.ext, g.via)),
+                None => None,
+            };
+            (id, got)
+        })
+        .buffer_unordered(6)
+        .collect()
+        .await;
+    let hits = results.iter().filter(|(_, g)| g.is_some()).count();
+    println!("icons: {hits} of {} found in {:.1} s", results.len(), t1.elapsed().as_secs_f64());
+    let mut by_ext = std::collections::BTreeMap::<String, usize>::new();
+    for (id, g) in &results {
+        if let Some((n, e, via)) = g {
+            *by_ext.entry(format!("{via}/{e}")).or_default() += 1;
+            if *via == "favicon" || *via == "page" {
+                println!("  WEAK {id} {via} {e} {n} bytes");
+            }
+        }
+    }
+    println!("by source/type: {by_ext:?}");
+    let mut misses: Vec<&String> = results.iter().filter(|(_, g)| g.is_none()).map(|(i, _)| i).collect();
+    misses.sort();
+    for m in misses {
+        println!("  NO ICON {m}");
+    }
 }

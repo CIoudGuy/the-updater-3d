@@ -501,13 +501,9 @@ pub struct Want {
     pub locale: Option<String>,
 }
 
+/// The processor Windows runs on ("arm64" even for this app running emulated as x64).
 pub fn machine_arch() -> &'static str {
-    let a = std::env::var("PROCESSOR_ARCHITEW6432").or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE")).unwrap_or_default();
-    if a.eq_ignore_ascii_case("ARM64") {
-        "arm64"
-    } else {
-        "x64"
-    }
+    winutil::native_arch()
 }
 
 fn starts_dir(p: &str, root: &Path) -> bool {
@@ -708,7 +704,13 @@ pub struct Feed {
     /// Well-known apps offered in Get apps before any search (see `POPULAR`), with a short line
     /// about each; only those the catalog can install silently with a checksum.
     pub popular: Vec<(PkgFeed, &'static str)>,
+    /// Some of `popular` were still loading when the feed was returned; read the feed again later.
+    pub unfinished: bool,
 }
+
+/// Starter list manifests read at the same time, and how long a refresh waits for them.
+const POPULAR_PARALLEL: usize = 16;
+const POPULAR_BUDGET: Duration = Duration::from_secs(25);
 
 /// Well-known apps that Get apps lists under Other apps without a search. Ids the catalog does not
 /// have, apps another source handles, Store-only apps and installers that can not run silently
@@ -718,51 +720,365 @@ pub const POPULAR: &[(&str, &str)] = &[
     ("Mozilla.Firefox", "Web browser"),
     ("Brave.Brave", "Web browser"),
     ("Opera.Opera", "Web browser"),
+    ("Opera.OperaGX", "Browser for gamers"),
+    ("Vivaldi.Vivaldi", "Web browser"),
+    ("Zen-Team.Zen-Browser", "Web browser"),
+    ("Waterfox.Waterfox", "Web browser"),
+    ("LibreWolf.LibreWolf", "Private web browser"),
+    ("TorProject.TorBrowser", "Private web browser"),
+    ("Mozilla.Firefox.DeveloperEdition", "Browser for developers"),
+    ("Ablaze.Floorp", "Web browser"),
+    ("Mozilla.Thunderbird", "Email"),
     ("VideoLAN.VLC", "Video and music player"),
     ("Daum.PotPlayer", "Video player"),
-    ("7zip.7zip", "File archiver"),
-    ("RARLab.WinRAR", "File archiver"),
-    ("Microsoft.VisualStudioCode", "Code editor"),
-    ("Notepad++.Notepad++", "Text and code editor"),
-    ("Git.Git", "Version control"),
-    ("GitHub.GitHubDesktop", "Git client"),
-    ("OpenJS.NodeJS.LTS", "JavaScript runtime"),
-    ("Docker.DockerDesktop", "Containers"),
-    ("WinSCP.WinSCP", "File transfer"),
-    ("PuTTY.PuTTY", "SSH client"),
-    ("Discord.Discord", "Voice and text chat"),
+    ("MPC-BE.MPC-BE", "Video player"),
+    ("clsid2.mpc-hc", "Video player"),
+    ("Jellyfin.JellyfinMediaPlayer", "Media player"),
+    ("Plex.Plex", "Media player"),
+    ("Plex.Plexamp", "Music player"),
+    ("Spotify.Spotify", "Music"),
+    ("AIMP.AIMP", "Music player"),
+    ("Winamp.Winamp", "Music player"),
+    ("Apple.iTunes", "Music and devices"),
     ("Telegram.TelegramDesktop", "Messaging"),
-    ("OpenWhisperSystems.Signal", "Private messaging"),
+    ("Discord.Discord", "Voice and text chat"),
     ("SlackTechnologies.Slack", "Team chat"),
+    ("OpenWhisperSystems.Signal", "Private messaging"),
     ("Zoom.Zoom", "Video meetings"),
-    ("Mozilla.Thunderbird", "Email"),
+    ("Element.Element", "Secure chat"),
+    ("Mumble.Mumble.Client", "Voice chat"),
+    ("TeamSpeakSystems.TeamSpeakClient", "Voice chat"),
+    ("Guilded.Guilded", "Chat"),
+    ("Vencord.Vesktop", "Discord client"),
+    ("Cisco.Webex", "Video meetings"),
     ("Valve.Steam", "Games"),
     ("EpicGames.EpicGamesLauncher", "Games"),
     ("GOG.Galaxy", "Games"),
-    ("Spotify.Spotify", "Music"),
+    ("ElectronicArts.EADesktop", "Games"),
+    ("Ubisoft.Connect", "Games"),
+    ("RiotGames.Valorant.EU", "Game"),
+    ("PrismLauncher.PrismLauncher", "Minecraft launcher"),
+    ("Playnite.Playnite", "Game library"),
+    ("HeroicGamesLauncher.HeroicGamesLauncher", "Games"),
+    ("Parsec.Parsec", "Game streaming"),
+    ("MoonlightGameStreamingProject.Moonlight", "Game streaming"),
+    ("LizardByte.Sunshine", "Game streaming host"),
+    ("Modrinth.ModrinthApp", "Game mods"),
+    ("Rainmeter.Rainmeter", "Desktop widgets"),
+    ("voidtools.Everything", "Instant file search"),
+    ("Microsoft.PowerToys", "Windows utilities"),
+    ("AutoHotkey.AutoHotkey", "Automation scripts"),
+    ("Flow-Launcher.Flow-Launcher", "App launcher"),
+    ("lencx.ChatGPT", "Chat assistant"),
+    ("Klocman.BulkCrapUninstaller", "Bulk uninstaller"),
+    ("RevoUninstaller.RevoUninstaller", "Uninstaller"),
+    ("BleachBit.BleachBit", "Disk cleaner"),
+    ("Piriform.CCleaner", "PC cleaner"),
+    ("Piriform.Recuva", "File recovery"),
+    ("Piriform.Speccy", "System information"),
+    ("CrystalDewWorld.CrystalDiskInfo", "Disk health"),
+    ("CrystalDewWorld.CrystalDiskMark", "Disk speed test"),
+    ("CPUID.CPU-Z", "System information"),
+    ("CPUID.HWMonitor", "Hardware monitor"),
+    ("TechPowerUp.GPU-Z", "Graphics card information"),
+    ("REALiX.HWiNFO", "Hardware information"),
+    ("Guru3D.Afterburner", "GPU tuning"),
+    ("Guru3D.RTSS", "Frame rate overlay"),
+    ("WinDirStat.WinDirStat", "Disk usage map"),
+    ("AntibodySoftware.WizTree", "Disk usage map"),
+    ("JAMSoftware.TreeSize.Free", "Disk usage"),
+    ("CodeSector.TeraCopy", "Fast file copy"),
+    ("Balena.Etcher", "Write disk images to USB"),
+    ("7zip.7zip", "File archiver"),
+    ("RARLab.WinRAR", "File archiver"),
+    ("Giorgiotani.Peazip", "File archiver"),
+    ("Bandisoft.Bandizip", "File archiver"),
+    ("Notepad++.Notepad++", "Text and code editor"),
+    ("Microsoft.VisualStudioCode", "Code editor"),
+    ("Microsoft.VisualStudioCode.Insiders", "Code editor preview"),
+    ("VSCodium.VSCodium", "Code editor"),
+    ("SublimeHQ.SublimeText.4", "Text editor"),
+    ("SublimeHQ.SublimeMerge", "Git client"),
+    ("Neovim.Neovim", "Terminal editor"),
+    ("vim.vim", "Terminal editor"),
+    ("GNU.Emacs", "Text editor"),
+    ("JetBrains.IntelliJIDEA.Community", "Java IDE"),
+    ("JetBrains.IntelliJIDEA.Ultimate", "Java IDE"),
+    ("JetBrains.PyCharm.Community", "Python IDE"),
+    ("JetBrains.PyCharm.Professional", "Python IDE"),
+    ("JetBrains.WebStorm", "JavaScript IDE"),
+    ("JetBrains.Rider", ".NET IDE"),
+    ("JetBrains.GoLand", "Go IDE"),
+    ("JetBrains.CLion", "C and C++ IDE"),
+    ("JetBrains.PhpStorm", "PHP IDE"),
+    ("JetBrains.RustRover", "Rust IDE"),
+    ("JetBrains.DataGrip", "Database IDE"),
+    ("JetBrains.Toolbox", "JetBrains apps"),
+    ("Google.AndroidStudio", "Android IDE"),
+    ("Apache.NetBeans", "Java IDE"),
+    ("Anysphere.Cursor", "AI code editor"),
+    ("Git.Git", "Version control"),
+    ("GitHub.GitHubDesktop", "Git client"),
+    ("GitHub.cli", "GitHub command line"),
+    ("Axosoft.GitKraken", "Git client"),
+    ("TortoiseGit.TortoiseGit", "Git client"),
+    ("Atlassian.Sourcetree", "Git client"),
+    ("Fork.Fork", "Git client"),
+    ("OpenJS.NodeJS.LTS", "JavaScript runtime"),
+    ("OpenJS.NodeJS", "JavaScript runtime"),
+    ("Yarn.Yarn", "Package manager"),
+    ("Python.Python.3.13", "Python"),
+    ("Python.Python.3.12", "Python"),
+    ("Rustlang.Rustup", "Rust toolchain"),
+    ("GoLang.Go", "Go language"),
+    ("Microsoft.OpenJDK.21", "Java"),
+    ("EclipseAdoptium.Temurin.21.JDK", "Java"),
+    ("EclipseAdoptium.Temurin.17.JDK", "Java"),
+    ("Oracle.JavaRuntimeEnvironment", "Java runtime"),
+    ("Microsoft.DotNet.SDK.9", ".NET SDK"),
+    ("Microsoft.DotNet.SDK.8", ".NET SDK"),
+    ("Microsoft.DotNet.Runtime.8", ".NET runtime"),
+    ("Microsoft.DotNet.DesktopRuntime.8", ".NET desktop runtime"),
+    ("Microsoft.DotNet.DesktopRuntime.9", ".NET desktop runtime"),
+    ("Microsoft.VCRedist.2015+.x64", "C++ runtime"),
+    ("RubyInstallerTeam.Ruby.3.4", "Ruby"),
+    ("StrawberryPerl.StrawberryPerl", "Perl"),
+    ("Kitware.CMake", "Build tool"),
+    ("LLVM.LLVM", "Compiler"),
+    ("MSYS2.MSYS2", "Build tools"),
+    ("Docker.DockerDesktop", "Containers"),
+    ("Hashicorp.Vagrant", "Virtual machines"),
+    ("Oracle.VirtualBox", "Virtual machines"),
+    ("Postman.Postman", "API tool"),
+    ("Insomnia.Insomnia", "API tool"),
+    ("Bruno.Bruno", "API tool"),
+    ("DBeaver.DBeaver.Community", "Database tool"),
+    ("TablePlus.TablePlus", "Database tool"),
+    ("HeidiSQL.HeidiSQL", "Database tool"),
+    ("PostgreSQL.PostgreSQL.17", "Database"),
+    ("MongoDB.Compass.Full", "MongoDB tool"),
+    ("Oracle.MySQL", "Database"),
+    ("WinSCP.WinSCP", "File transfer"),
+    ("PuTTY.PuTTY", "SSH client"),
+    ("Termius.Termius", "SSH client"),
+    ("Alacritty.Alacritty", "Terminal"),
+    ("wez.wezterm", "Terminal"),
+    ("Warp.Warp", "Terminal"),
+    ("WinMerge.WinMerge", "File comparison"),
+    ("Meld.Meld", "File comparison"),
+    ("Insecure.Nmap", "Network scanner"),
+    ("Telerik.Fiddler.Classic", "Web debugging"),
+    ("Obsidian.Obsidian", "Notes"),
+    ("Notion.Notion", "Notes and documents"),
+    ("Logseq.Logseq", "Notes"),
+    ("Joplin.Joplin", "Notes"),
+    ("Evernote.Evernote", "Notes"),
+    ("AppFlowy.AppFlowy", "Notes"),
+    ("Figma.Figma", "Design tool"),
+    ("Figma.FigmaAgent", "Design fonts helper"),
+    ("Canva.Canva", "Design tool"),
     ("GIMP.GIMP.3", "Image editor"),
+    ("GIMP.GIMP", "Image editor"),
     ("dotPDN.PaintDotNet", "Image editor"),
     ("Inkscape.Inkscape", "Vector graphics"),
     ("darktable.darktable", "Photo editor"),
+    ("RawTherapee.RawTherapee", "Photo editor"),
+    ("Pinta.Pinta", "Image editor"),
+    ("IrfanSkiljan.IrfanView", "Image viewer"),
+    ("XnSoft.XnViewMP", "Image viewer"),
+    ("ImageMagick.ImageMagick", "Image tools"),
+    ("Autodesk.Fusion", "3D design"),
+    ("Prusa3D.PrusaSlicer", "3D printing"),
+    ("Ultimaker.Cura", "3D printing"),
+    ("OpenSCAD.OpenSCAD", "3D modeling"),
+    ("Wings3D.Wings3D", "3D modeling"),
     ("KDE.Kdenlive", "Video editor"),
+    ("OpenShot.OpenShot", "Video editor"),
     ("HandBrake.HandBrake", "Video converter"),
+    ("MediaArea.MediaInfo.GUI", "Media file details"),
     ("Audacity.Audacity", "Audio editor"),
+    ("LMMS.LMMS", "Music production"),
+    ("Cockos.REAPER", "Audio workstation"),
+    ("VB-Audio.Voicemeeter.Banana", "Audio mixer"),
     ("ShareX.ShareX", "Screenshots and screen recording"),
+    ("Greenshot.Greenshot", "Screenshots"),
+    ("Flameshot.Flameshot", "Screenshots"),
+    ("Elgato.StreamDeck", "Stream controller"),
+    ("Elgato.4KCaptureUtility", "Capture card tool"),
+    ("Elgato.ControlCenter", "Elgato lights"),
     ("TheDocumentFoundation.LibreOffice", "Office suite"),
+    ("Apache.OpenOffice", "Office suite"),
+    ("ONLYOFFICE.DesktopEditors", "Office suite"),
     ("SumatraPDF.SumatraPDF", "PDF reader"),
-    ("Obsidian.Obsidian", "Notes"),
-    ("Notion.Notion", "Notes and documents"),
-    ("Figma.Figma", "Design tool"),
-    ("Microsoft.PowerToys", "Windows utilities"),
-    ("voidtools.Everything", "Instant file search"),
-    ("qBittorrent.qBittorrent", "Torrent client"),
+    ("Adobe.Acrobat.Reader.64-bit", "PDF reader"),
+    ("Foxit.FoxitReader", "PDF reader"),
+    ("PDFgear.PDFgear", "PDF tools"),
+    ("PDFsam.PDFsam", "PDF tools"),
+    ("calibre.calibre", "E-book manager"),
     ("Bitwarden.Bitwarden", "Password manager"),
+    ("KeePassXCTeam.KeePassXC", "Password manager"),
+    ("DominikReichl.KeePass", "Password manager"),
+    ("Proton.ProtonVPN", "VPN"),
+    ("Proton.ProtonMail", "Email"),
+    ("Proton.ProtonDrive", "Cloud storage"),
+    ("Cloudflare.Warp", "Private DNS and VPN"),
+    ("Tailscale.Tailscale", "Private network"),
+    ("WireGuard.WireGuard", "VPN"),
+    ("OpenVPNTechnologies.OpenVPNConnect", "VPN"),
+    ("ZeroTier.ZeroTierOne", "Virtual network"),
+    ("AnyDesk.AnyDesk", "Remote desktop"),
+    ("TeamViewer.TeamViewer", "Remote desktop"),
     ("Dropbox.Dropbox", "Cloud storage"),
     ("Google.GoogleDrive", "Cloud storage"),
-    ("CPUID.CPU-Z", "System information"),
-    ("TechPowerUp.GPU-Z", "Graphics card information"),
+    ("Microsoft.OneDrive", "Cloud storage"),
+    ("Mega.MEGASync", "Cloud storage"),
+    ("Nextcloud.NextcloudDesktop", "Cloud storage"),
+    ("SyncTrayzor.SyncTrayzor", "File sync"),
+    ("Box.Box", "Cloud storage"),
+    ("qBittorrent.qBittorrent", "Torrent client"),
+    ("Transmission.Transmission", "Torrent client"),
+    ("DelugeTeam.Deluge", "Torrent client"),
     ("Malwarebytes.Malwarebytes", "Malware scanner"),
-    ("Balena.Etcher", "Write disk images to USB"),
+    ("SUPERAntiSpyware.SUPERAntiSpyware", "Malware scanner"),
+    ("CodecGuide.K-LiteCodecPack.Standard", "Video codecs"),
+    ("RedHat.Podman-Desktop", "Containers"),
+    ("Google.CloudSDK", "Google Cloud tools"),
+    ("Amazon.AWSCLI", "AWS command line"),
+    ("Microsoft.AzureCLI", "Azure command line"),
+    ("Microsoft.Azure.StorageExplorer", "Azure storage"),
+    ("Cloudflare.cloudflared", "Cloudflare tunnels"),
+    ("Foxit.PhantomPDF", "PDF editor"),
+    ("Nvidia.CUDA", "GPU computing"),
+    ("Logitech.GHUB", "Logitech gear"),
+    ("Logitech.OptionsPlus", "Logitech gear"),
+    ("Corsair.iCUE.5", "Corsair gear"),
+    ("SteelSeries.GG", "SteelSeries gear"),
+    ("Asus.ArmouryCrate", "ASUS tools"),
+    ("Ditto.Ditto", "Clipboard manager"),
+    ("Open-Shell.Open-Shell-Menu", "Start menu"),
+    ("Nilesoft.Shell", "Context menus"),
+    ("XnSoft.XnConvert", "Image converter"),
+    ("nomacs.nomacs", "Image viewer"),
+    ("Microsoft.MouseWithoutBorders", "Mouse sharing"),
+    ("Deskflow.Deskflow", "Mouse sharing"),
+    ("Garmin.Express", "Garmin devices"),
+    ("Samsung.SmartSwitch", "Samsung phones"),
+    ("Mojang.MinecraftLauncher", "Minecraft"),
+    ("Glarysoft.GlaryUtilities", "PC tools"),
+    ("IObit.AdvancedSystemCare", "PC tools"),
+    ("IObit.DriverBooster", "Drivers"),
+    ("Wagnardsoft.DisplayDriverUninstaller", "Graphics driver cleanup"),
+    ("Cryptomator.Cryptomator", "Cloud encryption"),
+    ("WinFsp.WinFsp", "File systems"),
+    ("Hex-Rays.IDA.Free", "Disassembler"),
+    ("icsharpcode.ILSpy", ".NET decompiler"),
+    ("Starship.Starship", "Shell prompt"),
+    ("Microsoft.Bicep", "Azure templates"),
+    ("Microsoft.SQLServerManagementStudio", "SQL tool"),
+    ("notable.notable", "Notes"),
+    ("MarkText.MarkText", "Markdown editor"),
+    ("Zettlr.Zettlr", "Markdown editor"),
+    ("LyX.LyX", "Document editor"),
+    ("MiKTeX.MiKTeX", "LaTeX"),
+    ("TeXstudio.TeXstudio", "LaTeX editor"),
+    ("Anki.Anki", "Flashcards"),
+    ("GeoGebra.Classic", "Math"),
+    ("RProject.R", "R language"),
+    ("Anaconda.Anaconda3", "Python distribution"),
+    ("Anaconda.Miniconda3", "Python distribution"),
+    ("Ollama.Ollama", "Run AI models"),
+    ("Jan.Jan", "Run AI models"),
+    ("nomic.gpt4all", "Run AI models"),
+    ("Perplexity.Comet", "AI browser"),
+    ("Maxthon.Maxthon", "Web browser"),
+    ("Yandex.Browser", "Web browser"),
+    ("360.360Chrome", "Web browser"),
+    ("MoonchildProductions.PaleMoon", "Web browser"),
+    ("Mozilla.SeaMonkey", "Web suite"),
+    ("Postbox.Postbox", "Email"),
+    ("Mailbird.Mailbird", "Email"),
+    ("Tutanota.Tutanota", "Private email"),
+    ("Tonec.InternetDownloadManager", "Download manager"),
+    ("Loom.Loom", "Screen recording"),
+    ("Asana.Asana", "Tasks"),
+    ("ClickUp.ClickUp", "Tasks"),
+    ("Miro.Miro", "Whiteboard"),
+    ("JGraph.Draw", "Diagrams"),
+    ("Xmind.Xmind", "Mind maps"),
+    ("Zoho.Mail", "Email"),
+    ("GoTo.GoToMeeting", "Video meetings"),
+    ("XBMCFoundation.Kodi", "Media center"),
+    ("PeterPawlowski.foobar2000", "Music player"),
+    ("Rakuten.Viber", "Messaging"),
+    ("Kakao.KakaoTalk", "Messaging"),
+    ("Overwolf.CurseForge", "Game mods"),
+    ("GitExtensionsTeam.GitExtensions", "Git client"),
+    ("RedisInsight.RedisInsight", "Redis tool"),
+    ("Mobatek.MobaXterm", "Remote terminal"),
+    ("Iterate.Cyberduck", "File transfer"),
+    ("WiresharkFoundation.Wireshark", "Network analyzer"),
+    ("AnyAssociation.Anytype", "Notes"),
+    ("DigitalScholar.Zotero", "Research library"),
+    ("Doist.Todoist", "To-do list"),
+    ("Appest.TickTick", "To-do list"),
+    ("sylikc.JPEGView", "Image viewer"),
+    ("CNRISTI.MeshLab", "3D mesh tool"),
+    ("Bambulab.Bambustudio", "3D printing"),
+    ("JannisX11.Blockbench", "Low poly 3D models"),
+    ("eTeks.SweetHome3D", "Home design"),
+    ("Meltytech.Shotcut", "Video editor"),
+    ("MoritzBunkus.MKVToolNix", "Video file tools"),
+    ("OliveTeam.OliveVideoEditor", "Video editor"),
+    ("LWKS.Lightworks", "Video editor"),
+    ("ByteDance.CapCut", "Video editor"),
+    ("TenacityTeam.Tenacity", "Audio editor"),
+    ("VB-Audio.Voicemeeter", "Audio mixer"),
+    ("NGWIN.PicPick", "Screenshots"),
+    ("Skillbrains.Lightshot", "Screenshots"),
+    ("ImageOptim.gifski", "GIF maker"),
+    ("Streamlabs.Streamlabs", "Streaming"),
+    ("Kingsoft.WPSOffice", "Office suite"),
+    ("SoftMaker.FreeOffice.2024", "Office suite"),
+    ("geeksoftwareGmbH.PDF24Creator", "PDF tools"),
+    ("TrackerSoftware.PDF-XChangeEditor", "PDF editor"),
+    ("Amazon.Kindle", "E-book reader"),
+    ("NordSecurity.NordVPN", "VPN"),
+    ("MullvadVPN.MullvadVPN", "VPN"),
+    ("MullvadVPN.MullvadBrowser", "Private web browser"),
+    ("Surfshark.Surfshark", "VPN"),
+    ("Twingate.Client", "Remote access"),
+    ("Google.ChromeRemoteDesktopHost", "Remote desktop"),
+    ("pCloudAG.pCloudDrive", "Cloud storage"),
+    ("AppWork.JDownloader", "Download manager"),
+    ("SoftDeluxe.FreeDownloadManager", "Download manager"),
+    ("agalwood.Motrix", "Download manager"),
+    ("OpenRGB.OpenRGB", "RGB lighting"),
+    ("Wacom.WacomTabletDriver", "Drawing tablet"),
+    ("hluk.CopyQ", "Clipboard manager"),
+    ("FlorianHeidenreich.Mp3tag", "Music tags"),
+    ("BartelsMedia.ShareMouse", "Mouse sharing"),
+    ("DebaucheeOpenSourceGroup.Barrier", "Mouse sharing"),
+    ("GnuPG.Gpg4win", "Encryption"),
+    ("IDRIX.VeraCrypt", "Disk encryption"),
+    ("MHNexus.HxD", "Hex editor"),
+    ("appmakes.Typora", "Markdown editor"),
+    ("GNU.Octave", "Math"),
+    ("ProjectJupyter.JupyterLab", "Notebooks"),
+    ("ElementLabs.LMStudio", "Run AI models"),
+    ("FlashPeak.Slimjet", "Web browser"),
+    ("Foundry376.Mailspring", "Email"),
+    ("Formagrid.Airtable", "Database"),
+    ("ZedIndustries.Zed", "Code editor"),
+    ("shinchiro.mpv", "Video player"),
+    ("mpv.net", "Video player"),
+    ("winaero.tweaker", "Windows tweaks"),
+    ("Nvidia.GeForceNow", "Cloud gaming"),
+    ("Garmin.BaseCamp", "Maps and routes"),
+    ("Maximus5.ConEmu", "Terminal"),
+    ("XnSoft.XnView.Classic", "Image viewer"),
+    ("TortoiseSVN.TortoiseSVN", "Version control"),
+    ("TortoiseHg.TortoiseHg", "Version control"),
+    ("Trimble.SketchUp.2026", "3D modeling"),
 ];
 
 impl Feed {
@@ -771,16 +1087,35 @@ impl Feed {
     }
 }
 
-fn pkg_of(i: &Installed) -> &str {
+/// For each installed app with an update: "<app id>@<new version>" and the installer address,
+/// so the download size can be asked from the server (the catalog does not list sizes).
+pub fn update_urls(installed: &[Installed], feed: &Feed) -> Vec<(String, String)> {
+    installed
+        .iter()
+        .filter(|i| i.source == Source::Other)
+        .filter_map(|i| {
+            let m = feed.get(pkg_of(i))?.latest.as_ref()?;
+            let inst = choose(m, &Want::for_installed(i)).ok()?;
+            let offered = expected_version(m, inst);
+            is_newer(&offered, &i.version).then(|| (format!("{}@{}", i.id, offered), inst.url.clone()))
+        })
+        .collect()
+}
+
+pub async fn download_size(url: &str) -> Option<u64> {
+    remote_size(url).await
+}
+
+pub(crate) fn pkg_of(i: &Installed) -> &str {
     match &i.data {
         SourceData::Other { pkg, .. } => pkg,
         _ => "",
     }
 }
 
-type Loaded = (Pkg, Result<(Vec<VerRef>, Manifest)>);
+pub(crate) type Loaded = (Pkg, Result<(Vec<VerRef>, Manifest)>);
 
-async fn load_pkg(p: Pkg) -> Loaded {
+pub(crate) async fn load_pkg(p: Pkg) -> Loaded {
     let r = async {
         let v = winget::versions(&p).await?;
         let first = v.first().ok_or_else(|| anyhow!("{} has no versions", p.id))?;
@@ -791,6 +1126,13 @@ async fn load_pkg(p: Pkg) -> Loaded {
     (p, r)
 }
 
+/// The starter list packages the catalog has. A package that is also in the Store (it has a
+/// package family name) stays: most of them (Firefox, Slack, PowerToys) have a normal installer
+/// too. `choose` drops the ones that only have a Store or MSIX package once their manifest is read.
+pub fn popular_candidates(idx: &Index) -> Vec<(Pkg, &'static str)> {
+    POPULAR.iter().filter(|(id, _)| !handled_package(id) && excluded_package(id).is_none()).filter_map(|(id, line)| idx.by_id(id).map(|p| (p, *line))).collect()
+}
+
 /// Refresh the index, match what is installed and read the version list and newest manifest of
 /// every matched package. `installed` are the apps the other sources found.
 pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
@@ -799,11 +1141,7 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     let (pkgs, popular): (Vec<Pkg>, Vec<(Pkg, &'static str)>) = tokio::task::spawn_blocking(move || -> Result<(Vec<Pkg>, Vec<(Pkg, &'static str)>)> {
         let idx = Index::open(&path)?;
         let r = match_on_disk(&winutil::uninstall_entries(), &idx, &path, &handled);
-        let popular = POPULAR
-            .iter()
-            .filter(|(id, _)| !handled_package(id) && excluded_package(id).is_none())
-            .filter_map(|(id, line)| idx.by_id(id).filter(|p| !idx.is_msix(p.row)).map(|p| (p, *line)))
-            .collect();
+        let popular = popular_candidates(&idx);
         Ok((r.matches.into_iter().map(|m| m.pkg).collect(), popular))
     })
     .await
@@ -811,8 +1149,31 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     let got: Vec<Loaded> = futures_util::stream::iter(pkgs).map(load_pkg).buffer_unordered(8).collect().await;
     let lines: HashMap<String, &'static str> = popular.iter().map(|(p, l)| (p.id.to_ascii_lowercase(), *l)).collect();
     let pop_pkgs: Vec<Pkg> = popular.into_iter().map(|(p, _)| p).collect();
-    let pop: Vec<Loaded> = futures_util::stream::iter(pop_pkgs).map(load_pkg).buffer_unordered(8).collect().await;
-    let mut feed = Feed::default();
+    // The version lists and manifests are kept on disk by their checksum, so only the first start
+    // downloads them all. That start must not hold Get apps back: what is not read within the
+    // budget keeps loading in the background and shows up with the next refresh.
+    let total = pop_pkgs.len();
+    let mut pop: Vec<Loaded> = Vec::new();
+    {
+        let mut set = tokio::task::JoinSet::new();
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(POPULAR_PARALLEL));
+        for p in pop_pkgs {
+            let gate = gate.clone();
+            set.spawn(async move {
+                let _slot = gate.acquire_owned().await;
+                load_pkg(p).await
+            });
+        }
+        let deadline = tokio::time::Instant::now() + POPULAR_BUDGET;
+        while let Ok(Some(done)) = tokio::time::timeout_at(deadline, set.join_next()).await {
+            if let Ok(l) = done {
+                pop.push(l);
+            }
+        }
+        // Tasks still running are detached so their downloads finish and are kept.
+        set.detach_all();
+    }
+    let mut feed = Feed { unfinished: pop.len() < total, ..Feed::default() };
     for (pkg, r) in pop {
         // Only what can be installed silently with a checksum here.
         if let Ok((versions, m)) = r {
@@ -822,7 +1183,8 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
             }
         }
     }
-    feed.popular.sort_by(|a, b| a.0.pkg.name.to_ascii_lowercase().cmp(&b.0.pkg.name.to_ascii_lowercase()));
+    // The list's own order (well-known apps first, grouped by kind), not the order the downloads finished.
+    feed.popular.sort_by_key(|(p, _)| POPULAR.iter().position(|(id, _)| id.eq_ignore_ascii_case(&p.pkg.id)).unwrap_or(usize::MAX));
     let mut failed = 0;
     for (pkg, r) in got {
         match r {
@@ -840,6 +1202,32 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     }
     tokio::task::spawn_blocking(|| winget::prune_files(Duration::from_secs(60 * 24 * 3600))).await.ok();
     Ok(feed)
+}
+
+/// What the icon search needs about a package: the manifest's icon and its web pages.
+#[derive(Clone, Debug)]
+pub struct IconSource {
+    pub icon: Option<String>,
+    pub pages: Vec<String>,
+}
+
+fn icon_source(m: &Manifest) -> IconSource {
+    IconSource { icon: m.icon_url.clone(), pages: [m.package_url.clone(), m.publisher_url.clone()].into_iter().flatten().filter(|u| u.starts_with("http")).collect() }
+}
+
+/// The icon sources of a catalog package: from the feed when it was read there, else its newest
+/// manifest (searched apps); the manifests are kept on disk, so this is cheap after the first time.
+pub async fn icon_source_of(feed: Option<&Feed>, id: &str) -> Option<IconSource> {
+    if let Some(f) = feed {
+        if let Some(m) = f.get(id).and_then(|p| p.latest.as_ref()).or_else(|| f.popular.iter().find(|(p, _)| p.pkg.id.eq_ignore_ascii_case(id)).and_then(|(p, _)| p.latest.as_ref())) {
+            return Some(icon_source(m));
+        }
+    }
+    let path = winget::index_path();
+    let id = id.to_string();
+    let pkg = tokio::task::spawn_blocking(move || Index::open(&path).ok().and_then(|i| i.by_id(&id))).await.ok().flatten()?;
+    let (_, r) = load_pkg(pkg).await;
+    r.ok().map(|(_, m)| icon_source(&m))
 }
 
 // ---------------------------------------------------------------- installed apps
@@ -1000,7 +1388,7 @@ pub fn latest(inst: &Installed, feed: &Feed) -> Option<Latest> {
 
 // ---------------------------------------------------------------- Get apps
 
-fn entry(p: &Pkg, version: String, tagline: Option<String>, installed: bool) -> CatalogEntry {
+pub(crate) fn entry(p: &Pkg, version: String, tagline: Option<String>, installed: bool) -> CatalogEntry {
     let (code, fg, bg) = mark_for(&p.name, &p.id);
     CatalogEntry {
         id: format!("other:{}", p.id),
@@ -1013,6 +1401,8 @@ fn entry(p: &Pkg, version: String, tagline: Option<String>, installed: bool) -> 
         version,
         size: None,
         tagline,
+        description: None,
+        blocked: None,
         group: Source::Other.group().into(),
         prerelease: false,
         installed,
@@ -1029,7 +1419,9 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
         .filter_map(|i| {
             let pf = feed.get(pkg_of(i))?;
             let m = pf.latest.as_ref();
-            let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), m.and_then(|m| m.description.clone()), true);
+            let line = super::browse::tagline_for(m.and_then(|m| m.description.as_deref()), super::browse::popular_line(&pf.pkg.id), m.map(|m| m.publisher.as_str()).or(i.tagline.as_deref()));
+            let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), line, true);
+            e.description = m.and_then(|m| m.long_description.clone());
             e.name = i.name.clone();
             Some(e)
         })
@@ -1040,7 +1432,9 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             continue;
         }
         let m = pf.latest.as_ref();
-        let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), Some(line.to_string()), false);
+        let short = super::browse::tagline_for(m.and_then(|m| m.description.as_deref()), Some(*line).filter(|l| !l.is_empty()), m.map(|m| m.publisher.as_str()));
+        let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), short, false);
+        e.description = m.and_then(|m| m.long_description.clone());
         if let Some(n) = m.map(|m| m.name.clone()).filter(|n| !n.is_empty()) {
             e.name = n;
         }
@@ -1057,7 +1451,7 @@ pub fn search(q: &str, installed: &[Installed], limit: usize) -> Vec<CatalogEntr
     let Ok(idx) = Index::open(&winget::index_path()) else { return vec![] };
     idx.search(q, limit * 2)
         .into_iter()
-        .filter(|p| !handled_package(&p.id) && excluded_package(&p.id).is_none() && !idx.is_msix(p.row))
+        .filter(|p| !handled_package(&p.id) && excluded_package(&p.id).is_none())
         .take(limit)
         .map(|p| {
             let have = installed.iter().any(|i| pkg_of(i).eq_ignore_ascii_case(&p.id));

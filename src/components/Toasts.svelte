@@ -30,7 +30,7 @@
         <Dab color={COLORS[t.kind]} />
         <button class="text" onclick={() => open(t.appId, t.id)} disabled={!t.appId || !store.app(t.appId)}>{t.text}</button>
         {#if fj}
-          <Btn variant="raised" size="sm" title="Retry  R" onclick={() => { send("retry_job", { jobId: fj.id }); store.dismissToast(t.id); }}>Retry</Btn>
+          <Btn variant="raised" size="sm" title="Retry" onclick={() => { send("retry_job", { jobId: fj.id }); store.dismissToast(t.id); }}>Retry</Btn>
         {/if}
         <button class="x" aria-label="Dismiss" title="Dismiss  Esc" onclick={() => store.dismissToast(t.id)}><Icon d={I.close} size={14} width={2.5} /></button>
       </div>

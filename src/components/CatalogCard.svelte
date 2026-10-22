@@ -20,6 +20,7 @@
   import { ui } from "../lib/ui.svelte";
   import { installApp, openApp, updateOne } from "../lib/actions";
   import { bytes } from "../lib/format";
+  import { blockedTitle } from "../lib/browse";
   import { canCancel, cancelTip, pct } from "../lib/jobs";
   import type { CatalogEntry } from "../lib/types";
 
@@ -125,6 +126,8 @@
           {:else}
             <span class="ok"><Dab color="var(--ok)" />Installed</span>
           {/if}
+        {:else if c.blocked}
+          <span class="blk" title={blockedTitle(c.blocked)}>Can't be installed silently</span>
         {/if}
       </span>
       {#if job}
@@ -138,6 +141,8 @@
             <Btn variant="raised" size="sm" title="Open {c.name}" onclick={() => openApp(openId)}>Open<Icon d={I.external} size={13} width={2.5} /></Btn>
           {/if}
         </div>
+      {:else if c.blocked}
+        <Btn variant="raised" size="sm" disabled title={blockedTitle(c.blocked)}><Icon d={I.get} size={14} width={2.5} />Install</Btn>
       {:else if c.pickVersion}
         <SplitBtn
           title={chooseOnly ? `Choose a version of ${c.name}` : `Install ${c.name} ${c.version}`}
@@ -229,6 +234,12 @@
     font-size: 12px;
     color: var(--text-2);
     white-space: nowrap;
+  }
+  .blk {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-3);
   }
   .acts {
     flex: none;

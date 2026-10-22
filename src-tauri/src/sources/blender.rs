@@ -17,7 +17,11 @@ use std::time::Duration;
 
 const RELEASES: &str = "https://download.blender.org/release/";
 const BUILDER: &str = "https://builder.blender.org/download/daily/?format=json&v=1";
+/// Known long-term support series; the LTS page on blender.org adds newer ones (`lts_series`).
 const LTS: &[&str] = &["2.83", "2.93", "3.3", "3.6", "4.2", "4.5", "5.2"];
+const LTS_PAGE: &str = "https://www.blender.org/download/lts/";
+/// LTS series read from blender.org in this session.
+static LTS_SEEN: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
 const FG: &str = "#F5792A";
 const BG: &str = "#2B1607";
 pub const MARKER: &str = ".the-updater-3d.json";
@@ -102,7 +106,28 @@ impl Feed {
 }
 
 fn is_lts(series: &str) -> bool {
-    LTS.contains(&series)
+    LTS.contains(&series) || LTS_SEEN.read().is_ok_and(|l| l.iter().any(|s| s == series))
+}
+
+/// The LTS series named on blender.org's LTS page ("Blender 4.5 LTS").
+fn parse_lts(html: &str) -> Vec<String> {
+    use once_cell::sync::Lazy;
+    static RE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"Blender (\d+\.\d+) LTS").unwrap());
+    let mut v: Vec<String> = RE.captures_iter(html).map(|c| c[1].to_string()).filter(|s| !version::newer("2.80", s)).collect();
+    v.sort_by(|a, b| version::cmp(a, b));
+    v.dedup();
+    v
+}
+
+/// Every LTS series known, oldest first: the built-in list and what blender.org lists.
+fn lts_series() -> Vec<String> {
+    let mut v: Vec<String> = LTS.iter().map(|s| s.to_string()).collect();
+    if let Ok(l) = LTS_SEEN.read() {
+        v.extend(l.iter().cloned());
+    }
+    v.sort_by(|a, b| version::cmp(a, b));
+    v.dedup();
+    v
 }
 
 // ---------------------------------------------------------------- feeds
@@ -131,20 +156,49 @@ fn parse_index(html: &str) -> Vec<(String, Option<String>, Option<u64>)> {
 
 /// The version and kind ("msi" or "zip") of a 64-bit Windows release file:
 /// "blender-5.2.2-windows-x64.msi", and "blender-2.81-windows64.zip" for 2.80 to 2.92.
+#[cfg(test)]
 fn windows_file(name: &str) -> Option<(String, &'static str)> {
+    windows_file_for(name, "x64").map(|(v, k, _)| (v, k))
+}
+
+/// How well a build for `arch` suits a PC whose processor is `native`: a native ARM64 build is
+/// best on ARM64, x64 runs everywhere (emulated on ARM64), an ARM64 build never runs on x64.
+fn arch_rank(arch: &str, native: &str) -> Option<u8> {
+    match arch.to_ascii_lowercase().as_str() {
+        "arm64" if native == "arm64" => Some(2),
+        "arm64" => None,
+        "x64" | "amd64" | "x86_64" | "64" => Some(1),
+        _ => None,
+    }
+}
+
+/// `windows_file` for a PC with the `native` processor, with the file's `arch_rank`.
+fn windows_file_for(name: &str, native: &str) -> Option<(String, &'static str, u8)> {
     use once_cell::sync::Lazy;
-    static FILE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"^blender-(\d+\.\d+(?:\.\d+)?)-windows(?:-x64|64)\.(msi|zip)$").unwrap());
+    static FILE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"^blender-(\d+\.\d+(?:\.\d+)?)-windows-?(x64|64|arm64)\.(msi|zip)$").unwrap());
     let c = FILE.captures(name)?;
-    Some((c[1].to_string(), if &c[2] == "msi" { "msi" } else { "zip" }))
+    let rank = arch_rank(&c[2], native)?;
+    Some((c[1].to_string(), if &c[3] == "msi" { "msi" } else { "zip" }, rank))
 }
 
 async fn series_releases(series: &str) -> Result<Vec<Release>> {
     let url = format!("{RELEASES}Blender{series}/");
     let f = http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await?;
     let html = String::from_utf8_lossy(&f.body);
+    Ok(releases_from_index(&url, &html, winutil::native_arch()))
+}
+
+/// The releases in a series folder's listing, with the files that suit the `native` processor.
+fn releases_from_index(url: &str, html: &str, native: &str) -> Vec<Release> {
     let mut by_ver: HashMap<String, Release> = HashMap::new();
-    for (name, date, size) in parse_index(&html) {
-        let Some((ver, kind)) = windows_file(&name) else { continue };
+    let mut ranks: HashMap<(String, &'static str), u8> = HashMap::new();
+    for (name, date, size) in parse_index(html) {
+        let Some((ver, kind, rank)) = windows_file_for(&name, native) else { continue };
+        let best = ranks.entry((ver.clone(), kind)).or_insert(0);
+        if rank <= *best {
+            continue;
+        }
+        *best = rank;
         let r = by_ver.entry(ver.clone()).or_insert(Release { version: ver, date: None, msi: None, zip: None, msi_size: None, zip_size: None });
         let full = format!("{url}{name}");
         if kind == "msi" {
@@ -161,7 +215,7 @@ async fn series_releases(series: &str) -> Result<Vec<Release>> {
     }
     let mut v: Vec<Release> = by_ver.into_values().collect();
     v.sort_by(|a, b| version::cmp(&b.version, &a.version));
-    Ok(v)
+    v
 }
 
 pub async fn fetch(installed: &[Installed], beta_channel: bool) -> Result<Feed> {
@@ -188,8 +242,16 @@ pub async fn fetch(installed: &[Installed], beta_channel: bool) -> Result<Feed> 
     if let Some(n) = &newest {
         wanted.push(n.clone());
     }
-    for lts in LTS.iter().rev().take(1) {
-        wanted.push(lts.to_string());
+    if let Ok(f) = http::get_cached(LTS_PAGE, &[], Duration::from_secs(24 * 3600)).await {
+        let found = parse_lts(&String::from_utf8_lossy(&f.body));
+        if !found.is_empty() {
+            if let Ok(mut l) = LTS_SEEN.write() {
+                *l = found;
+            }
+        }
+    }
+    if let Some(lts) = lts_series().last() {
+        wanted.push(lts.clone());
     }
     wanted.sort();
     wanted.dedup();
@@ -225,9 +287,16 @@ pub async fn fetch(installed: &[Installed], beta_channel: bool) -> Result<Feed> 
 async fn fetch_builds() -> Result<Vec<Beta>> {
     let f = http::get_cached(BUILDER, &[], Duration::from_secs(30 * 60)).await?;
     let v: serde_json::Value = serde_json::from_slice(&f.body)?;
-    let mut builds: Vec<(Beta, i64)> = Vec::new();
+    Ok(builds_from(&v, winutil::native_arch()))
+}
+
+/// Pre-release builds for Windows on the `native` processor, one per version and kind.
+fn builds_from(v: &serde_json::Value, native: &str) -> Vec<Beta> {
+    let mut builds: Vec<(Beta, (u8, i64))> = Vec::new();
     for b in v.as_array().into_iter().flatten() {
-        let platform_ok = b["platform"] == "windows" && matches!(b["architecture"].as_str(), Some("amd64") | Some("x86_64"));
+        let rank = b["architecture"].as_str().and_then(|a| arch_rank(a, native));
+        let platform_ok = b["platform"] == "windows" && rank.is_some();
+        let rank = rank.unwrap_or(0);
         let risk = b["risk_id"].as_str().unwrap_or("");
         let label = match risk {
             "alpha" => "Alpha",
@@ -249,15 +318,15 @@ async fn fetch_builds() -> Result<Vec<Beta>> {
             label: label.into(),
             version: ver,
         };
-        // One build per version and kind: the newest.
+        // One build per version and kind: for the native processor if there is one, the newest.
         match builds.iter_mut().find(|(o, _)| o.version == cand.version && o.label == cand.label) {
-            Some(slot) if mtime > slot.1 => *slot = (cand, mtime),
+            Some(slot) if (rank, mtime) > slot.1 => *slot = (cand, (rank, mtime)),
             Some(_) => {}
-            None => builds.push((cand, mtime)),
+            None => builds.push((cand, (rank, mtime))),
         }
     }
-    builds.sort_by(|a, b| version::cmp(&b.0.version, &a.0.version).then(b.1.cmp(&a.1)));
-    Ok(builds.into_iter().map(|(b, _)| b).collect())
+    builds.sort_by(|a, b| version::cmp(&b.0.version, &a.0.version).then(b.1 .1.cmp(&a.1 .1)));
+    builds.into_iter().map(|(b, _)| b).collect()
 }
 
 // ---------------------------------------------------------------- installed copies
@@ -441,6 +510,16 @@ fn kind_of(i: &Installed) -> (String, BlenderKind) {
 }
 
 pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest> {
+    latest_kept(inst, all, feed, false)
+}
+
+/// Is this a portable copy we unpacked (it has our marker)? Only those are ever removed.
+fn ours(dir: Option<&PathBuf>) -> bool {
+    dir.is_some_and(|d| d.join(MARKER).is_file())
+}
+
+/// `keep_patch_versions` is the setting that keeps old bug-fix copies of a series.
+pub fn latest_kept(inst: &Installed, all: &[Installed], feed: &Feed, keep_patch_versions: bool) -> Option<Latest> {
     let (series, kind) = kind_of(inst);
     match kind {
         BlenderKind::Steam => None,
@@ -453,7 +532,11 @@ pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest
         BlenderKind::Msi | BlenderKind::Zip => {
             let newest_patch = feed.newest_in(&series)?;
             if version::newer(&newest_patch.version, &inst.version) {
-                let note = if kind == BlenderKind::Zip { Some(format!("{} installs as a new copy, this one stays", newest_patch.version)) } else { None };
+                let note = match kind {
+                    BlenderKind::Zip if !keep_patch_versions && ours(inst.install_dir.as_ref()) => Some(format!("{} replaces this copy", newest_patch.version)),
+                    BlenderKind::Zip => Some(format!("{} installs as a new copy, this one stays", newest_patch.version)),
+                    _ => None,
+                };
                 return Some(Latest { version: newest_patch.version.clone(), size: newest_patch.msi_size.or(newest_patch.zip_size), note });
             }
             // Up to date in its series: the newest installed stable series is offered the next one.
@@ -483,7 +566,8 @@ pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest
 pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool) -> Vec<CatalogEntry> {
     let have: Vec<String> = installed.iter().filter(|i| matches!(kind_of(i).1, BlenderKind::Msi | BlenderKind::Zip)).map(|i| kind_of(i).0).collect();
     let mut out = Vec::new();
-    let mut offer = |id: String, name: String, version: String, size: Option<u64>, tagline: &str, pre: bool, installed: bool, pick: bool| {
+    let mut offer = |id: String, name: String, version: String, size: Option<u64>, kind: &str, pre: bool, installed: bool, pick: bool| {
+        let (tagline, description) = super::about::blender(kind);
         out.push(CatalogEntry {
             id,
             source: Source::Blender,
@@ -495,6 +579,8 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool
             version,
             size,
             tagline: Some(tagline.into()),
+            description: Some(description),
+            blocked: None,
             group: Source::Blender.group().into(),
             prerelease: pre,
             installed,
@@ -511,17 +597,17 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool
             continue;
         }
         if let Some(r) = feed.series[s].first() {
-            let tag = if is_lts(s) { "Long-term support release" } else { "Latest stable release" };
-            offer(format!("blender:{s}"), format!("Blender {s}"), r.version.clone(), r.msi_size.or(r.zip_size), tag, false, have.contains(s), true);
+            let kind = if is_lts(s) { "lts" } else { "stable" };
+            offer(format!("blender:{s}"), format!("Blender {s}"), r.version.clone(), r.msi_size.or(r.zip_size), kind, false, have.contains(s), true);
         }
     }
     if let Some(b) = &feed.beta {
         // The card offers every pre-release build: it counts as installed only when all of them are.
         let inst = all_builds_installed(feed, installed);
-        offer(format!("blender:{}-beta", b.series), format!("Blender {} {}", b.series, b.label), b.display(), b.size, "Pre-release builds for testing: alpha, beta and release candidates", true, inst, true);
+        offer(format!("blender:{}-beta", b.series), format!("Blender {} {}", b.series, b.label), b.display(), b.size, "beta", true, inst, true);
     }
     if !feed.all_series.is_empty() {
-        offer("blender:older".into(), "Older Blender versions".into(), format!("{} and earlier", feed.all_series.get(1).cloned().unwrap_or_default()), None, "Any release back to 2.80, installed next to the others", false, false, true);
+        offer("blender:older".into(), "Older Blender versions".into(), format!("{} and earlier", feed.all_series.get(1).cloned().unwrap_or_default()), None, "older", false, false, true);
     }
     out
 }
@@ -672,7 +758,7 @@ fn release_info(series: &str, r: &Release, notes: &HashMap<String, crate::notes:
     let n = notes.get(&r.version).or_else(|| if patch == 0 { notes.get(&format!("{series}.0")) } else { None });
     let mut lines = n.map(|n| n.lines.clone()).unwrap_or_default();
     if lines.is_empty() {
-        lines.push(if patch == 0 { format!("First release of Blender {series}. See the full notes for everything new.") } else { format!("Bug-fix release for Blender {series}") });
+        lines.push(if patch == 0 { format!("First release of Blender {series}. See the full notes for everything new.") } else { format!("Bug-fix release for Blender {series}. Blender has not published its list of fixes yet; it shows here once it does.") });
     }
     let notes_url = if patch == 0 || notes.is_empty() {
         format!("https://developer.blender.org/docs/release_notes/{series}/")
@@ -695,16 +781,32 @@ fn release_info(series: &str, r: &Release, notes: &HashMap<String, crate::notes:
     }
 }
 
-async fn sha_for(ver: &str, file_url: &str) -> Option<String> {
+/// The checksum files a release may have: "blender-4.2.3.sha256", and for 2.80 to 2.82 one per
+/// release named "release281a.sha256".
+fn sha_urls(ver: &str) -> Vec<String> {
     let series = version::series(ver);
-    let url = format!("{RELEASES}Blender{series}/blender-{ver}.sha256");
-    let f = http::get_cached(&url, &[], Duration::from_secs(24 * 3600)).await.ok()?;
-    let name = file_url.rsplit('/').next()?;
-    String::from_utf8_lossy(&f.body).lines().find_map(|l| {
+    let dir = format!("{RELEASES}Blender{series}/");
+    vec![format!("{dir}blender-{ver}.sha256"), format!("{dir}release{}.sha256", ver.replace('.', ""))]
+}
+
+fn sha_in(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|l| {
         let mut it = l.split_whitespace();
         let h = it.next()?;
-        (it.next()? == name).then(|| h.to_ascii_lowercase())
+        (it.next()?.trim_start_matches('*') == name && h.len() == 64).then(|| h.to_ascii_lowercase())
     })
+}
+
+async fn sha_for(ver: &str, file_url: &str) -> Option<String> {
+    let name = file_url.rsplit('/').next()?;
+    for url in sha_urls(ver) {
+        if let Ok(f) = http::get_cached(&url, &[], Duration::from_secs(24 * 3600)).await {
+            if let Some(h) = sha_in(&String::from_utf8_lossy(&f.body), name) {
+                return Some(h);
+            }
+        }
+    }
+    None
 }
 
 fn needs_admin(p: &Path) -> bool {
@@ -748,12 +850,14 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
         let zip = paths::downloads().join("blender").join(b.url.rsplit('/').next().unwrap_or("blender-beta.zip"));
         let sha = http::get_cached(&format!("{}.sha256", b.url), &[], Duration::from_secs(3600)).await.ok().and_then(|f| String::from_utf8_lossy(&f.body).split_whitespace().next().map(|s| s.to_ascii_lowercase()));
         let marker = Marker { version: b.version.clone(), kind: BlenderKind::Beta, build: Some(b.build.clone()), label: Some(b.label.clone()) };
+        let dl = Download { url: b.url.clone(), dest: zip.clone(), size: b.size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] };
+        super::require_checked(&dl, &name)?;
         return Ok(Plan {
             app_id: format!("blender:{}-beta", b.series),
             kind,
             name: name.clone(),
             to_version: b.display(),
-            downloads: vec![Download { url: b.url.clone(), dest: zip.clone(), size: b.size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] }],
+            downloads: vec![dl],
             steps: zip_steps(&zip, &dir, &marker, &name, dir.exists()),
             block_dirs: vec![dir],
             block_names: vec![],
@@ -793,12 +897,14 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
         let log = paths::logs().join(format!("blender-{}.log", target.version));
         let app_id = format!("blender:{t_series}");
         let sha = sha_for(&target.version, &url).await;
+        let dl = Download { url, dest: file.clone(), size: target.msi_size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] };
+        super::require_checked(&dl, &format!("Blender {}", target.version))?;
         return Ok(Plan {
             app_id: app_id.clone(),
             kind,
             name: format!("Blender {t_series}"),
             to_version: target.version.clone(),
-            downloads: vec![Download { url, dest: file.clone(), size: target.msi_size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] }],
+            downloads: vec![dl],
             steps: vec![Step::Run {
                 exe: PathBuf::from("msiexec.exe"),
                 args: vec!["/i".into(), file.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "/l*v".into(), log.to_string_lossy().into()],
@@ -824,23 +930,17 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
     }
     let zip = paths::downloads().join("blender").join(url.rsplit('/').next().unwrap_or("blender.zip"));
     let sha = sha_for(&target.version, &url).await;
+    let dl = Download { url, dest: zip.clone(), size: target.zip_size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] };
+    super::require_checked(&dl, &name)?;
     let marker = Marker { version: target.version.clone(), kind: BlenderKind::Zip, build: None, label: None };
     let mut steps = zip_steps(&zip, &dir, &marker, &name, false);
-    // A portable copy replaced by a newer bug-fix copy goes away when versions are not kept.
-    if let Some(c) = current {
-        if cur_kind == Some(BlenderKind::Zip) && same_series && !ctx.keep_patch_versions && !downgrade {
-            if let Some(d) = &c.install_dir {
-                steps.push(Step::RemoveDir { path: d.clone(), elevated: needs_admin(d), label: format!("Removing {}", c.name) });
-                steps.push(Step::RemoveFile { path: shortcut_path(&c.name) });
-            }
-        }
-    }
+    steps.extend(replaced_copy_steps(current, same_series && !downgrade, ctx.keep_patch_versions));
     Ok(Plan {
         app_id: format!("blender:{}", target.version),
         kind,
         name: name.clone(),
         to_version: target.version.clone(),
-        downloads: vec![Download { url, dest: zip.clone(), size: target.zip_size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] }],
+        downloads: vec![dl],
         steps,
         block_dirs: vec![],
         block_names: vec![],
@@ -848,6 +948,17 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
         fallback: None,
         cleanup: vec![zip],
     })
+}
+
+/// A portable copy replaced by a newer bug-fix copy of its series goes away when versions are
+/// not kept, but only one we unpacked: a copy the user unpacked themselves always stays.
+fn replaced_copy_steps(current: Option<&Installed>, same_series_upgrade: bool, keep_patch_versions: bool) -> Vec<Step> {
+    let Some(c) = current else { return vec![] };
+    let Some(d) = &c.install_dir else { return vec![] };
+    if kind_of(c).1 != BlenderKind::Zip || !same_series_upgrade || keep_patch_versions || !ours(Some(d)) {
+        return vec![];
+    }
+    vec![Step::RemoveDir { path: d.clone(), elevated: needs_admin(d), label: format!("Removing {}", c.name) }, Step::RemoveFile { path: shortcut_path(&c.name) }]
 }
 
 pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
@@ -997,5 +1108,71 @@ mod tests {
         let l45 = latest(&all[1], &all, &feed).unwrap();
         assert_eq!(l45.version, "4.5.9");
         assert!(l45.note.is_none());
+    }
+
+    #[test]
+    fn only_our_portable_copies_are_removed_on_update() {
+        let root = std::env::temp_dir().join(format!("tu3d-blender-test-{}", std::process::id()));
+        let own = root.join("Blender 4.5.1");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("blender.exe"), b"x").unwrap();
+        let mut c = inst("4.5", "4.5.1", BlenderKind::Zip);
+        c.name = "Blender 4.5.1".into();
+        c.install_dir = Some(own.clone());
+        let mut feed = Feed::default();
+        feed.series.insert("4.5".into(), vec![rel("4.5.2")]);
+        // Unpacked by the user (no marker): never removed, and the note says it stays.
+        assert!(replaced_copy_steps(Some(&c), true, false).is_empty());
+        assert!(latest_kept(&c, std::slice::from_ref(&c), &feed, false).unwrap().note.unwrap().contains("this one stays"));
+        // Ours: replaced unless bug-fix versions are kept.
+        std::fs::write(own.join(MARKER), b"{}").unwrap();
+        let steps = replaced_copy_steps(Some(&c), true, false);
+        assert!(matches!(&steps[0], Step::RemoveDir { path, .. } if path == &own));
+        assert!(replaced_copy_steps(Some(&c), true, true).is_empty());
+        assert!(latest_kept(&c, std::slice::from_ref(&c), &feed, false).unwrap().note.unwrap().contains("replaces this copy"));
+        assert!(latest_kept(&c, std::slice::from_ref(&c), &feed, true).unwrap().note.unwrap().contains("this one stays"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn old_releases_have_their_checksums_in_one_file_per_release() {
+        assert_eq!(sha_urls("4.2.3"), vec![format!("{RELEASES}Blender4.2/blender-4.2.3.sha256"), format!("{RELEASES}Blender4.2/release423.sha256")]);
+        assert_eq!(sha_urls("2.81a")[1], format!("{RELEASES}Blender2.81/release281a.sha256"));
+        let h = "e7".repeat(32);
+        let text = format!("{}  blender-2.80-windows32.msi
+{h}  blender-2.80-windows64.msi
+", "6e".repeat(32));
+        assert_eq!(sha_in(&text, "blender-2.80-windows64.msi"), Some(h));
+        assert_eq!(sha_in(&text, "blender-2.80-windows64.zip"), None);
+    }
+
+    #[test]
+    fn arm64_pcs_get_native_builds_and_x64_pcs_never_do() {
+        let html = r#"<a href="blender-4.5.3-windows-arm64.msi">x</a> 21-Oct-2026 23:27 300M
+<a href="blender-4.5.3-windows-x64.msi">x</a> 21-Oct-2026 23:27 380M
+<a href="blender-4.5.3-windows-x64.zip">x</a> 21-Oct-2026 23:27 410M
+<a href="blender-4.5.3-windows-arm64.msix">x</a> 21-Oct-2026 23:27 300M"#;
+        let arm = releases_from_index("u/", html, "arm64");
+        assert_eq!(arm[0].msi.as_deref(), Some("u/blender-4.5.3-windows-arm64.msi"));
+        // No ARM64 zip: the x64 one runs emulated.
+        assert_eq!(arm[0].zip.as_deref(), Some("u/blender-4.5.3-windows-x64.zip"));
+        let x64 = releases_from_index("u/", html, "x64");
+        assert_eq!(x64[0].msi.as_deref(), Some("u/blender-4.5.3-windows-x64.msi"));
+        let b = |arch: &str, t: i64| serde_json::json!({ "platform": "windows", "architecture": arch, "risk_id": "beta", "file_extension": "zip", "version": "5.3.0", "hash": arch, "url": arch, "file_mtime": t });
+        let v = serde_json::json!([b("amd64", 20), b("arm64", 10)]);
+        assert_eq!(builds_from(&v, "arm64")[0].url, "arm64");
+        assert_eq!(builds_from(&v, "x64")[0].url, "amd64");
+        assert_eq!(builds_from(&v, "x64").len(), 1);
+    }
+
+    #[test]
+    fn lts_series_come_from_the_lts_page_too() {
+        let html = "<h2>Blender 5.8 LTS</h2><a>Blender 4.5 LTS</a> Blender 5.8 LTS <p>Blender 1.0 LTS</p>";
+        assert_eq!(parse_lts(html), vec!["4.5", "5.8"]);
+        assert!(!is_lts("5.8"));
+        *LTS_SEEN.write().unwrap() = parse_lts(html);
+        assert!(is_lts("5.8") && is_lts("2.83"));
+        assert_eq!(lts_series().last().map(String::as_str), Some("5.8"));
+        LTS_SEEN.write().unwrap().clear();
     }
 }

@@ -21,8 +21,29 @@ use tauri::Manager;
 
 static LOGGER: store::FileLog = store::FileLog;
 
+/// One log line for a crash, so a user can send the log and the cause is in it.
+fn crash_line(msg: &str, at: Option<String>) -> String {
+    format!("CRASH in {} {}: {msg}", env!("CARGO_PKG_VERSION"), at.unwrap_or_else(|| "unknown place".into()))
+}
+
+/// Write every panic (with a backtrace) to the app log before the app goes down: release builds
+/// have no console, so without this a crash leaves nothing behind.
+fn log_crashes() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+        let at = info.location().map(|l| format!("at {}:{}", l.file(), l.line()));
+        log::error!("{}
+{}", crash_line(&msg, at), std::backtrace::Backtrace::force_capture());
+        log::logger().flush();
+        default(info);
+    }));
+}
+
 pub fn run() {
     let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Info));
+    log_crashes();
+    log::info!("The Updater 3D {} starting", env!("CARGO_PKG_VERSION"));
     let minimized = std::env::args().any(|a| a == "--minimized");
 
     tauri::Builder::default()
@@ -40,45 +61,16 @@ pub fn run() {
             // Checking in the background at sign-in is on by default: set it up once.
             {
                 let mut p = core.persisted.lock();
-                if !p.silent_elevation_default_on {
-                    // Fewer admin prompts became on by default in 1.1.2; the task behind it is set
-                    // up (one admin prompt) when the window opens.
+                let pending = !(p.silent_elevation_default_on && p.other_apps_default_on && p.prereleases_default_on && p.keep_previous_default_off && p.autostart_applied);
+                if pending {
                     let mut s = core.settings.write();
-                    s.silent_elevation = true;
+                    let autostart = store::apply_default_changes(&mut p, &mut s);
                     store::save_settings(&s);
-                    p.silent_elevation_default_on = true;
                     store::save_state(&p);
-                }
-                if !p.other_apps_default_on {
-                    let mut s = core.settings.write();
-                    s.sources.other = true;
-                    store::save_settings(&s);
-                    p.other_apps_default_on = true;
-                    store::save_state(&p);
-                }
-                if !p.prereleases_default_on {
-                    let mut s = core.settings.write();
-                    s.blender_channel = "beta".into();
-                    store::save_settings(&s);
-                    p.prereleases_default_on = true;
-                    store::save_state(&p);
-                }
-                if !p.keep_previous_default_off {
-                    let mut s = core.settings.write();
-                    s.keep_previous_versions = false;
-                    store::save_settings(&s);
-                    p.keep_previous_default_off = true;
-                    store::save_state(&p);
-                }
-                if !p.autostart_applied {
-                    // Also turns it on for copies that saved the old default (off).
-                    use tauri_plugin_autostart::ManagerExt;
-                    let mut s = core.settings.write();
-                    s.launch_at_startup = true;
-                    store::save_settings(&s);
-                    let _ = app.autolaunch().enable();
-                    p.autostart_applied = true;
-                    store::save_state(&p);
+                    if autostart {
+                        use tauri_plugin_autostart::ManagerExt;
+                        let _ = app.autolaunch().enable();
+                    }
                 }
             }
             // Keep the Windows startup entry in step with the setting (an uninstall or a cleanup
@@ -141,6 +133,8 @@ pub fn run() {
             commands::get_catalog_entry,
             commands::prefs_preview,
             commands::window_ready,
+            commands::open_logs_folder,
+            commands::take_route,
             commands::close_and_continue,
             commands::get_activity,
             commands::export_activity,
@@ -158,6 +152,7 @@ pub fn run() {
             commands::test_notification,
             commands::catalog_versions,
             commands::search_other_apps,
+            commands::browse_other_apps,
             commands::quit_app,
         ])
         .build(tauri::generate_context!())
@@ -168,10 +163,21 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
                 tauri::RunEvent::Exit => {
                     if let Some(core) = app.try_state::<Arc<core::Core>>() {
+                        core.save_queue_now();
                         store::save_state(&core.persisted.lock());
                     }
                 }
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod crash_tests {
+    #[test]
+    fn a_crash_line_names_the_version_place_and_reason() {
+        let l = super::crash_line("there is no reactor running", Some("at src\\core.rs:1043".into()));
+        assert!(l.starts_with(&format!("CRASH in {} at src", env!("CARGO_PKG_VERSION"))), "{l}");
+        assert!(l.ends_with(": there is no reactor running"));
+    }
 }

@@ -19,6 +19,7 @@
   import { installApp, openApp, updateOne } from "../lib/actions";
   import { installedFor } from "../lib/appview";
   import { bytes, dateLong, preParts, splitVersion } from "../lib/format";
+  import { blockedTitle, patchEntries } from "../lib/browse";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import type { CatalogEntry, VersionInfo } from "../lib/types";
@@ -30,9 +31,10 @@
   // a package found by a search is not in the catalog list; an entry hidden because it is
   // installed now (its install just finished on this page) is fetched on its own
   let single = $state<CatalogEntry | null>(null);
-  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? ui.otherFound.find((x) => x.id === id) ?? (single?.id === id ? single : undefined));
+  const browsed = (x: string) => ui.otherBrowse?.entries.find((e) => e.id === x);
+  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? ui.otherFound.find((x) => x.id === id) ?? browsed(id) ?? (single?.id === id ? single : undefined));
   $effect(() => {
-    if (ui.catalog && !ui.catalog.some((x) => x.id === id) && !ui.otherFound.some((x) => x.id === id) && single?.id !== id) {
+    if (ui.catalog && !ui.catalog.some((x) => x.id === id) && !ui.otherFound.some((x) => x.id === id) && !browsed(id) && single?.id !== id) {
       call("get_catalog_entry", { id }).then((e) => {
         if (e) single = e;
       });
@@ -87,6 +89,11 @@
   onMount(() => {
     let offVersions = () => {};
     let gone = false;
+    // a winget package opened on its own: its description and verdict may still be read
+    let offDetails = () => {};
+    on("other_details", (p) => {
+      if (single) single = patchEntries([single], p)?.[0] ?? single;
+    }).then((u) => (gone ? u() : (offDetails = u)));
     on("versions-changed", (e) => {
       if (e.id === id) loadQuiet();
     }).then((u) => (gone ? u() : (offVersions = u)));
@@ -105,6 +112,7 @@
     return () => {
       gone = true;
       offVersions();
+      offDetails();
       window.removeEventListener("keydown", k);
     };
   });
@@ -171,10 +179,10 @@
         </span>
         <div class="btns">
           {#if job}
-            <Btn variant="ghost" disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })} title={pauseTip(job, "  Space")}>
+            <Btn variant="ghost" disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })} title={pauseTip(job)}>
               <Icon d={job.state === "paused" ? I.play : I.pause} />{job.state === "paused" ? "Resume" : "Pause"}
             </Btn>
-            <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job, "Cancel", "  Esc")}>Cancel</Btn>
+            <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job)}>Cancel</Btn>
           {:else if isIn}
             {#if installedApp}
               <Btn variant="ghost" title="Open {c.name}" onclick={() => openApp(installedApp.id)}>Open</Btn>
@@ -188,7 +196,11 @@
           {:else if chooseOnly}
             <Btn variant="primary" title="Choose a version of {c.name}" onclick={chooseVersion}>Choose a version</Btn>
           {:else}
-            <Btn variant="primary" title="Install {c.name} {c.version}" onclick={() => installApp(c)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(c.version)[0]}</Btn>
+            {#if c.blocked}
+              <Btn variant="primary" disabled title={blockedTitle(c.blocked)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(c.version)[0]}</Btn>
+            {:else}
+              <Btn variant="primary" title="Install {c.name} {c.version}" onclick={() => installApp(c)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(c.version)[0]}</Btn>
+            {/if}
           {/if}
         </div>
       </div>
@@ -196,6 +208,12 @@
 
     {#if job}
       <div class="prog" in:rise><BrushBar value={job.progress} color={c.fg} height={6} /></div>
+    {/if}
+    {#if c.description || (c.blocked && !isIn)}
+      <div class="about" in:rise>
+        {#if c.description}<p class="desc">{c.description}</p>{/if}
+        {#if c.blocked && !isIn}<p class="blk">{blockedTitle(c.blocked)}. Install it from the publisher's own site.</p>{/if}
+      </div>
     {/if}
   {/if}
 
@@ -232,7 +250,7 @@
                 <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full release notes</button>
               {/if}
               {#if c && !v.installed}
-                <Btn class="ins" variant="ghost" size="sm" disabled={!!job} title="Install {c.name} {v.version}" onclick={() => installApp(c, v.version, v.size)}>Install</Btn>
+                <Btn class="ins" variant="ghost" size="sm" disabled={!!job || !!c.blocked} title={c.blocked ? blockedTitle(c.blocked) : `Install ${c.name} ${v.version}`} onclick={() => installApp(c, v.version, v.size)}>Install</Btn>
               {/if}
             </div>
             {#if v.notes.length}
@@ -331,6 +349,24 @@
   .note {
     font-size: 13px;
     color: var(--text-3);
+  }
+  .about {
+    position: relative;
+    margin-top: 20px;
+    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .desc {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-2);
+    white-space: pre-line;
+  }
+  .blk {
+    font-size: 13px;
+    color: var(--warn);
   }
   .side {
     display: flex;

@@ -1,9 +1,12 @@
 //! The sources of apps. Each one can scan what is installed, look up the latest
 //! versions, list what can be installed, and turn a request into a Plan the job runner executes.
 
+pub mod about;
 pub mod adobe;
 pub mod blender;
+pub mod browse;
 pub mod craft;
+pub mod icons;
 pub mod other;
 pub mod tools;
 pub mod winget;
@@ -110,6 +113,9 @@ pub enum Step {
     /// Delete an app folder after its uninstaller ran, only when nothing but the uninstaller and
     /// its logs is left in it (`winutil::only_uninstaller_left`); otherwise leave it as it is.
     RemoveIfOnlyUninstaller { path: PathBuf, elevated: bool, label: String },
+    /// Stop unless Windows trusts the file's Authenticode signature by exactly `signer`: for a
+    /// program unpacked from a download that has no published checksum (Adobe's RUM).
+    CheckSigner { path: PathBuf, signer: String, label: String },
 }
 
 impl Step {
@@ -121,7 +127,8 @@ impl Step {
             | Step::Shortcut { label, .. }
             | Step::OpenUri { label, .. }
             | Step::RemoveUserRegKey { label, .. }
-            | Step::RemoveIfOnlyUninstaller { label, .. } => label,
+            | Step::RemoveIfOnlyUninstaller { label, .. }
+            | Step::CheckSigner { label, .. } => label,
             Step::WriteFile { .. } => "Writing settings",
             Step::RemoveFile { .. } => "Cleaning up",
         }
@@ -165,7 +172,134 @@ pub struct Plan {
     pub cleanup: Vec<PathBuf>,
 }
 
+impl Plan {
+    /// Does this plan run an installer, uninstaller or other program (MSI, setup.exe, a hand-off
+    /// to another app)? Those clash with each other, so they run one at a time. Plans that only
+    /// unpack, copy, move, delete or write files, shortcuts and our own registry entries do not.
+    pub fn runs_installer(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::Run { .. } | Step::OpenUri { .. }))
+    }
+
+    /// What the plan writes to: the app and the folders it unpacks into or deletes, lowercase.
+    /// Two jobs that share one of these never run their steps at the same time.
+    pub fn write_keys(&self) -> Vec<String> {
+        let norm = |p: &std::path::Path| format!("dir:{}", p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase());
+        let mut v = vec![format!("app:{}", self.app_id.to_ascii_lowercase())];
+        for s in &self.steps {
+            match s {
+                Step::ExtractZip { dest, .. } => v.push(norm(dest)),
+                Step::RemoveDir { path, .. } | Step::RemoveIfOnlyUninstaller { path, .. } => v.push(norm(path)),
+                _ => {}
+            }
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+}
+
 /// Brand marks for apps that have no icon yet.
 pub fn mark(code: &str, fg: &str, bg: &str) -> (String, String, String) {
     (code.to_string(), fg.to_string(), bg.to_string())
+}
+
+/// Is `latest` an update for the installed `installed`? A final release is newer than its own
+/// pre-releases ("2.0.0" over "2.0.0-beta.3"); a beta channel copy takes any other build.
+pub fn update_offered(latest: &str, installed: &str, beta_channel: bool) -> bool {
+    tools::cmp_ver(latest, installed) == std::cmp::Ordering::Greater || (beta_channel && latest != installed)
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::update_offered;
+
+    #[test]
+    fn a_final_release_updates_its_pre_release() {
+        assert!(update_offered("2.0.0", "2.0.0-beta.3", false));
+        assert!(!update_offered("2.0.0-beta.3", "2.0.0", false));
+        // Other formats keep their order.
+        assert!(!update_offered("4.2.3", "4.2.3 LTS", false));
+        assert!(!update_offered("4.2.3 LTS", "4.2.3", false));
+        assert!(update_offered("6000.3.27f1", "6000.3.26f1", false));
+        assert!(!update_offered("6000.3.27f1", "6000.3.27f1", false));
+        assert!(update_offered("27.11", "27.2", false));
+        assert!(!update_offered("27.11", "27.11.0", false));
+        assert!(update_offered("5.4.0 Alpha fbe82a4", "5.3.0 Beta 873fa96", true));
+    }
+}
+
+impl Download {
+    /// Is there anything to check the file against (a checksum or a required signer)?
+    pub fn is_checked(&self) -> bool {
+        self.sha256.as_deref().is_some_and(|s| !s.is_empty())
+            || self.md5.as_deref().is_some_and(|s| !s.is_empty())
+            || self.sha512.as_deref().is_some_and(|s| !s.is_empty())
+            || self.signer.as_deref().is_some_and(|s| !s.is_empty())
+    }
+}
+
+/// Plans never download a program that cannot be checked: `what` is the app and version.
+pub fn require_checked(d: &Download, what: &str) -> anyhow::Result<()> {
+    if d.is_checked() {
+        Ok(())
+    } else {
+        anyhow::bail!("Could not get the checksum for {what}. Try again later.")
+    }
+}
+
+/// The result of `Step::CheckSigner`: `got` is the trusted signer Windows reports, if any.
+pub fn check_signer(path: &std::path::Path, want: &str, got: Option<String>) -> anyhow::Result<()> {
+    match got {
+        Some(g) if g == want => Ok(()),
+        Some(g) => anyhow::bail!("{} is signed by {g}, not {want}, so it was not run", path.display()),
+        None => anyhow::bail!("{} is not validly signed by {want}, so it was not run", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn plan(app_id: &str, steps: Vec<Step>) -> Plan {
+        Plan { app_id: app_id.into(), kind: JobKind::Update, name: "X".into(), to_version: "1".into(), downloads: vec![], steps, block_dirs: vec![], block_names: vec![], verify: Verify::None, fallback: None, cleanup: vec![] }
+    }
+
+    fn run(exe: &str) -> Step {
+        Step::Run { exe: exe.into(), args: vec![], cwd: None, ok_codes: vec![0], elevated: true, label: "Installing".into(), log: None }
+    }
+
+    #[test]
+    fn only_plans_that_run_a_program_wait_for_the_install_queue() {
+        // A Blender zip: unpack, swap folders, shortcut, settings. Nothing that clashes with an MSI.
+        let unzip = plan(
+            "blender:5.2",
+            vec![
+                Step::ExtractZip { zip: "C:/dl/b.zip".into(), dest: "D:/Blender/5.2.new".into(), strip_root: true, elevated: false, label: "Unpacking".into() },
+                Step::RemoveDir { path: "D:/Blender/5.2".into(), elevated: false, label: "Removing the old version".into() },
+                Step::Shortcut { lnk: "C:/Start/Blender.lnk".into(), target: "D:/Blender/5.2/blender.exe".into(), label: "Shortcut".into() },
+                Step::WriteFile { path: "D:/Blender/5.2/portable.txt".into(), contents: String::new(), elevated: false },
+                Step::RemoveUserRegKey { path: "Software\\X".into(), label: "Cleaning".into() },
+                Step::CheckSigner { path: "C:/x.exe".into(), signer: "Adobe Inc.".into(), label: "Checking".into() },
+            ],
+        );
+        assert!(!unzip.runs_installer());
+        assert!(plan("x", vec![run("C:/Windows/System32/msiexec.exe")]).runs_installer());
+        assert!(plan("x", vec![run("C:/dl/setup.exe")]).runs_installer());
+        assert!(plan("x", vec![Step::OpenUri { uri: "unityhub://6000.3.27f1".into(), label: "Hub".into() }]).runs_installer());
+        // An uninstall runs the vendor's uninstaller.
+        assert!(plan("x", vec![run("C:/Program Files/App/uninstall.exe"), Step::RemoveDir { path: "C:/Program Files/App".into(), elevated: true, label: "Rest".into() }]).runs_installer());
+        assert!(!plan("x", vec![]).runs_installer());
+    }
+
+    #[test]
+    fn jobs_writing_the_same_folder_share_a_key() {
+        let a = plan("blender:5.2", vec![Step::ExtractZip { zip: "a.zip".into(), dest: "D:/Blender/5.2".into(), strip_root: true, elevated: false, label: String::new() }]);
+        let b = plan("blender:5.2-beta", vec![Step::RemoveDir { path: "d:\\blender\\5.2\\".into(), elevated: false, label: String::new() }]);
+        let ka = a.write_keys();
+        let kb = b.write_keys();
+        assert!(ka.iter().any(|k| kb.contains(k)), "{ka:?} {kb:?}");
+        assert!(ka.contains(&"app:blender:5.2".to_string()));
+        let c = plan("blender:4.5", vec![Step::ExtractZip { zip: "c.zip".into(), dest: "D:/Blender/4.5".into(), strip_root: true, elevated: false, label: String::new() }]);
+        assert!(!c.write_keys().iter().any(|k| ka.contains(k)));
+    }
 }

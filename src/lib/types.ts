@@ -64,6 +64,10 @@ export interface CatalogEntry {
   version: string;
   size: number | null;
   tagline: string | null;
+  /** A few sentences about the app for its page (the card shows the tagline). */
+  description: string | null;
+  /** Why it can not be installed silently here (Other apps, once its manifest was read). */
+  blocked: string | null;
   group: string;
   prerelease: boolean;
   /** Already installed (shown with an "Installed" label and Open instead of Install). */
@@ -139,6 +143,8 @@ export interface Job {
   progress: number;
   /** "Downloading", "Installing, step 2 of 4", "Waiting for Photoshop to close" */
   step: string;
+  /** What it does right now, one short line: "Downloading over 6 connections from github.com", "Unpacking 1,234 files" */
+  detail?: string;
   /** Processes that must close before this job continues */
   blockedBy: string[];
   error: JobError | null;
@@ -277,4 +283,26 @@ export interface EventMap {
   navigate: string;
   /** a cached version history (get_versions, catalog_versions) was refreshed in the background */
   "versions-changed": { id: string };
+  /** Get apps icons or lists changed in the background (found icons, the starter list finished) */
+  catalog_changed: null;
+  /** descriptions and install verdicts of winget packages read in the background */
+  other_details: OtherDetail[];
+}
+
+/** What a winget package's manifest told about it, for a card already shown. */
+export interface OtherDetail {
+  id: string;
+  tagline: string | null;
+  description: string | null;
+  blocked: string | null;
+}
+
+/** One page of the whole winget catalog (Get apps, Other apps, Browse all). */
+export interface BrowsePage {
+  /** entries of this category and letter in all */
+  total: number;
+  entries: CatalogEntry[];
+  /** packages in the whole winget catalog */
+  packages: number;
+  categories: { name: string; count: number }[];
 }

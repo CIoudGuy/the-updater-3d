@@ -80,6 +80,12 @@ pub struct CatalogEntry {
     pub version: String,
     pub size: Option<u64>,
     pub tagline: Option<String>,
+    /// A few sentences about the app for its page (the card shows `tagline`)
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Why it can not be installed silently here; None when it can, or before that is known
+    #[serde(default)]
+    pub blocked: Option<String>,
     pub group: String,
     pub prerelease: bool,
     pub installed: bool,
@@ -181,6 +187,10 @@ pub struct Job {
     pub eta: Option<f64>,
     pub progress: f64,
     pub step: String,
+    /// What the job does right now, one short line ("Downloading over 6 connections from
+    /// github.com", "Checking the SHA-256 checksum", "Unpacking 1,234 files")
+    #[serde(default)]
+    pub detail: String,
     pub blocked_by: Vec<String>,
     pub error: Option<JobError>,
     pub started_at: Option<String>,
