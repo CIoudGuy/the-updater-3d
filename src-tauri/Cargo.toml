@@ -30,7 +30,7 @@ roxmltree = "0.21"
 rusqlite = { version = "0.40", features = ["bundled"] }
 winreg = "0.56"
 sysinfo = "0.37"
-sha2 = "0.10"
+sha2 = "0.11"
 md-5 = "0.10"
 hex = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
