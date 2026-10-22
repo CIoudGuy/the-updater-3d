@@ -4,6 +4,7 @@
   import Mark from "./Mark.svelte";
   import Dab from "./Dab.svelte";
   import BrushBar from "./BrushBar.svelte";
+  import Check from "./Check.svelte";
   import { store } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { send } from "../lib/api";
@@ -15,10 +16,15 @@
   const kind = $derived(d ? d.type : blocked ? "blocked" : null);
 
   const unApp = $derived(d?.type === "uninstall" ? store.app(d.appId) : undefined);
+  /** "Also delete settings and add-ons": off each time the dialog opens */
+  let removePrefs = $state(false);
+  $effect(() => {
+    if (d?.type === "uninstall") removePrefs = false;
+  });
 
   function doUninstall() {
     if (!unApp) return;
-    send("uninstall_app", { appId: unApp.id, removePrefs: false });
+    send("uninstall_app", { appId: unApp.id, removePrefs });
     ui.closeDialog();
   }
   function later() {
@@ -48,6 +54,12 @@
         Removes {unApp.name} {unApp.version}{unApp.sizeOnDisk ? ` and frees ${bytes(unApp.sizeOnDisk)}` : ""}. Your projects and media files are not touched.
       {/if}
     </p>
+    <div class="opt prefs">
+      <Check checked={removePrefs} onchange={(v) => (removePrefs = v)}>Also delete settings and add-ons</Check>
+      {#if removePrefs}
+        <span class="warnline">Deletes {unApp.name}'s preferences, add-ons and caches in AppData. This can't be undone. Your own files and projects stay.</span>
+      {/if}
+    </div>
     <div class="actions first">
       <Btn variant="raised" onclick={() => ui.closeDialog()} hint="Esc">Cancel</Btn>
       <Btn variant="danger" title="Uninstall {unApp.name}" onclick={doUninstall}>Uninstall</Btn>
@@ -135,6 +147,16 @@
   }
   .opt.info {
     color: var(--text-2);
+  }
+  .opt.prefs {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .warnline {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--warn);
   }
   .grow {
     flex: 1;

@@ -19,6 +19,7 @@
   import { NO_STOP_TIP, canPause, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import type { ServiceInfo } from "../lib/types";
+  import { jobHref } from "../lib/links";
 
   type HState = "first" | "ccdown" | "signedout" | "offline" | "updating" | "failed" | "ready" | "repair" | "current";
   const hs = $derived.by((): HState => {
@@ -278,15 +279,17 @@
             {:else}
               <span class="ttl"><Dab color="#D9B26A" />Ready to update</span>
             {/if}
-            <span class="aside">{bytes(store.updatesBytes)}</span>
+            {#if store.updatesBytes > 0}<span class="aside">{bytes(store.updatesBytes)}</span>{/if}
           </div>
           {#each updates as a, i (a.id)}
             <div class="row" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
-              <Mark app={a} size={32} dim={hs === "offline"} />
-              <div class="rcol">
-                <span class="rname ellipsis">{a.name}</span>
-                <span class="rsub ellipsis" title={a.note ?? ""}>{a.version}  →  {a.latest}{a.note ? `, ${a.note}` : ""}</span>
-              </div>
+              <a class="applink grow" href={appHref(a.id)} title="Open {a.name}">
+                <Mark app={a} size={32} dim={hs === "offline"} />
+                <div class="rcol">
+                  <span class="rname ellipsis">{a.name}</span>
+                  <span class="rsub ellipsis" title={a.note ?? ""}>{a.version}  →  {a.latest}{a.note ? `, ${a.note}` : ""}</span>
+                </div>
+              </a>
               {#if a.updateSize}<span class="rsize">{bytes(a.updateSize)}</span>{/if}
               {#if hs === "offline"}
                 <span class="rsub">Waiting for connection</span>
@@ -304,11 +307,13 @@
             {:else}
               {#each store.openJobs as j, i (j.id)}
                 <div class="jrow" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
-                  <Mark app={j} size={28} />
-                  <div class="rcol">
-                    <span class="rname ellipsis">{j.name}</span>
-                    <span class="rsub ellipsis">{jobStatus(j, false)}</span>
-                  </div>
+                  <svelte:element this={jobHref(j) ? "a" : "div"} class="applink grow" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
+                    <Mark app={j} size={28} />
+                    <div class="rcol">
+                      <span class="rname ellipsis">{j.name}</span>
+                      <span class="rsub ellipsis">{jobStatus(j, false)}</span>
+                    </div>
+                  </svelte:element>
                   <span class="jp"><Num value={pct(j)} />%</span>
                   <span class="jbar"><BrushBar value={j.progress} color={j.fg} height={5} /></span>
                 </div>
@@ -322,11 +327,13 @@
         <div class="sec-h"><span>Updating now</span></div>
         {#each store.openJobs as j, i (j.id)}
           <div class="job" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
-            <Mark app={j} size={32} />
-            <div class="jname">
-              <span class="rname ellipsis">{j.name}</span>
-              <span class="rsub ellipsis">{j.fromVersion ? `${j.fromVersion}  →  ${j.toVersion}` : j.toVersion}</span>
-            </div>
+            <svelte:element this={jobHref(j) ? "a" : "div"} class="applink" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
+              <Mark app={j} size={32} />
+              <div class="jname">
+                <span class="rname ellipsis">{j.name}</span>
+                <span class="rsub ellipsis">{j.fromVersion ? `${j.fromVersion}  →  ${j.toVersion}` : j.toVersion}</span>
+              </div>
+            </svelte:element>
             <span class="jstat ellipsis" style:color={j.state === "paused" ? "var(--warn)" : "var(--text-2)"}>{jobStatus(j)}</span>
             <span class="jpct"><Num value={pct(j)} />%</span>
             <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j, "  Space")} onclick={() => pauseJob(j.id, j.state)} disabled={!canPause(j)}>
@@ -356,8 +363,10 @@
         <div class="sec-h"><span>Needs repair</span></div>
         {#each store.missing as a, i (a.id)}
           <div class="frow" use:enter={i}>
-            <Mark app={a} size={28} />
-            <span class="fname ellipsis">{a.name} {a.version}</span>
+            <a class="applink" href={appHref(a.id)} title="Open {a.name}">
+              <Mark app={a} size={28} />
+              <span class="fname ellipsis">{a.name} {a.version}</span>
+            </a>
             <span class="fres ellipsis" style="color:var(--err)"><Dab color="#D9706A" />Files missing</span>
             {#if canRepair(a)}<Btn variant="raised" size="sm" onclick={() => repairApp(a.id)}>Repair</Btn>{:else}<Btn variant="ghost" size="sm" href={appHref(a.id)}>Details</Btn>{/if}
           </div>
@@ -521,6 +530,25 @@
   .rname {
     font-size: 13px;
     font-weight: 500;
+  }
+  /* App name and icon open the app's page */
+  .applink {
+    display: flex;
+    align-items: center;
+    gap: inherit;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+    border-radius: 6px;
+  }
+  .applink.grow {
+    flex: 1;
+  }
+  a.applink:hover :is(.rname, .fname),
+  a.applink:focus-visible :is(.rname, .fname) {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
   }
   .rsub {
     font-size: 12px;
