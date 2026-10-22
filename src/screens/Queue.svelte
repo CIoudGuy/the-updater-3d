@@ -14,7 +14,7 @@
   import { store } from "../lib/store.svelte";
   import { isPaused, togglePauseAll } from "../lib/actions";
   import { approx, bytes, clock, countOf, inUnit, speed, speedParts, unitFor } from "../lib/format";
-  import { NO_STOP_TIP, canCancel, canPause, cancelTip, failedLine, jobDetail, jobStatus, jobWhat, pauseTip, pct } from "../lib/jobs";
+  import { NO_STOP_TIP, canCancel, canPause, cancelTip, failedLine, groupQueue, jobDetail, jobStatus, jobWhat, pauseTip, pct, queueSummary, readyLine } from "../lib/jobs";
   import { timeLeft } from "../lib/view";
   import { enter, reduced } from "../lib/motion";
   import type { Job } from "../lib/types";
@@ -33,37 +33,39 @@
     else store.patchSettings({ bandwidthLimit: n * 1e6, bandwidthLimitEnabled: true });
   }
 
-  const active = $derived(store.activeJobs);
+  const groups = $derived(groupQueue(store.openJobs));
+  const adminWaiting = $derived(store.openJobs.filter((j) => j.needsAdmin).length);
   const paused = $derived(isPaused());
   const dlU = $derived(unitFor(store.totalBytes || 1));
 
-  // ----- reorder waiting jobs by dragging -----
+  // ----- reorder by dragging: the downloaded jobs (install order) and the jobs not started -----
+  type ListKey = "ready" | "waiting";
   const H = 56;
-  let localOrder = $state<string[] | null>(null);
-  const waiting = $derived.by(() => {
-    const base = store.waitingJobs;
-    if (!localOrder) return base;
+  let localOrder = $state<Record<ListKey, string[] | null>>({ ready: null, waiting: null });
+  function inOrder(base: Job[], order: string[] | null): Job[] {
+    if (!order) return base;
     const map = new Map(base.map((j) => [j.id, j]));
-    const ordered = localOrder.map((id) => map.get(id)).filter((j): j is Job => !!j);
-    for (const j of base) if (!localOrder.includes(j.id)) ordered.push(j);
-    return ordered;
-  });
-  let drag = $state<{ id: string; from: number; to: number; dy: number; startY: number; settling: boolean } | null>(null);
-
-  function commit(ids: string[]) {
-    localOrder = ids;
-    send("reorder_jobs", { jobIds: ids });
-    setTimeout(() => (localOrder = null), 700);
+    const out = order.map((id) => map.get(id)).filter((j): j is Job => !!j);
+    for (const j of base) if (!order.includes(j.id)) out.push(j);
+    return out;
   }
-  function down(e: PointerEvent, id: string, index: number) {
+  const lists = $derived({ ready: inOrder(groups.ready, localOrder.ready), waiting: inOrder(groups.waiting, localOrder.waiting) });
+  let drag = $state<{ list: ListKey; id: string; from: number; to: number; dy: number; startY: number; settling: boolean } | null>(null);
+
+  function commit(list: ListKey, ids: string[]) {
+    localOrder[list] = ids;
+    send("reorder_jobs", { jobIds: ids });
+    setTimeout(() => (localOrder[list] = null), 700);
+  }
+  function down(e: PointerEvent, list: ListKey, id: string, index: number) {
     if (e.button !== 0) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    drag = { id, from: index, to: index, dy: 0, startY: e.clientY, settling: false };
+    drag = { list, id, from: index, to: index, dy: 0, startY: e.clientY, settling: false };
   }
   function move(e: PointerEvent) {
     if (!drag || drag.settling) return;
     const dy = e.clientY - drag.startY;
-    const to = Math.max(0, Math.min(waiting.length - 1, Math.round(drag.from + dy / H)));
+    const to = Math.max(0, Math.min(lists[drag.list].length - 1, Math.round(drag.from + dy / H)));
     drag = { ...drag, dy, to };
   }
   function up() {
@@ -72,32 +74,33 @@
     drag = { ...d, dy: (d.to - d.from) * H, settling: true };
     setTimeout(() => {
       if (d.to !== d.from) {
-        const ids = waiting.map((j) => j.id);
+        const ids = lists[d.list].map((j) => j.id);
         const [m] = ids.splice(d.from, 1);
         ids.splice(d.to, 0, m);
-        commit(ids);
+        commit(d.list, ids);
       }
       drag = null;
     }, reduced() ? 0 : 150);
   }
-  function gripKey(e: KeyboardEvent, index: number) {
+  function gripKey(e: KeyboardEvent, list: ListKey, index: number) {
     const dir = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
     if (!dir) return;
     e.preventDefault();
     const to = index + dir;
-    if (to < 0 || to >= waiting.length) return;
-    const ids = waiting.map((j) => j.id);
+    if (to < 0 || to >= lists[list].length) return;
+    const ids = lists[list].map((j) => j.id);
     const [m] = ids.splice(index, 1);
     ids.splice(to, 0, m);
-    commit(ids);
+    commit(list, ids);
   }
-  function shift(i: number): string {
-    if (!drag) return "none";
+  function shift(list: ListKey, i: number): string {
+    if (!drag || drag.list !== list) return "none";
     if (i === drag.from) return `translate(${drag.settling ? 0 : 8}px, ${drag.dy}px)`;
     if (drag.from < drag.to && i > drag.from && i <= drag.to) return `translateY(${-H}px)`;
     if (drag.from > drag.to && i >= drag.to && i < drag.from) return `translateY(${H}px)`;
     return "none";
   }
+  const canDrag = $derived(lists.ready.length > 1 || lists.waiting.length > 1);
   const ord = (n: number) => `${n}${["th", "st", "nd", "rd"][n % 100 > 10 && n % 100 < 14 ? 0 : n % 10 < 4 ? n % 10 : 0]}`;
 
   function statusColor(j: Job) {
@@ -109,7 +112,7 @@
   <div class="head">
     <div class="tt">
       <h1 class="h1">Queue</h1>
-      <span class="sub">{active.length} active, {waiting.length} waiting.{waiting.length > 1 ? " Drag to change the order." : ""}</span>
+      <span class="sub">{queueSummary(groups) || "Nothing running"}.{canDrag ? " Drag to change the order." : ""}</span>
     </div>
     <div class="ctl">
       <label for="bw" class="lbl">Bandwidth limit</label>
@@ -139,74 +142,101 @@
     <p class="empty">Nothing in the queue. Updates and installs you start show here.</p>
   {/if}
 
-  {#if active.length}
-    <section aria-label="Active" class="sec">
-      <div class="sec-h"><span>Active</span></div>
-      {#each active as j, i (j.id)}
-        <div class="arow" animate:flip={{ duration: reduced() ? 0 : 140 }} use:enter={i}>
-          <svg class="grip dim" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4a4a4a" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d={I.grip} /></svg>
-          <svelte:element this={jobHref(j) ? "a" : "div"} class="who" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
-            <Mark app={j} size={32} />
-            <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
-          </svelte:element>
-          <span class="st two">
-            <span class="ellipsis" style:color={statusColor(j)}>{jobStatus(j, false)}</span>
-            {#if jobDetail(j)}<span class="dt ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
-          </span>
-          <span class="sp">{j.state === "downloading" && j.speed > 0 ? speed(j.speed) : ""}</span>
-          <span class="et">{j.eta != null && j.state !== "paused" && j.state !== "blocked" ? approx(j.eta).replace("About ", "") : ""}</span>
-          <span class="pc" style:color={j.state === "paused" ? "var(--text-3)" : "var(--text)"}><Num value={pct(j)} />%</span>
-          <span class="bt">
-            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j)} disabled={!canPause(j)} onclick={() => send(j.state === "paused" ? "resume_job" : "pause_job", { jobId: j.id })}><Icon d={j.state === "paused" ? I.play : I.pause} /></button>
-            <button class="ib" aria-label="Cancel {j.name}" title={cancelTip(j)} disabled={!canCancel(j)} onclick={() => send("cancel_job", { jobId: j.id })}><Icon d={I.close} /></button>
-          </span>
-          <span class="bar"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
-        </div>
-      {/each}
-    </section>
+  {#if adminWaiting > 0}
+    <div class="admin">
+      <span>{adminWaiting === 1 ? "1 update needs" : `${adminWaiting} updates need`} admin rights. Nothing was installed yet.</span>
+      <Btn variant="raised" size="sm" title="Ask for admin rights once and continue" onclick={() => send("allow_admin", {})}>Allow admin rights</Btn>
+    </div>
   {/if}
 
-  {#if waiting.length}
-    <section aria-label="Waiting" class="sec">
-      <div class="sec-h"><span>Waiting</span></div>
+  {#snippet running(j: Job)}
+    <svg class="grip dim" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4a4a4a" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d={I.grip} /></svg>
+    <svelte:element this={jobHref(j) ? "a" : "div"} class="who" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
+      <Mark app={j} size={32} />
+      <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
+    </svelte:element>
+    <span class="st two">
+      <span class="ellipsis" style:color={statusColor(j)}>{jobStatus(j, false)}</span>
+      {#if jobDetail(j)}<span class="dt ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
+    </span>
+    <span class="sp">{j.state === "downloading" && j.speed > 0 ? speed(j.speed) : ""}</span>
+    <span class="et">{j.eta != null && j.state !== "paused" && j.state !== "blocked" ? approx(j.eta).replace("About ", "") : ""}</span>
+    <span class="pc" style:color={j.state === "paused" ? "var(--text-3)" : "var(--text)"}><Num value={pct(j)} />%</span>
+    <span class="bt">
+      <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j)} disabled={!canPause(j)} onclick={() => send(j.state === "paused" ? "resume_job" : "pause_job", { jobId: j.id })}><Icon d={j.state === "paused" ? I.play : I.pause} /></button>
+      <button class="ib" aria-label="Cancel {j.name}" title={cancelTip(j)} disabled={!canCancel(j)} onclick={() => send("cancel_job", { jobId: j.id })}><Icon d={I.close} /></button>
+    </span>
+    <span class="bar"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
+  {/snippet}
+
+  {#snippet ordered(list: ListKey, label: string)}
+    <section aria-label={label} class="sec">
+      <div class="sec-h"><span>{label}</span></div>
       <div class="wline" aria-hidden="true"><svg viewBox="0 0 400 24" preserveAspectRatio="none"><path d={BRUSH} fill="#EDEDED" fill-opacity="0.8" /></svg></div>
       <div class="wlist" role="list">
-        {#each waiting as w, i (w.id)}
+        {#each lists[list] as w, i (w.id)}
           {@const dragging = drag?.id === w.id}
           <div
             class="wrow"
             class:dragging
-            class:settling={drag?.settling}
-            class:other={!!drag && !dragging}
+            class:settling={drag?.settling && drag.list === list}
+            class:other={!!drag && drag.list === list && !dragging}
             role="listitem"
-            style="transform:{shift(i)}"
+            style="transform:{shift(list, i)}"
             use:enter={i}
           >
             {#if dragging}<span class="dragbg"><Paint kind="swatch" fill="#262626" /></span>{/if}
-            <button
-              class="grip"
-              class:on={dragging}
-              aria-label="Drag to reorder {w.name}. Use arrow keys to move."
-              title="Drag to reorder"
-              onpointerdown={(e) => down(e, w.id, i)}
-              onpointermove={move}
-              onpointerup={up}
-              onpointercancel={up}
-              onkeydown={(e) => gripKey(e, i)}
-            >
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d={I.grip} /></svg>
-            </button>
+            {#if lists[list].length > 1}
+              <button
+                class="grip"
+                class:on={dragging}
+                aria-label="Drag to reorder {w.name}. Use arrow keys to move."
+                title={list === "ready" ? "Drag to change the install order" : "Drag to reorder"}
+                onpointerdown={(e) => down(e, list, w.id, i)}
+                onpointermove={move}
+                onpointerup={up}
+                onpointercancel={up}
+                onkeydown={(e) => gripKey(e, list, i)}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d={I.grip} /></svg>
+              </button>
+            {:else}
+              <span class="grip" aria-hidden="true"></span>
+            {/if}
             <svelte:element this={jobHref(w) ? "a" : "div"} class="who" href={jobHref(w)} title={jobHref(w) ? `Open ${w.name}` : undefined}>
               <Mark app={w} size={32} />
               <div class="nm"><span class="n">{w.name}</span><span class="w">{jobWhat(w)}</span></div>
             </svelte:element>
-            <span class="st mut ellipsis">{dragging ? `Moving to ${ord((drag?.to ?? 0) + 1)}` : `Waiting${i === 0 ? ", next" : ""}`}</span>
-            <button class="ib" aria-label="Cancel {w.name}" title="Cancel" onclick={() => send("cancel_job", { jobId: w.id })}><Icon d={I.close} /></button>
+            <span class="st mut ellipsis">{dragging ? `Moving to ${ord((drag?.to ?? 0) + 1)}` : list === "ready" ? readyLine({ installing: groups.installing, ready: lists.ready }, i) : `Waiting${i === 0 ? ", next" : ""}`}</span>
+            {#if list === "ready"}<span class="chip" title="Downloaded. It installs when its turn comes, one install at a time.">Ready</span>{/if}
+            <button class="ib" aria-label="Cancel {w.name}" title={cancelTip(w)} disabled={!canCancel(w)} onclick={() => send("cancel_job", { jobId: w.id })}><Icon d={I.close} /></button>
           </div>
         {/each}
       </div>
     </section>
+  {/snippet}
+
+  {#if groups.installing.length}
+    <section aria-label="Installing now" class="sec">
+      <div class="sec-h"><span>Installing now</span></div>
+      {#each groups.installing as j, i (j.id)}
+        <div class="arow" animate:flip={{ duration: reduced() ? 0 : 140 }} use:enter={i}>{@render running(j)}</div>
+      {/each}
+    </section>
   {/if}
+
+  {#if lists.ready.length}{@render ordered("ready", "Ready to install")}{/if}
+
+  {#if groups.downloading.length}
+    <section aria-label="Downloading" class="sec">
+      <div class="sec-h"><span>Downloading</span></div>
+      {#each groups.downloading as j, i (j.id)}
+        <div class="arow" animate:flip={{ duration: reduced() ? 0 : 140 }} use:enter={i}>{@render running(j)}</div>
+      {/each}
+    </section>
+  {/if}
+
+  {#if lists.waiting.length}{@render ordered("waiting", "Waiting")}{/if}
 
   {#if store.finishedJobs.length}
     <section aria-label="Finished" class="sec">
@@ -257,6 +287,13 @@
   }
   .stats {
     margin-top: 28px;
+  }
+  .admin {
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
   }
   .empty {
     margin-top: 40px;
@@ -439,6 +476,18 @@
   }
   .wrow > :global(*:not(.dragbg)) {
     position: relative;
+  }
+  .chip {
+    flex: none;
+    height: 22px;
+    padding: 0 10px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ok);
+    background: var(--raised);
   }
   .ib {
     width: 28px;

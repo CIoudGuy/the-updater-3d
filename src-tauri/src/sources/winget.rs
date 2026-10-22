@@ -292,36 +292,6 @@ impl Index {
         }
         out
     }
-
-    /// Packages whose id, name or moniker contains every word of `q`, best first.
-    pub fn search(&self, q: &str, limit: usize) -> Vec<Pkg> {
-        let words: Vec<String> = q.split_whitespace().map(|w| w.to_lowercase().replace(['%', '_'], "")).filter(|w| !w.is_empty()).take(4).collect();
-        if words.is_empty() {
-            return vec![];
-        }
-        let cond: Vec<String> = (1..=words.len()).map(|i| format!("(lower(name) LIKE ?{i} OR lower(id) LIKE ?{i} OR lower(ifnull(moniker,'')) LIKE ?{i})")).collect();
-        let sql = format!("SELECT {PKG_COLS} FROM packages WHERE {} LIMIT 400", cond.join(" AND "));
-        let pats: Vec<String> = words.iter().map(|w| format!("%{w}%")).collect();
-        let Ok(mut st) = self.conn.prepare(&sql) else { return vec![] };
-        let args: Vec<&dyn rusqlite::ToSql> = pats.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-        let mut v: Vec<Pkg> = st.query_map(args.as_slice(), pkg_row).map(|m| m.flatten().collect()).unwrap_or_default();
-        let ql = q.trim().to_lowercase();
-        let rank = |p: &Pkg| {
-            let n = p.name.to_lowercase();
-            if n == ql || p.moniker.as_deref().is_some_and(|m| m.eq_ignore_ascii_case(&ql)) {
-                0
-            } else if n.starts_with(&ql) {
-                1
-            } else if n.contains(&ql) {
-                2
-            } else {
-                3
-            }
-        };
-        v.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.name.len().cmp(&b.name.len())).then_with(|| a.name.cmp(&b.name)));
-        v.truncate(limit);
-        v
-    }
 }
 
 /// An empty index with the same tables as the real one, for tests.
@@ -447,6 +417,10 @@ pub struct VerRef {
     /// "manifests/7/7zip/7zip/26.05/8249"
     pub path: String,
     pub sha256: String,
+    /// The range of versions this package version writes to the uninstall list, when the
+    /// catalog lists it (winget's ARP version range)
+    pub arp_min: Option<String>,
+    pub arp_max: Option<String>,
 }
 
 /// Text of a YAML scalar. Versions such as `26.05` are numbers to YAML; their text is kept.
@@ -473,7 +447,7 @@ pub fn parse_version_data(yaml: &str) -> Result<Vec<VerRef>> {
         .as_vec()
         .map(|l| {
             l.iter()
-                .filter_map(|e| Some(VerRef { version: text(&e["v"])?, path: text(&e["rP"])?, sha256: text(&e["s256H"])?.to_ascii_lowercase() }))
+                .filter_map(|e| Some(VerRef { version: text(&e["v"])?, path: text(&e["rP"])?, sha256: text(&e["s256H"])?.to_ascii_lowercase(), arp_min: text(&e["aMiV"]), arp_max: text(&e["aMaV"]) }))
                 .collect()
         })
         .unwrap_or_default();
@@ -985,7 +959,7 @@ vD:
 ";
         let v = parse_version_data(yaml).unwrap();
         assert_eq!(v.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), vec!["26.05", "26.04", "9.20"]);
-        assert_eq!(v[1], VerRef { version: "26.04".into(), path: "manifests/7/7zip/7zip/26.04/54ea".into(), sha256: "71d2".into() });
+        assert_eq!(v[1], VerRef { version: "26.04".into(), path: "manifests/7/7zip/7zip/26.04/54ea".into(), sha256: "71d2".into(), arp_min: None, arp_max: None });
     }
 
     /// Raw deflate (one fixed Huffman block) of a 3 byte match at `distance`, then `data` as literals.
@@ -1111,7 +1085,5 @@ ManifestType: merged
         let p = idx.by_id("example.tool").unwrap();
         assert_eq!((p.latest.as_str(), p.hash.len()), ("2.10", 64));
         assert!(p.version_data_url().starts_with("https://cdn.winget.microsoft.com/cache/packages/Example.Tool/"));
-        assert_eq!(idx.search("example", 5).len(), 1);
-        assert!(idx.search("nothing like it", 5).is_empty());
     }
 }

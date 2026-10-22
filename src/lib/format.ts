@@ -207,3 +207,21 @@ export function cmpVersion(a: string, b: string): number {
 export function inUnit(n: number, unit: string): number {
   return n / Math.pow(1000, Math.max(0, UNITS.indexOf(unit)));
 }
+
+/**
+ * A version as people read it: build hashes and long build labels that some catalogs carry are
+ * left out ("1.3.6.1921.g7086c071a617" -> "1.3.6.1921", "1.0.9329126-release.Release - Prod
+ * Desktop App_x" -> "1.0.9329126"). Short tags stay ("6000.3.27f1", "2.0.0-beta.3", "5.2 LTS").
+ * The full version is still used for installs and shown in tooltips.
+ */
+export function shortVersion(v: string): string {
+  const s = v.trim();
+  const m = /^v?(\d+(?:\.\d+)*)([a-z]\d+)?(-(?:alpha|beta|rc|pre|preview)(?:[.-]?\d+)*)?/i.exec(s);
+  if (!m) return s;
+  const head = m[0];
+  const rest = s.slice(head.length);
+  if (!rest) return s;
+  // A git hash ("g7086c071a617", "+abc1234") or a long label after the number is noise.
+  const noisy = /^[.+-]?g?[0-9a-f]{7,}$/i.test(rest) || /[_]|\s-\s|release/i.test(rest) || rest.length > 12;
+  return noisy ? head.replace(/^v/i, "") : s;
+}

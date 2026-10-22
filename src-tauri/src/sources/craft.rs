@@ -327,6 +327,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry]) -> Vec<Installed> {
             tagline: Some(a.tagline.into()),
             channel: None,
             read_only: false,
+            store: None,
             icon_remote: None,
             data: SourceData::Craft { key: a.key.to_string(), msi_product_code: msi_code },
         });
@@ -448,7 +449,7 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
     if is_msi {
         steps.push(Step::Run {
             exe: PathBuf::from("msiexec.exe"),
-            args: vec!["/i".into(), dest.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "/l*v".into(), log.to_string_lossy().into()],
+            args: vec!["/i".into(), dest.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "MSIFASTINSTALL=7".into(), "/l*".into(), log.to_string_lossy().into()],
             cwd: None,
             ok_codes: vec![0, 3010, 1641],
             elevated: true,

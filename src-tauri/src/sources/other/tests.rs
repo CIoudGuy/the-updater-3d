@@ -176,6 +176,7 @@ fn leaves_apps_of_the_other_sources_alone() {
         channel: None,
         missing: false,
         read_only: false,
+        store: None,
         icon_remote: None,
         data: SourceData::Tools { key: "zipper".into(), series: String::new() },
     };
@@ -352,6 +353,7 @@ fn installed_from(e: winutil::UninstallEntry, pkg: &str) -> Installed {
         channel: None,
         missing: false,
         read_only: false,
+        store: None,
         icon_remote: None,
         data: SourceData::Other { pkg: pkg.into(), how: How::ProductCode, entry: Box::new(e), upgrade_code: None },
     }
@@ -385,7 +387,7 @@ fn plans_silent_installs_by_type() {
     let Step::Run { exe, args, elevated, ok_codes, log, .. } = &plan.steps[0] else { panic!() };
     assert_eq!(exe, &PathBuf::from("msiexec.exe"));
     assert_eq!(&args[..1], &["/i".to_string()]);
-    assert!(args.contains(&"/qn".to_string()) && args.contains(&"/l*v".to_string()) && log.is_some());
+    assert!(args.contains(&"/qn".to_string()) && args.contains(&"/l*".to_string()) && args.contains(&"MSIFASTINSTALL=7".to_string()) && log.is_some());
     assert!(!*elevated);
     assert!(ok_codes.contains(&3010));
     let fb = plan.fallback.as_ref().expect("retry with admin rights");
@@ -400,7 +402,8 @@ fn plans_silent_installs_by_type() {
     let Step::Run { exe, args, .. } = &plan.steps[1] else { panic!() };
     assert!(exe.ends_with("setup\\zipper-setup.exe"));
     assert_eq!(args[0], "/VERYSILENT");
-    assert_eq!(plan.cleanup.len(), 2);
+    // The zip, the unpacked folder and the Inno Setup log.
+    assert_eq!(plan.cleanup.len(), 3);
     zip.nested_path = Some("..\\..\\evil.exe".into());
     assert!(build_plan(&p, &manifest(vec![zip.clone()]), &zip, JobKind::Install, None, None).is_err());
 }
@@ -512,4 +515,290 @@ fn the_starter_list_is_clean() {
 #[test]
 fn package_icon_files_are_named_by_id() {
     assert_eq!(super::super::icons::file_stem("Mozilla.Firefox"), "other-mozilla.firefox");
+}
+
+#[test]
+fn a_copy_for_this_user_and_one_for_all_users_are_both_listed() {
+    let idx = index();
+    let mut machine = entry("Zipper", "HKLM64", "Zipper 26.04 (x64)", "26.04", "Example Pavlov");
+    machine.install_location = r"C:\Program Files\Zipper".into();
+    let mut user = entry("Zipper", "HKCU", "Zipper 26.04 (x64)", "26.01", "Example Pavlov");
+    user.install_location = r"C:\Users\A\AppData\Local\Programs\Zipper".into();
+    // The same copy for all users in both registry views stays one copy.
+    let mut again = machine.clone();
+    again.hive = "HKLM32";
+    // A copy for all users that also wrote an entry for this user (same folder) is that copy.
+    let mut mirror = machine.clone();
+    mirror.hive = "HKCU";
+    let r = match_all(&[machine, again, mirror, user], &idx, &[], &HashMap::new());
+    assert_eq!(r.matches.len(), 2, "{:?}", reasons(&r));
+    assert_eq!(r.misses.iter().filter(|(_, m)| *m == Miss::Duplicate("Example.Zipper".into())).count(), 2);
+
+    let list = installed_copies(&r.matches, None);
+    let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, vec!["other:Example.Zipper", "other:Example.Zipper:user"]);
+    assert_eq!(list[0].name, "Zipper (all users)");
+    assert_eq!(list[1].name, "Zipper (this user)");
+    assert_eq!(list[1].version, "26.01");
+    assert_eq!(Want::for_installed(&list[0]).scope, Some("machine"));
+    assert_eq!(Want::for_installed(&list[1]).scope, Some("user"));
+
+    // Each copy is updated by the installer for its own scope, verified by its own id, and
+    // downloads into its own folder.
+    let m = manifest(vec![inst("x64", "nsis", Some("machine")), inst("x64", "inno", Some("user"))]);
+    assert_eq!(choose(&m, &Want::for_installed(&list[0])).unwrap().kind, "nsis");
+    assert_eq!(choose(&m, &Want::for_installed(&list[1])).unwrap().kind, "inno");
+    let p = idx.by_id("Example.Zipper").unwrap();
+    let plans: Vec<Plan> = list.iter().map(|c| build_plan(&p, &m, choose(&m, &Want::for_installed(c)).unwrap(), JobKind::Update, Some(c), None).unwrap()).collect();
+    assert_eq!(plans[0].app_id, "other:Example.Zipper");
+    assert_eq!(plans[1].app_id, "other:Example.Zipper:user");
+    assert!(matches!(&plans[1].verify, Verify::Version { app_id, .. } if app_id == "other:Example.Zipper:user"));
+    assert!(plans[0].steps.last().unwrap().elevated());
+    assert!(!plans[1].steps.last().unwrap().elevated());
+    assert_ne!(plans[0].downloads[0].dest.parent(), plans[1].downloads[0].dest.parent());
+
+    // Get apps shows the package once.
+    let feed = Feed { pkgs: HashMap::from([("example.zipper".to_string(), PkgFeed { pkg: p.clone(), versions: vec![], latest: Some(m.clone()) })]), popular: vec![], unfinished: false };
+    let cat = catalog_entries(&feed, &list);
+    assert_eq!(cat.len(), 1);
+    assert_eq!(cat[0].name, "Zipper");
+
+    // A single copy for this user keeps the plain id.
+    let mut solo = entry("Zipper", "HKCU", "Zipper 26.04 (x64)", "26.01", "Example Pavlov");
+    solo.install_location = r"C:\Users\A\AppData\Local\Programs\Zipper".into();
+    let r = match_all(&[solo], &idx, &[], &HashMap::new());
+    let list = installed_copies(&r.matches, None);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, "other:Example.Zipper");
+    assert_eq!(list[0].name, "Zipper");
+}
+
+/// Read-only check of every Other app matched on this PC: apps the catalog can not show after
+/// matching, and updates that can never finish because the version the app writes to the
+/// uninstall list can not equal the one offered (an update loop). Works on a copy of the
+/// winget files in a temp folder, so the app's own data is not touched.
+/// cargo test --release --lib live_version_loop_probe -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn live_version_loop_probe() {
+    use crate::sources::{adobe, blender, craft, tools};
+    let real = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap());
+    let pf = std::path::PathBuf::from(std::env::var("ProgramFiles").unwrap());
+    let src = real.join(paths::APP_DIR).join("data").join("winget");
+    let base = std::env::temp_dir().join("updater3d-loop-probe");
+    let _ = std::fs::remove_dir_all(&base);
+    let dst = base.join(paths::APP_DIR).join("data").join("winget");
+    std::fs::create_dir_all(dst.join("files")).unwrap();
+    std::fs::copy(src.join("index.db"), dst.join("index.db")).unwrap();
+    for f in std::fs::read_dir(src.join("files")).unwrap().flatten() {
+        let _ = std::fs::copy(f.path(), dst.join("files").join(f.file_name()));
+    }
+    std::env::set_var("LOCALAPPDATA", &base);
+    let un = winutil::uninstall_entries();
+    let mut handled = adobe::scan(None, &un);
+    handled.extend(craft::scan(&un));
+    handled.extend(blender::scan(&un, &pf.join("Blender Foundation")));
+    handled.extend(tools::scan(&un, &real.join("Programs").join("Godot")));
+    let idx = Index::open(&winget::index_path()).unwrap();
+    let r = match_all(&un, &idx, &handled, &winutil::msi_upgrade_codes());
+    let mut feed = Feed::default();
+    for m in &r.matches {
+        if let (p, Ok((versions, man))) = load_pkg(m.pkg.clone()).await {
+            feed.pkgs.insert(p.id.to_ascii_lowercase(), PkgFeed { pkg: p, versions, latest: Some(man) });
+        }
+    }
+    // The newest version's range of uninstall list versions, from the raw version list.
+    let range = |p: &Pkg| -> Option<(String, String)> {
+        let b = std::fs::read(winget::dir().join("files").join(&p.hash)).ok()?;
+        let y = String::from_utf8(winget::mszip(&b).ok()?).ok()?;
+        let d = yaml_rust2::YamlLoader::load_from_str(&y).ok()?.into_iter().next()?;
+        let first = d["vD"].as_vec()?.iter().max_by(|a, b| crate::sources::tools::cmp_ver(&winget::text(&a["v"]).unwrap_or_default(), &winget::text(&b["v"]).unwrap_or_default()))?.clone();
+        Some((winget::text(&first["aMiV"])?, winget::text(&first["aMaV"])?))
+    };
+    let mut hidden: Vec<String> = vec![];
+    for m in &r.matches {
+        if make(m, Some(&feed)).is_none() {
+            let why = feed.get(&m.pkg.id).and_then(|f| f.latest.as_ref()).and_then(|man| choose(man, &Want::for_entry(&m.entry, m.upgrade_code.as_deref())).err()).unwrap_or_default();
+            hidden.push(format!("{} {} [{}] {}", m.pkg.id, m.entry.display_version, m.entry.hive, why));
+            // After an update that left it like this: does the check after the install find it,
+            // and would the next check offer the same update again?
+            let copies = copies_of(std::slice::from_ref(m), std::time::UNIX_EPOCH);
+            if let (Some(c), Some(man)) = (copies.first(), feed.get(&m.pkg.id).and_then(|f| f.latest.as_ref())) {
+                let declared = man.installers.iter().find_map(|i| i.scope.clone());
+                let offered = man.installers.first().map(|i| expected_version(man, i)).unwrap_or_default();
+                let x = Expect { app_id: c.id.clone(), pkg: m.pkg.id.clone(), pkg_version: man.version.clone(), expected: offered.clone(), declared_scope: declared, ..Default::default() };
+                let check = check_install(&x, &copies);
+                let mut l = Learned::default();
+                if let Check::Done { shows, scope } = &check {
+                    if let Some(v) = shows {
+                        l.set_shows(&m.pkg.id, &man.version, v);
+                    }
+                    if let Some((a, b)) = scope {
+                        l.set_scope(&m.pkg.id, a, b);
+                    }
+                }
+                let listed = choose_with(man, &Want::for_entry(&m.entry, m.upgrade_code.as_deref()), &l).is_ok();
+                let again = listed && is_newer(&offered, &c.version) && !at_version(&c.version, &offered, None, l.shows(&m.pkg.id, &man.version));
+                println!("  after an update to {offered}: check {check:?}, listed again {listed}, offered again {again}");
+            }
+        }
+    }
+    let list = installed_copies(&r.matches, Some(&feed));
+    let (mut offered, mut in_range, mut extra, mut shape) = (0, vec![], vec![], vec![]);
+    for i in &list {
+        let Some(pfeed) = feed.get(pkg_of(i)) else { continue };
+        let Some(l) = latest(i, &feed) else { continue };
+        if l.version == i.version {
+            continue;
+        }
+        offered += 1;
+        let (d, e) = (version::parts(&i.version), version::parts(&l.version));
+        let line = format!("{} {} -> {}", pfeed.pkg.id, i.version, l.version);
+        println!("  offered: {line}");
+        if let Some((lo, hi)) = range(&pfeed.pkg) {
+            if !version::newer(&lo, &i.version) && !version::newer(&i.version, &hi) {
+                in_range.push(format!("{line} (newest writes {lo}..{hi})"));
+                continue;
+            }
+        }
+        if d.len() < e.len() && e[d.len()..].iter().any(|x| *x != 0) {
+            extra.push(line);
+        } else if i.version.trim().chars().next().is_some_and(|c| !c.is_ascii_digit()) != l.version.trim().chars().next().is_some_and(|c| !c.is_ascii_digit()) {
+            shape.push(line);
+        }
+    }
+    println!("matched {} entries, listed {}, hidden {}", r.matches.len(), list.len(), hidden.len());
+    for h in &hidden {
+        println!("  hidden: {h}");
+    }
+    println!("updates offered: {offered}");
+    println!("loops, the newest version is already here (uninstall list range): {}", in_range.len());
+    for l in &in_range {
+        println!("  {l}");
+    }
+    println!("loops, the app writes fewer version parts than offered: {}", extra.len());
+    for l in &extra {
+        println!("  {l}");
+    }
+    println!("loops, prefix or format differs: {}", shape.len());
+    for l in &shape {
+        println!("  {l}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// MEGAsync 6.7.0.3 (owner's PC): the catalog says its installer is for all users, it installed
+// for this user only, and it writes "6.7.0" to the uninstall list. The update was reported as
+// failed ("reports not installed") and would have been offered again after every update.
+#[test]
+fn an_installer_that_really_installs_per_user_updates_the_per_user_copy_once_learned() {
+    let mut i = inst("x64", "nsis", Some("machine"));
+    i.product_code = Some("Zipper".into());
+    let m = manifest(vec![i]);
+    let mut e = entry("Zipper", "HKCU", "Zipper 26.04 (x64)", "26.04", "Example Pavlov");
+    e.install_location = r"C:\Users\A\AppData\Local\Zipper".into();
+    let w = Want::for_entry(&e, None);
+    assert!(choose_with(&m, &w, &Learned::default()).is_err(), "the catalog alone rules it out");
+    let mut l = Learned::default();
+    l.set_scope("Example.Zipper", "machine", "user");
+    assert!(choose_with(&m, &w, &l).is_ok());
+    // Only installers declared with the scope that was wrong are corrected.
+    let mut l2 = Learned::default();
+    l2.set_scope("Example.Zipper", "user", "machine");
+    assert!(choose_with(&m, &w, &l2).is_err());
+}
+
+#[test]
+fn an_install_that_moved_the_app_or_shortened_its_version_counts_as_done_and_is_learned() {
+    let x = Expect { app_id: "other:Mega.MEGASync".into(), pkg: "Mega.MEGASync".into(), pkg_version: "6.7.0.3".into(), expected: "6.7.0.3".into(), declared_scope: Some("machine".into()), before: Some("6.6.2".into()), ..Default::default() };
+    let copy = |scope: &'static str, v: &str, rewritten: bool| PkgCopy { id: "other:Mega.MEGASync".into(), scope, version: v.into(), rewritten };
+    assert_eq!(check_install(&x, &[copy("user", "6.7.0", true)]), Check::Done { shows: Some("6.7.0".into()), scope: Some(("machine".into(), "user".into())) });
+    assert_eq!(check_install(&x, &[copy("machine", "6.7.0.3", true)]), Check::Done { shows: None, scope: None });
+    assert_eq!(check_install(&x, &[]), Check::Missing);
+    // The old copy, untouched, or an unrelated version: not done.
+    assert_eq!(check_install(&x, &[copy("machine", "6.6.2", false)]), Check::Shows("6.6.2".into()));
+    assert_eq!(check_install(&x, &[copy("machine", "6.7", true)]), Check::Done { shows: Some("6.7".into()), scope: None });
+    assert_eq!(check_install(&x, &[copy("machine", "6.8.0", true)]), Check::Done { shows: None, scope: None });
+    assert_eq!(check_install(&x, &[copy("machine", "5.0", true)]), Check::Shows("5.0".into()));
+    // Shortened but neither rewritten nor changed: the installer may have done nothing.
+    let same = Expect { before: Some("6.7.0".into()), ..x.clone() };
+    assert_eq!(check_install(&same, &[copy("machine", "6.7.0", false)]), Check::Shows("6.7.0".into()));
+    // The copy is gone and one with another id was written: that is it. While the old copy is
+    // still there it is the one checked (a second copy is not an update of it).
+    let other = PkgCopy { id: "other:Mega.MEGASync:user".into(), ..copy("user", "6.7.0", true) };
+    assert!(matches!(check_install(&x, std::slice::from_ref(&other)), Check::Done { .. }));
+    assert_eq!(check_install(&x, &[copy("machine", "6.6.2", false), other]), Check::Shows("6.6.2".into()));
+    // What was learned keeps the next check from offering the same update again.
+    assert!(!at_version("6.7.0", "6.7.0.3", None, None));
+    assert!(at_version("6.7.0", "6.7.0.3", None, Some("6.7.0")));
+}
+
+#[test]
+fn an_app_already_in_the_newest_versions_uninstall_list_range_is_not_offered_it() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    let mut i = inst("x64", "nsis", None);
+    i.product_code = Some("Zipper".into());
+    let m = manifest(vec![i]);
+    let versions = vec![VerRef { version: "26.05".into(), path: "p".into(), sha256: "s".into(), arp_min: Some("26.4.90".into()), arp_max: Some("26.4.99".into()) }];
+    let feed = Feed { pkgs: HashMap::from([("example.zipper".to_string(), PkgFeed { pkg: p, versions, latest: Some(m) })]), popular: vec![], unfinished: false };
+    let at = |v: &str| {
+        let r = match_all(&[entry("Zipper", "HKLM64", "Zipper 26.04 (x64)", v, "Example Pavlov")], &idx, &[], &HashMap::new());
+        let list = installed_copies(&r.matches, Some(&feed));
+        latest(&list[0], &feed).unwrap().version
+    };
+    assert_eq!(at("26.4.95"), "26.4.95", "26.05 writes 26.4.90 to 26.4.99: already there");
+    assert_eq!(at("26.4.80"), "26.05");
+}
+
+/// A notes site that never answers must not keep the version list from showing: the list
+/// comes back after the notes time limit with a link to the notes (it used to wait up to 90 s
+/// per version, one version after another).
+#[tokio::test]
+async fn a_slow_notes_site_does_not_hold_up_the_version_list() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Accepts the connection and never answers.
+    std::thread::spawn(move || {
+        let held: Vec<_> = listener.incoming().take(4).filter_map(|c| c.ok()).collect();
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        drop(held);
+    });
+    let url = format!("http://127.0.0.1:{port}/notes");
+    let m = winget::Manifest { id: "Slow.Notes".into(), version: "2.0".into(), name: "Slow".into(), release_notes_url: Some(url.clone()), ..Default::default() };
+    let list = vec![winget::VerRef { version: "2.0".into(), path: String::new(), sha256: String::new(), arp_min: None, arp_max: None }];
+    let t0 = std::time::Instant::now();
+    let infos = version_infos(&list, None, &Want::fresh(), Some(&m)).await;
+    assert!(t0.elapsed() < NOTES_WAIT + std::time::Duration::from_secs(4), "took {:?}", t0.elapsed());
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].notes_url.as_deref(), Some(url.as_str()));
+}
+
+#[test]
+fn inno_installers_write_a_log_the_job_can_read() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    let inno = inst("x64", "inno", None);
+    let plan = build_plan(&p, &manifest(vec![inno.clone()]), &inno, JobKind::Install, None, None).unwrap();
+    let Step::Run { args, log: Some(log), .. } = &plan.steps[0] else { panic!("an Inno install has a log") };
+    assert_eq!(&args[..4], &["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"]);
+    assert_eq!(args.last().unwrap(), &format!("/LOG={}", log.display()));
+    assert!(plan.cleanup.contains(log));
+    // The catalog's own switches stay as they are; only the log is added.
+    let mut own = inst("x64", "inno", None);
+    own.silent = Some(r#"/SILENT /DIR="C:\Apps\Zipper""#.into());
+    let plan = build_plan(&p, &manifest(vec![own.clone()]), &own, JobKind::Install, None, None).unwrap();
+    let Step::Run { args, log: Some(log), .. } = &plan.steps[0] else { panic!() };
+    assert_eq!(args, &vec!["/SILENT".to_string(), r"/DIR=C:\Apps\Zipper".to_string(), format!("/LOG={}", log.display())]);
+    // A log the catalog asks for is kept, and not read as ours.
+    own.silent = Some(r"/VERYSILENT /LOG=C:\x.log".into());
+    let plan = build_plan(&p, &manifest(vec![own.clone()]), &own, JobKind::Install, None, None).unwrap();
+    let Step::Run { args, log, .. } = &plan.steps[0] else { panic!() };
+    assert_eq!(args, &vec!["/VERYSILENT".to_string(), r"/LOG=C:\x.log".to_string()]);
+    assert!(log.is_none());
+    // Other installer types get no log switch.
+    let nsis = inst("x64", "nsis", None);
+    let plan = build_plan(&p, &manifest(vec![nsis.clone()]), &nsis, JobKind::Install, None, None).unwrap();
+    let Step::Run { args, log, .. } = &plan.steps[0] else { panic!() };
+    assert!(log.is_none() && !args.iter().any(|a| a.to_ascii_lowercase().starts_with("/log")));
 }

@@ -101,9 +101,28 @@ pub fn read_activity() -> Vec<ActivityEntry> {
     v
 }
 
+/// How long an app's installs took: the number of runs and the smoothed seconds.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq)]
+pub struct InstallRuns {
+    pub runs: u32,
+    pub secs: f64,
+}
+
+impl InstallRuns {
+    /// Add one run; recent runs count more, as the app and the PC change.
+    pub fn add(&mut self, secs: f64) {
+        self.secs = if self.runs == 0 { secs } else { self.secs * 0.6 + secs * 0.4 };
+        self.runs = self.runs.saturating_add(1);
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Persisted {
     pub last_check: Option<String>,
+    /// app id -> exact time this app last finished updating or installing one of them, for
+    /// "Recently updated" (Windows often keeps only the day)
+    #[serde(default)]
+    pub updated_at: std::collections::BTreeMap<String, String>,
     /// app id -> latest version we already told the user about
     pub notified: std::collections::BTreeMap<String, String>,
     pub last_auto_install_day: Option<String>,
@@ -119,6 +138,10 @@ pub struct Persisted {
     /// How long installs of a kind took (seconds, smoothed), for a progress bar that fits
     #[serde(default)]
     pub install_times: std::collections::BTreeMap<String, f64>,
+    /// "<app id>:install" or "<app id>:uninstall" -> how long this app's own runs took, for
+    /// "usually takes about 3 min" on the detail line
+    #[serde(default)]
+    pub install_runs: std::collections::BTreeMap<String, InstallRuns>,
     /// "Keep previous version" became off by default in 1.0.5; switched off once for copies
     /// that only had the old default.
     #[serde(default)]
@@ -136,6 +159,10 @@ pub struct Persisted {
     /// for again at every start
     #[serde(default)]
     pub icon_misses: std::collections::BTreeMap<String, String>,
+    /// The installer's Adobe answer ("yes" or "no") already applied to the Adobe source, or
+    /// "auto" once the source was set without one. Applied once, so later changes in Settings win.
+    #[serde(default)]
+    pub adobe_choice: Option<String>,
 }
 
 pub fn load_state() -> Persisted {
@@ -162,6 +189,7 @@ pub fn load_state_from(file: &std::path::Path) -> Persisted {
         p.prereleases_default_on = true;
         p.other_apps_default_on = true;
         p.silent_elevation_default_on = true;
+        p.adobe_choice = Some("auto".into());
     }
     p
 }
@@ -214,6 +242,40 @@ pub fn apply_default_changes(p: &mut Persisted, s: &mut Settings) -> bool {
     autostart
 }
 
+/// Where the installer keeps the Adobe answer (src-tauri/windows/hooks.nsh writes it).
+pub const ADOBE_CHOICE_KEY: &str = r"Software\The Updater 3D";
+pub const ADOBE_CHOICE_VALUE: &str = "AdobeChoice";
+
+/// The answer to "Do you use Adobe Creative Cloud apps?" the installer stored, if it asked.
+pub fn installer_adobe_choice() -> Option<String> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey(ADOBE_CHOICE_KEY).ok()?;
+    key.get_value::<String, _>(ADOBE_CHOICE_VALUE).ok()
+}
+
+/// Turn the Adobe source on or off once from the installer's answer. Without an answer (a
+/// silent or winget install) a first start turns it on only when Creative Cloud is installed;
+/// a copy that already ran keeps what it has. A new answer (the installer asked later) is
+/// applied once too. Returns true when anything changed.
+pub fn apply_adobe_choice(p: &mut Persisted, s: &mut Settings, answer: Option<&str>, first_start: bool, cc_installed: impl FnOnce() -> bool) -> bool {
+    let answer = answer.map(|a| a.trim().to_ascii_lowercase()).filter(|a| a == "yes" || a == "no");
+    match answer {
+        Some(a) if p.adobe_choice.as_deref() != Some(a.as_str()) => {
+            s.sources.adobe = a == "yes";
+            p.adobe_choice = Some(a);
+            true
+        }
+        Some(_) => false,
+        None if p.adobe_choice.is_none() => {
+            if first_start {
+                s.sources.adobe = cc_installed();
+            }
+            p.adobe_choice = Some("auto".into());
+            true
+        }
+        None => false,
+    }
+}
+
 /// Simple file logger for the app's own log (logs\app.log), rotated at 2 MB.
 pub struct FileLog;
 
@@ -262,6 +324,54 @@ mod tests {
         let mut s: crate::model::Settings = serde_json::from_str(r#"{"blenderChannel":"stable"}"#).unwrap();
         super::apply_default_changes(&mut p, &mut s);
         assert_eq!(s.blender_channel, "beta");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_installer_adobe_answer_is_applied_once() {
+        let fresh = || crate::model::Settings::default();
+        // "No" at install: Adobe off, even with Creative Cloud on the PC.
+        let (mut p, mut s) = (super::Persisted::default(), fresh());
+        assert!(super::apply_adobe_choice(&mut p, &mut s, Some("no"), true, || true));
+        assert!(!s.sources.adobe);
+        // The user turns it on later in Settings: the old answer does not switch it off again.
+        s.sources.adobe = true;
+        assert!(!super::apply_adobe_choice(&mut p, &mut s, Some("no"), false, || true));
+        assert!(s.sources.adobe);
+        // "Yes" at install.
+        let (mut p, mut s) = (super::Persisted::default(), fresh());
+        s.sources.adobe = false;
+        super::apply_adobe_choice(&mut p, &mut s, Some("yes"), true, || false);
+        assert!(s.sources.adobe);
+    }
+
+    #[test]
+    fn without_an_answer_adobe_follows_creative_cloud_on_a_first_start_only() {
+        let fresh = || crate::model::Settings::default();
+        for cc in [true, false] {
+            let (mut p, mut s) = (super::Persisted::default(), fresh());
+            super::apply_adobe_choice(&mut p, &mut s, None, true, || cc);
+            assert_eq!(s.sources.adobe, cc);
+        }
+        // A copy that ran before (updated silently) keeps its setting, and is not asked to look again.
+        let (mut p, mut s) = (super::Persisted::default(), fresh());
+        s.sources.adobe = true;
+        super::apply_adobe_choice(&mut p, &mut s, None, false, || panic!("no need to look"));
+        assert!(s.sources.adobe);
+        assert!(!super::apply_adobe_choice(&mut p, &mut s, None, true, || false));
+        assert!(s.sources.adobe);
+        // The installer asked later (a manual reinstall): that answer is applied once.
+        assert!(super::apply_adobe_choice(&mut p, &mut s, Some("No"), false, || true));
+        assert!(!s.sources.adobe);
+        // A damaged state file is not a first start.
+        let dir = scratch("adobe");
+        let file = dir.join("state.json");
+        std::fs::write(&file, b"{").unwrap();
+        let mut p = super::load_state_from(&file);
+        let mut s = fresh();
+        s.sources.adobe = true;
+        assert!(!super::apply_adobe_choice(&mut p, &mut s, None, true, || false));
+        assert!(s.sources.adobe);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

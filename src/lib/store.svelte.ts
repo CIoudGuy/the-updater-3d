@@ -81,7 +81,6 @@ function syncList<T extends { id: string }>(cur: T[], next: T[]): T[] {
 export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps", "Other apps"] as const;
 
 /** Shown wherever Other apps are listed. */
-export const OTHER_NOTE = "Matched from Microsoft's public winget catalog. Less complete than the fully handled apps.";
 
 export function isOpenState(s: Job["state"]) {
   return s === "waiting" || s === "paused" || s === "blocked" || s === "downloading" || s === "installing" || s === "verifying";
@@ -131,6 +130,8 @@ class Store {
     if (!b.length) return 0;
     return b.reduce((n, j) => n + j.progress, 0) / b.length;
   });
+  /** Adobe apps are looked after (Settings > Sources). Off: nothing about Adobe or Creative Cloud shows. */
+  adobeOn = $derived(this.settings.sources.adobe);
   hasAdobe = $derived(this.apps.some((a) => a.source === "adobe") && this.settings.sources.adobe);
   ccDown = $derived(this.hasAdobe && this.status.ccInstalled && !this.status.ccRunning);
   signedOut = $derived(this.hasAdobe && this.status.ccInstalled && this.status.ccRunning && !this.status.signedIn);

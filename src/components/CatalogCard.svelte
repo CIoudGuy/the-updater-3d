@@ -19,7 +19,7 @@
   import { installedFor } from "../lib/appview";
   import { ui } from "../lib/ui.svelte";
   import { installApp, openApp, updateOne } from "../lib/actions";
-  import { bytes } from "../lib/format";
+  import { bytes, shortVersion } from "../lib/format";
   import { blockedTitle } from "../lib/browse";
   import { canCancel, cancelTip, pct } from "../lib/jobs";
   import type { CatalogEntry } from "../lib/types";
@@ -110,14 +110,14 @@
       <Mark app={c} size={48} fs={17} {eager} />
       <div class="nm">
         <span class="n"><span class="nt ellipsis" title={c.name}>{c.name}</span>{#if c.prerelease}<span class="beta">Pre-release</span>{/if}</span>
-        <span class="s ellipsis">{c.version}{c.size ? `, ${bytes(c.size)}` : ""}</span>
+        <span class="s ellipsis" title={c.version}>{shortVersion(c.version)}{c.size ? `, ${bytes(c.size)}` : ""}</span>
       </div>
     </div>
     <span class="tag ellipsis" title={c.tagline ?? ""}>{c.tagline ?? ""}</span>
     <div class="bot">
       <span class="note">
         {#if job}
-          {job.state === "waiting" ? `Queued, ${queuePos}${["st", "nd", "rd"][queuePos - 1] ?? "th"}` : job.state === "paused" ? "Paused" : `Installing, ${pct(job)}%`}
+          {job.state === "waiting" ? `Queued, ${queuePos}${["st", "nd", "rd"][queuePos - 1] ?? "th"}` : job.state === "paused" ? "Paused" : job.ready ? "Downloaded, ready to install" : `Installing, ${pct(job)}%`}
         {:else if isIn}
           {#if have}
             <a class="ok inst" href={appHref(have.id)} title="Installed {have.version}. Show in Installed" onclick={(e) => { e.preventDefault(); router.go(appHref(have.id)); }}>

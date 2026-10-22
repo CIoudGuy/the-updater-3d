@@ -1,5 +1,6 @@
 <script lang="ts">
   import { MARK, MARK_LINES, MARK_LINES_BIG } from "../lib/paths";
+  import { mostlyDark } from "../lib/iconlook";
 
   // The painted brand mark is always drawn first. The real icon fades in over it once it has loaded,
   // and if it never loads (or fails) the mark simply stays, so an icon is never blank.
@@ -27,11 +28,35 @@
 
   /** Cached images can finish before Svelte attaches onload, so check `complete` when the node mounts. */
   function watch(img: HTMLImageElement) {
-    if (img.complete && img.naturalWidth > 0) loadedUrl = img.currentSrc || img.src;
+    if (img.complete && img.naturalWidth > 0) done(img);
+  }
+
+  // A dark logo on a clear background (Spotify's black circle) is lost on the dark cards, so it
+  // gets a light plate. The backend names such icons "*.dark.png"; other pictures are looked at
+  // here when the browser lets the page read them.
+  let darkUrl = $state<string | null>(null);
+  const plate = $derived(loaded && (/\.dark\.png($|[?#])/i.test(url ?? "") || darkUrl === url));
+  function done(img: HTMLImageElement) {
+    loadedUrl = url;
+    if (url && !/\.(dark|icon)\.png($|[?#])/i.test(url) && looksDark(img)) darkUrl = url;
+  }
+  function looksDark(img: HTMLImageElement): boolean {
+    try {
+      const n = 24;
+      const cv = document.createElement("canvas");
+      cv.width = cv.height = n;
+      const g = cv.getContext("2d", { willReadFrequently: true });
+      if (!g) return false;
+      g.drawImage(img, 0, 0, n, n);
+      return mostlyDark(g.getImageData(0, 0, n, n).data);
+    } catch {
+      // a picture from another origin cannot be read: it keeps no plate
+      return false;
+    }
   }
 </script>
 
-<span class="mark" class:dim style="width:{size}px;height:{size}px" aria-hidden="true">
+<span class="mark" class:dim class:plate style="width:{size}px;height:{size}px" aria-hidden="true">
   <svg class:gone={loaded} viewBox="0 0 48 48" width={size} height={size}>
     <path d={MARK} fill={app.bg} />
     <path d={size >= 64 ? MARK_LINES_BIG : MARK_LINES} fill="none" stroke={app.fg} stroke-opacity="0.3" stroke-width="1.6" stroke-linecap="round" />
@@ -48,7 +73,7 @@
         decoding="async"
         loading={eager ? "eager" : "lazy"}
         use:watch
-        onload={() => (loadedUrl = url)}
+        onload={(e) => done(e.currentTarget as HTMLImageElement)}
         onerror={() => (failedUrl = url)}
       />
     {/key}
@@ -85,6 +110,12 @@
   }
   img.on {
     opacity: 1;
+  }
+  /* a light plate behind dark logos; normal icons are left as they are */
+  .plate img {
+    box-sizing: border-box;
+    padding: 9%;
+    background: #ececf0;
   }
   .code {
     position: relative;

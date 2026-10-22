@@ -1,6 +1,6 @@
 // Transient UI state: popovers, dialogs, view preferences.
 import type { AppEntry, CatalogEntry } from "./types";
-import type { BrowseState } from "./browse";
+import type { BrowseState, OtherSort } from "./browse";
 import { focusAfterLeave } from "./keys";
 
 export interface PopItem {
@@ -90,12 +90,13 @@ class Ui {
 
   /** Get apps list kept across visits, so coming back from a detail page does not reload it */
   catalog = $state<CatalogEntry[] | null>(null);
-  /** Winget catalog packages found by the last Get apps search (Other apps) */
-  otherFound = $state<CatalogEntry[]>([]);
-  /** Other apps without a search: the starter list, or the whole catalog page by page */
-  otherMode = $state<"popular" | "browse">("popular");
-  /** Browse all: the pages loaded so far, kept across visits like the catalog */
-  otherBrowse = $state<BrowseState | null>(null);
+  /** Other apps: the pages of the whole winget catalog loaded so far (or of a search through
+   * it), kept across visits like the catalog */
+  otherBrowse = $state.raw<BrowseState | null>(null);
+  /** Other apps order, category and first letter, kept for this session */
+  otherSort = $state<OtherSort>("popular");
+  otherCategory = $state<string | null>(null);
+  otherLetter = $state<string | null>(null);
   /** Packages in the whole winget catalog, for the note under Other apps */
   otherPackages = $state<number | null>(null);
 
@@ -159,7 +160,8 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
   const repairable = canRepair(app);
   if (app.status === "missing" && repairable) items.push({ id: "repair", label: "Repair", icon: "repair", key: "R" });
   items.push({ id: "notes", label: "Release notes", icon: "notes", key: "N" });
-  items.push({ id: "version", label: "Install another version", icon: "version", key: "V" });
+  if (!app.readOnly) items.push({ id: "version", label: "Install another version", icon: "version", key: "V" });
+  if (app.storeUrl) items.push({ id: "store", label: "Open in Microsoft Store", icon: "external", key: "S" });
   if (repairable && app.status !== "missing") items.push({ id: "repair", label: "Repair", icon: "repair", key: "R" });
   if (app.status !== "missing") items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
   items.push({ id: "sep", label: "", divider: true });

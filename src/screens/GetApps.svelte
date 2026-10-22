@@ -1,21 +1,23 @@
 <script lang="ts">
   import { flip } from "svelte/animate";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import Paint from "../components/Paint.svelte";
   import Icon from "../components/Icon.svelte";
   import Segmented from "../components/Segmented.svelte";
+  import Select from "../components/Select.svelte";
   import CatalogCard from "../components/CatalogCard.svelte";
+  import VirtualGrid from "../components/VirtualGrid.svelte";
   import { BRUSH } from "../lib/paths";
   import { I } from "../lib/icons";
   import { call, on } from "../lib/api";
-  import { OTHER_NOTE, store } from "../lib/store.svelte";
+  import { store } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { bytes, countOf, driveOf } from "../lib/format";
   import { enter, reduced } from "../lib/motion";
   import type { CatalogEntry } from "../lib/types";
   import { tryLoad } from "../lib/load";
   import { allSourcesOff } from "../lib/view";
-  import { BROWSE_PAGE, LETTERS, appendPage, catalogNote, patchEntries } from "../lib/browse";
+  import { BROWSE_PAGE, LETTERS, datedNote, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, type BrowseKey, type OtherSort } from "../lib/browse";
 
   const catalog = $derived(ui.catalog);
   /** the catalog could not be loaded and none is kept from an earlier visit */
@@ -33,30 +35,37 @@
     // a list kept from an earlier visit is shown at once and refreshed in the background
     loadCatalog();
     ui.searchEl = searchInput ?? null;
-    // icons found in the background and the rest of the starter list arrive after the first paint
+    // the rest of the starter list and changed installs arrive after the first paint
     let off: (() => void) | undefined;
     let gone = false;
     on("catalog_changed", () => {
       loadCatalog();
-      if (otherOn && q.length >= 2) runSearch(q, searchSeq);
-      if (otherOn && ui.otherMode === "browse") refreshBrowseSoon();
+      if (otherOn) refreshBrowseSoon();
     }).then((u) => (gone ? u() : (off = u)));
+    // icons found in the background, a few at a time: only those cards change, nothing moves
+    let offIcons: (() => void) | undefined;
+    on("other_icons", (p) => {
+      const b = ui.otherBrowse && patchIcons(ui.otherBrowse.entries, p);
+      if (b && ui.otherBrowse) ui.otherBrowse = { ...ui.otherBrowse, entries: b };
+      const c = ui.catalog && patchIcons(ui.catalog, p);
+      if (c) ui.catalog = c;
+    }).then((u) => (gone ? u() : (offIcons = u)));
     // descriptions and install verdicts of winget packages, read in the background
     let offDetails: (() => void) | undefined;
     on("other_details", (p) => {
-      const f = patchEntries(ui.otherFound, p);
-      if (f) ui.otherFound = f;
       const b = ui.otherBrowse && patchEntries(ui.otherBrowse.entries, p);
       if (b && ui.otherBrowse) ui.otherBrowse = { ...ui.otherBrowse, entries: b };
       const c = ui.catalog && patchEntries(ui.catalog, p);
       if (c) ui.catalog = c;
     }).then((u) => (gone ? u() : (offDetails = u)));
-    if (ui.otherPackages === null) loadPackages();
     return () => {
       gone = true;
       off?.();
       offDetails?.();
+      offIcons?.();
       clearTimeout(refreshTimer);
+      clearTimeout(fillTimer);
+      clearTimeout(queryTimer);
       if (ui.searchEl === searchInput) ui.searchEl = null;
     };
   });
@@ -73,52 +82,48 @@
     { group: "Other apps", title: "Other apps", from: "from Microsoft's winget catalog", color: "#8FA3B8", enabled: () => s.sources.other },
   ];
 
-  // Other apps: a search also looks through the winget catalog. A plain flag, so settings
-  // updates that change nothing here do not restart the search.
+  // Other apps: the whole winget catalog, popular apps first, a page at a time as the list is
+  // scrolled. A search goes through all of it on the backend, a moment after the last key, so
+  // typing stays quick; the curated sources above are filtered here at once.
   const otherOn = $derived(s.sources.other);
-  let searchSeq = 0;
+  let otherQuery = $state(untrack(() => ui.otherBrowse?.query ?? ""));
+  let queryTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const query = q;
-    const on = otherOn;
-    const n = ++searchSeq;
-    if (!on || query.length < 2) {
-      ui.otherFound = [];
-      return;
-    }
-    const t = setTimeout(() => runSearch(query, n), 250);
-    return () => clearTimeout(t);
+    clearTimeout(queryTimer);
+    if (query === untrack(() => otherQuery)) return;
+    // clearing the search shows the whole list again at once
+    if (!query) otherQuery = "";
+    else queryTimer = setTimeout(() => (otherQuery = query), 150);
   });
-  function runSearch(query: string, n: number) {
-    call("search_other_apps", { query })
-      .then((r) => {
-        if (n === searchSeq) ui.otherFound = r;
-      })
-      .catch(() => {});
-  }
+  const otherKey = $derived<BrowseKey>({ query: otherQuery, category: ui.otherCategory, letter: ui.otherLetter, sort: ui.otherSort });
 
-  // Other apps, Browse all: the whole winget catalog by category and first letter, 60 at a time
-  // as the list is scrolled. The pages loaded stay across visits.
-  const browsing = $derived(otherOn && !q && ui.otherMode === "browse");
+  // The list has a place for every entry from its first page on, so the scrollbar spans all of
+  // it; pages are loaded for the places in view (and the screens around them) as the list is
+  // scrolled or dragged anywhere, and loaded pages are kept.
   let browseSeq = 0;
   let browseBusy = $state(false);
   let browseError = $state<string | null>(null);
-  function loadPackages() {
-    call("browse_other_apps", { category: null, letter: null, offset: 0, limit: 1 })
-      .then((r) => {
-        if (r.packages) ui.otherPackages = r.packages;
-      })
-      .catch(() => {});
-  }
-  function loadBrowse(category: string | null, letter: string | null, more: boolean) {
+  /** pages asked for and not back yet, by start offset, for list `browseSeq` */
+  const pending = new Set<number>();
+  let letterRow = $state<HTMLElement>();
+  /** places in view and kept around them, from the grid */
+  let range = { from: 0, to: 0, keepFrom: 0, keepTo: 0 };
+  const req = (key: BrowseKey, offset: number, limit: number) => call("browse_other_apps", { query: key.query || null, category: key.category, letter: key.letter, sort: key.sort, offset, limit });
+  function loadBrowse(key: BrowseKey) {
     const n = ++browseSeq;
-    const have = more && ui.otherBrowse ? ui.otherBrowse.entries : [];
+    pending.clear();
     browseBusy = true;
     browseError = null;
-    call("browse_other_apps", { category, letter, offset: have.length, limit: BROWSE_PAGE })
+    req(key, 0, BROWSE_PAGE)
       .then((r) => {
         if (n !== browseSeq) return;
         if (r.packages) ui.otherPackages = r.packages;
-        ui.otherBrowse = { category, letter, entries: appendPage(have, r.entries), total: r.total, categories: r.categories };
+        const fresh = !ui.otherBrowse || !sameKey(ui.otherBrowse, key);
+        ui.otherBrowse = { ...key, entries: placePage([], r.total, 0, r.entries), total: r.total, categories: r.categories, dated: r.dated };
+        // a new search or filter shows its list from the start, not from where the old one was
+        if (fresh && letterRow && letterRow.getBoundingClientRect().top < 0) letterRow.scrollIntoView({ block: "start" });
+        fillSoon();
       })
       .catch((e) => {
         if (n === browseSeq) browseError = String(e?.message ?? e);
@@ -127,62 +132,104 @@
         if (n === browseSeq) browseBusy = false;
       });
   }
-  /** found icons: the pages already shown are read again, in one go */
+  /** Load the pages the places in view need, then the ones kept around them; a few at a time. */
+  function fill() {
+    const b = ui.otherBrowse;
+    if (!b || !browseCurrent || browseBusy) return;
+    const n = browseSeq;
+    const key: BrowseKey = { query: b.query, category: b.category, letter: b.letter, sort: b.sort };
+    const want = pagesToLoad(b.entries, range.from, range.to, BROWSE_PAGE, pending);
+    for (const p of pagesToLoad(b.entries, range.keepFrom, range.keepTo, BROWSE_PAGE, pending)) if (!want.includes(p)) want.push(p);
+    for (const offset of want.slice(0, Math.max(0, 3 - pending.size))) {
+      pending.add(offset);
+      req(key, offset, BROWSE_PAGE)
+        .then((r) => {
+          const cur = ui.otherBrowse;
+          if (n !== browseSeq || !cur || !sameKey(cur, key)) return;
+          ui.otherBrowse = { ...cur, entries: placePage(cur.entries, r.total, offset, r.entries), total: r.total };
+          browseError = null;
+        })
+        .catch((e) => {
+          if (n === browseSeq) browseError = String(e?.message ?? e);
+        })
+        .finally(() => {
+          if (n !== browseSeq) return;
+          pending.delete(offset);
+          if (!browseError) fillSoon();
+        });
+    }
+  }
+  /** While the list is flung, only the pages where it comes to rest are asked for. */
+  let fillTimer: ReturnType<typeof setTimeout> | undefined;
+  function fillSoon(ms = 60) {
+    clearTimeout(fillTimer);
+    fillTimer = setTimeout(fill, ms);
+  }
+  function onRange(r: typeof range) {
+    range = r;
+    fillSoon();
+  }
+  // a new search, category, letter or order starts the list again; the old one stays on screen
+  // until the new first page is there
+  $effect(() => {
+    if (!otherOn) return;
+    const key = otherKey;
+    const b = untrack(() => ui.otherBrowse);
+    if (!b || !sameKey(b, key)) untrack(() => loadBrowse(key));
+  });
+  /** the list shown is the one asked for (not an older one while the new one loads) */
+  const browseCurrent = $derived(!!ui.otherBrowse && sameKey(ui.otherBrowse, otherKey));
+
+  /** the catalog changed on the backend (installs, the starter list): the pages in view are read
+   * again and merged in by id, so the list keeps its order, its place and the lines above it */
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   function refreshBrowseSoon() {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       const b = ui.otherBrowse;
-      if (!b || browseBusy || !b.entries.length) return;
-      const n = ++browseSeq;
-      call("browse_other_apps", { category: b.category, letter: b.letter, offset: 0, limit: b.entries.length })
+      if (!b || browseBusy || !b.entries.length || !browseCurrent) return;
+      const n = browseSeq;
+      const key: BrowseKey = { query: b.query, category: b.category, letter: b.letter, sort: b.sort };
+      const from = range.from - (range.from % BROWSE_PAGE);
+      const limit = Math.min(200, Math.max(BROWSE_PAGE, range.to - from));
+      req(key, from, limit)
         .then((r) => {
-          if (n === browseSeq && ui.otherBrowse) ui.otherBrowse = { ...ui.otherBrowse, entries: r.entries, total: r.total, categories: r.categories };
+          if (n === browseSeq && ui.otherBrowse && sameKey(ui.otherBrowse, key)) ui.otherBrowse = { ...ui.otherBrowse, entries: mergeEntries(ui.otherBrowse.entries, r.entries) };
         })
         .catch(() => {});
     }, 600);
   }
-  function setBrowse(category: string | null, letter: string | null) {
-    ui.otherBrowse = ui.otherBrowse ? { ...ui.otherBrowse, category, letter, entries: [], total: 0 } : null;
-    loadBrowse(category, letter, false);
+
+  /** the first cards of a new list fade in once; cards met while scrolling are simply there */
+  const animated = new Set<string>();
+  function enterOnce(node: HTMLElement, a: { id: string; i: number }) {
+    if (a.i >= 12 || animated.has(a.id)) return;
+    animated.add(a.id);
+    enter(node, a.i);
   }
-  $effect(() => {
-    if (browsing && !ui.otherBrowse) loadBrowse(null, null, false);
-  });
-  const browseMore = $derived(!!ui.otherBrowse && ui.otherBrowse.entries.length < ui.otherBrowse.total);
-  /** loads the next page when the end of the list scrolls into view */
-  function sentinel(el: HTMLElement) {
-    const io = new IntersectionObserver(
-      (es) => {
-        const b = ui.otherBrowse;
-        if (es.some((e) => e.isIntersecting) && b && !browseBusy && !browseError && b.entries.length < b.total) loadBrowse(b.category, b.letter, true);
-      },
-      { rootMargin: "600px 0px" },
-    );
-    io.observe(el);
-    return { destroy: () => io.disconnect() };
+
+  const sortOpts = $derived(sortOptions(!!otherQuery));
+  function setSort(v: string) {
+    ui.otherSort = v as OtherSort;
   }
-  const modeOpts = [
-    { value: "popular" as const, label: "Popular" },
-    { value: "browse" as const, label: "Browse all" },
-  ];
 
   /** Search and the Beta settings decide what is listed at all. */
   function listed(c: CatalogEntry): boolean {
-    if (q && !c.name.toLowerCase().includes(q) && !(c.tagline ?? "").toLowerCase().includes(q)) return false;
     if (c.prerelease && c.source === "blender" && s.blenderChannel !== "beta") return false;
     if (c.prerelease && c.source === "craft" && !s.craftPrereleases) return false;
     return true;
   }
   const onSources = $derived(SECTIONS.filter((x) => x.enabled()));
   const sourcesOff = $derived(allSourcesOff(s.sources));
+  // the curated sources, best matches first when searching; Other apps come from the backend
   const found = $derived.by(() => {
-    const base = (catalog ?? []).filter(listed);
-    if (!q) return base;
-    const have = new Set(base.map((c) => c.id));
-    return [...base, ...ui.otherFound.filter((c) => !have.has(c.id))];
+    // Installed apps are left out of the list, but a search always finds them (with Open).
+    const base = (catalog ?? []).filter(listed).filter((c) => !c.installed || !!q || s.showInstalledInGetApps);
+    return q ? rankEntries(base, q) : base;
   });
-  const counts = $derived(Object.fromEntries(SECTIONS.map((x) => [x.group, found.filter((c) => c.group === x.group).length])) as Record<Group, number>);
+  const otherHave = $derived(found.filter((c) => c.group === "Other apps" && c.installed).length);
+  const otherTotal = $derived(ui.otherBrowse?.total ?? 0);
+  const counts = $derived(Object.fromEntries(SECTIONS.map((x) => [x.group, x.group === "Other apps" ? otherTotal : found.filter((c) => c.group === x.group).length])) as Record<Group, number>);
   // a filter on a source that was switched off falls back to All
   const filter = $derived(ui.getGroup !== "all" && onSources.some((x) => x.group === ui.getGroup) ? ui.getGroup : "all");
   const filterOpts = $derived([
@@ -190,33 +237,25 @@
     ...onSources.map((x) => ({ value: x.group as string, label: x.group, badge: counts[x.group] })),
   ]);
 
-  // Other apps is a long list (a few hundred): the first ones show at once, the rest on a click.
-  const PAGE = 60;
-  let otherShown = $state(PAGE);
-  $effect(() => {
-    q;
-    otherShown = PAGE;
-  });
-
   const sections = $derived(
     onSources
       .filter((x) => filter === "all" || filter === x.group)
       .map((x) => {
+        // Other apps: one place per entry of the whole list, null until its page is loaded
+        if (x.group === "Other apps") return { ...x, items: [] as CatalogEntry[], slots: ui.otherBrowse?.entries ?? [], total: otherTotal };
         const all = found.filter((c) => c.group === x.group);
         // what you can still install comes first; Blender keeps its own order (stable, beta, LTS, older)
         const items = x.group === "Blender" ? all : [...all.filter((c) => !c.installed), ...all.filter((c) => c.installed)];
-        if (x.group === "Other apps" && browsing) {
-          // the page summary keeps counting the starter list; the whole catalog is counted below
-          return { ...x, items: ui.otherBrowse?.entries ?? [], total: ui.otherBrowse?.total ?? 0, all: items };
-        }
-        const cut = x.group === "Other apps" && items.length > otherShown;
-        return { ...x, items: cut ? items.slice(0, otherShown) : items, total: items.length, all: items };
+        return { ...x, items, slots: [], total: items.length };
       })
-      // Other apps stay listed without a search: the note says how to find more.
-      .filter((x) => x.items.length > 0 || (x.group === "Other apps" && !q)),
+      // Other apps stay listed: their own line says when nothing matches.
+      .filter((x) => x.items.length > 0 || x.group === "Other apps"),
   );
-  const toInstall = $derived(sections.reduce((n, x) => n + x.all.filter((c) => !c.installed).length, 0));
-  const have = $derived(sections.reduce((n, x) => n + x.all.filter((c) => c.installed).length, 0));
+  const shownGroups = $derived(new Set(sections.map((x) => x.group)));
+  const curated = $derived(found.filter((c) => c.group !== "Other apps" && shownGroups.has(c.group as Group)));
+  // Other apps hides installed ones unless the setting shows them: then they are in the total too
+  const toInstall = $derived(curated.filter((c) => !c.installed).length + (shownGroups.has("Other apps") ? Math.max(0, otherTotal - (s.showInstalledInGetApps ? otherHave : 0)) : 0));
+  const have = $derived(curated.filter((c) => c.installed).length + (shownGroups.has("Other apps") ? otherHave : 0));
   const disks = $derived(
     [...store.status.disks]
       .sort((a, b) => b.free - a.free)
@@ -260,71 +299,69 @@
     </p>
   {/if}
 
-  {#each sections as sec, si (sec.group)}
-    <h2 class="grp" aria-label="{sec.title}, {sec.from}">
-      <span class="gt">
-        <svg class="brush" viewBox="0 0 400 24" preserveAspectRatio="none" aria-hidden="true"><path d={BRUSH} fill={sec.color} fill-opacity="0.5" /></svg>
-        <span class="gn">{sec.title}</span>
-      </span>
-      <span class="from">, {sec.from}</span>
-      {#if sec.group === "Adobe" && store.ccDown}<span class="warn">Creative Cloud services are not running</span>{:else}<span class="cnt">{countOf(sec.total, "app")}</span>{/if}
-    </h2>
-    {#if sec.group === "Other apps"}
-      <p class="srcnote">{OTHER_NOTE}{q ? "" : browsing ? "" : " Browse all or search to find the rest."}</p>
-      {#if !q}
-        <div class="omode">
-          <Segmented options={modeOpts} value={ui.otherMode} onchange={(v) => (ui.otherMode = v)} label="Other apps to show" />
-          {#if ui.otherPackages}<span class="size">{catalogNote(ui.otherPackages)}</span>{/if}
-        </div>
-      {/if}
-      {#if browsing}
+  {#if catalog}
+    {#each sections as sec, si (sec.group)}
+      <h2 class="grp" aria-label="{sec.title}, {sec.from}">
+        <span class="gt">
+          <svg class="brush" viewBox="0 0 400 24" preserveAspectRatio="none" aria-hidden="true"><path d={BRUSH} fill={sec.color} fill-opacity="0.5" /></svg>
+          <span class="gn">{sec.title}</span>
+        </span>
+        <span class="from">, {sec.from}</span>
+        {#if sec.group === "Adobe" && store.ccDown}<span class="warn">Creative Cloud services are not running</span>{:else}<span class="cnt">{countOf(sec.total, "app")}</span>{/if}
+      </h2>
+      {#if sec.group === "Other apps"}
         {@const b = ui.otherBrowse}
-        <div class="chips" role="group" aria-label="Category">
-          <button class="chip" class:on={!b?.category} aria-pressed={!b?.category} onclick={() => setBrowse(null, b?.letter ?? null)}>All</button>
-          {#each b?.categories ?? [] as k (k.name)}
-            {#if k.count > 0}
-              <button class="chip" class:on={b?.category === k.name} aria-pressed={b?.category === k.name} onclick={() => setBrowse(k.name, b?.letter ?? null)}>{k.name}<span class="n">{k.count.toLocaleString("en-US")}</span></button>
-            {/if}
-          {/each}
+        <div class="otools">
+          <div class="chips" role="group" aria-label="Category">
+            <button class="chip" class:on={!ui.otherCategory} aria-pressed={!ui.otherCategory} onclick={() => (ui.otherCategory = null)}>All</button>
+            {#each b?.categories ?? [] as k (k.name)}
+              {#if k.count > 0 || ui.otherCategory === k.name}
+                <button class="chip" class:on={ui.otherCategory === k.name} aria-pressed={ui.otherCategory === k.name} onclick={() => (ui.otherCategory = k.name)}>{k.name}<span class="n">{k.count.toLocaleString("en-US")}</span></button>
+              {/if}
+            {/each}
+          </div>
+          <Select options={sortOpts} value={ui.otherSort} onchange={setSort} width={170} height={28} label="Sort Other apps" title="Sort" />
         </div>
-        <div class="letters" role="group" aria-label="First letter">
-          <button class="let" class:on={!b?.letter} aria-pressed={!b?.letter} onclick={() => setBrowse(b?.category ?? null, null)}>All</button>
+        <div class="letters" role="group" aria-label="First letter" bind:this={letterRow}>
+          <button class="let" class:on={!ui.otherLetter} aria-pressed={!ui.otherLetter} onclick={() => (ui.otherLetter = null)}>All</button>
           {#each LETTERS as l (l)}
-            <button class="let" class:on={b?.letter === l} aria-pressed={b?.letter === l} title={l === "#" ? "Names that do not start with A to Z" : `Names that start with ${l}`} onclick={() => setBrowse(b?.category ?? null, l)}>{l}</button>
+            <button class="let" class:on={ui.otherLetter === l} aria-pressed={ui.otherLetter === l} title={l === "#" ? "Names that do not start with A to Z" : `Names that start with ${l}`} onclick={() => (ui.otherLetter = l)}>{l}</button>
+          {/each}
+        </div>
+        {#if ui.otherSort === "updated" && b && browseCurrent}<p class="srcnote">{datedNote(b.dated, b.total)}</p>{/if}
+        <div class:stale={!browseCurrent && browseBusy}>
+          <VirtualGrid items={sec.slots} key={(c) => c.id} onrange={onRange}>
+            {#snippet cell(c: CatalogEntry, i: number)}
+              <div class="slot" use:enterOnce={{ id: c.id, i }}>
+                <CatalogCard {c} eager />
+              </div>
+            {/snippet}
+            {#snippet placeholder()}
+              <div class="card skel" aria-hidden="true"><Paint kind="blob" fill="#1c1c1c" /></div>
+            {/snippet}
+          </VirtualGrid>
+        </div>
+        {#if browseBusy && !sec.slots.length}
+          <div class="grid" aria-hidden="true">
+            {#each Array(8) as _, i (i)}<div class="card skel" style="animation-delay:{i * 80}ms"><Paint kind="blob" fill="#1c1c1c" /></div>{/each}
+          </div>
+        {/if}
+        {#if browseError}
+          <p class="none">Could not load more apps. {browseError} <button class="more" onclick={() => (ui.otherBrowse && browseCurrent ? ((browseError = null), fill()) : loadBrowse(otherKey))}>Try again</button></p>
+        {:else if !browseBusy && browseCurrent && b && b.total === 0}
+          <p class="none">{otherQuery ? `No Other apps match "${ui.getQuery}"${b.category || b.letter ? " with these filters" : ""}.` : b.letter ? `No apps here start with ${b.letter}.` : "No apps in this category."}</p>
+        {/if}
+      {:else}
+        <div class="grid">
+          {#each sec.items as c, i (c.id)}
+            <div class="slot" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
+              <CatalogCard {c} eager={si === 0 && i < 8} />
+            </div>
           {/each}
         </div>
       {/if}
-    {/if}
-    {#if sec.group === "Other apps" && browsing}
-      <div class="grid">
-        {#each sec.items as c, i (c.id)}
-          <div class="slot" use:enter={i % BROWSE_PAGE}>
-            <CatalogCard {c} eager={i < 8} />
-          </div>
-        {/each}
-        {#if browseBusy}
-          {#each Array(sec.items.length ? 4 : 8) as _, i (i)}<div class="card skel" aria-hidden="true" style="animation-delay:{i * 80}ms"><Paint kind="blob" fill="#1c1c1c" /></div>{/each}
-        {/if}
-      </div>
-      {#if browseError}
-        <p class="none">Could not load the catalog. {browseError} <button class="lnk" onclick={() => ui.otherBrowse ? loadBrowse(ui.otherBrowse.category, ui.otherBrowse.letter, true) : loadBrowse(null, null, false)}>Retry</button></p>
-      {:else if !browseBusy && ui.otherBrowse && ui.otherBrowse.total === 0}
-        <p class="none">{ui.otherBrowse.letter ? `No apps here start with ${ui.otherBrowse.letter}.` : "No apps in this category."}</p>
-      {/if}
-      {#if browseMore}<div class="sentinel" use:sentinel aria-hidden="true"></div>{/if}
-    {:else}
-      <div class="grid">
-        {#each sec.items as c, i (c.id)}
-          <div class="slot" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
-            <CatalogCard {c} eager={si === 0 && i < 8} />
-          </div>
-        {/each}
-      </div>
-      {#if sec.items.length < sec.total}
-        <button class="more" onclick={() => (otherShown += PAGE)}>Show {Math.min(PAGE, sec.total - sec.items.length)} more of {sec.total}</button>
-      {/if}
-    {/if}
-  {/each}
+    {/each}
+  {/if}
 </section>
 
 <style>
@@ -416,15 +453,19 @@
     font-size: 12px;
     color: var(--text-3);
   }
-  .omode {
+  .otools {
     margin-top: 12px;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
+    justify-content: space-between;
     gap: 12px;
   }
-  .omode .size {
-    font-size: 12px;
-    color: var(--text-3);
+  .otools .chips {
+    margin-top: 0;
+  }
+  .stale {
+    opacity: 0.6;
+    transition: opacity var(--t-fast) ease;
   }
   .chips,
   .letters {
@@ -463,9 +504,6 @@
     margin-left: 6px;
     color: var(--text-3);
     font-weight: 400;
-  }
-  .sentinel {
-    height: 1px;
   }
   .grp .cnt,
   .grp .warn {

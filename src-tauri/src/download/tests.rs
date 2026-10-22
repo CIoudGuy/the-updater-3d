@@ -612,3 +612,61 @@ fn a_damaged_download_note_is_ignored() {
     assert_eq!(load_meta(&note).unwrap().segs[0].pos, 50);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+fn cf(name: &str, mb: u64, days: u64, in_use: bool, keep: bool, done: bool) -> CacheFile {
+    CacheFile { path: PathBuf::from(name), size: mb << 20, age: Duration::from_secs(days * 86_400), in_use, keep, done }
+}
+
+#[test]
+fn cache_drops_done_and_old_installers_but_never_open_jobs_files() {
+    let files = vec![
+        cf("self-old", 6, 0, false, false, true),
+        cf("old", 100, 20, false, false, false),
+        cf("old-open-job", 100, 20, true, false, false),
+        cf("old-kept-for-rollback", 100, 20, false, true, false),
+        cf("recent", 100, 2, false, false, false),
+    ];
+    let gone = cache_victims(&files, CACHE_MAX_AGE, CACHE_CAP);
+    assert_eq!(gone, vec![PathBuf::from("self-old"), PathBuf::from("old")]);
+}
+
+#[test]
+fn cache_above_the_cap_loses_the_oldest_first_and_kept_ones_last() {
+    let gb = 1024;
+    let files = vec![
+        cf("open", 4 * gb, 9, true, false, false),
+        cf("kept-oldest", gb, 10, false, true, false),
+        cf("a-older", gb, 5, false, false, false),
+        cf("b-newer", gb, 1, false, false, false),
+    ];
+    // 7 GB with a 5 GB cap: the two not kept go, oldest first; the open job's file stays.
+    let gone = cache_victims(&files, CACHE_MAX_AGE, 5 * (gb << 20));
+    assert_eq!(gone, vec![PathBuf::from("a-older"), PathBuf::from("b-newer")]);
+    // Still too big: then the kept one, never the open job's file.
+    let gone = cache_victims(&files, CACHE_MAX_AGE, 4 * (gb << 20));
+    assert_eq!(gone, vec![PathBuf::from("a-older"), PathBuf::from("b-newer"), PathBuf::from("kept-oldest")]);
+    assert!(cache_victims(&files, CACHE_MAX_AGE, 0).iter().all(|p| p != &PathBuf::from("open")));
+}
+
+#[test]
+fn trim_cache_deletes_files_with_their_notes_and_keeps_open_jobs() {
+    let root = scratch("trim");
+    let mine = root.join("self").join("setup.exe");
+    let job = root.join("other").join("Pkg.A").join("a.exe");
+    let unpacked = root.join("rum").join("bin").join("tool.exe");
+    let rum_zip = root.join("rum").join("tool.zip");
+    for f in [&mine, &job, &unpacked, &rum_zip] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, b"x").unwrap();
+    }
+    std::fs::write(sidecar(&mine), b"{}").unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&mine).unwrap().set_modified(old).unwrap();
+    let busy: std::collections::HashSet<PathBuf> = [job.clone(), rum_zip.clone()].into_iter().collect();
+    trim_cache(&root, &busy, false);
+    // This app's own installer from an earlier update goes, with its note and its empty folder.
+    assert!(!mine.exists() && !sidecar(&mine).exists() && !root.join("self").exists());
+    // Files of jobs still open stay, and what such a job unpacked next to its download.
+    assert!(job.exists() && unpacked.exists() && rum_zip.exists());
+    let _ = std::fs::remove_dir_all(&root);
+}

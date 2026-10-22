@@ -1,6 +1,7 @@
 // In-memory mock backend for browser preview (npm run dev).
-// Dev switch: ?state=ready (default) | current | repair | updating | installing | first | offline | blocked | failed | lowdisk | ccdown | signedout
+// Dev switch: ?state=ready (default) | current | repair | updating | installing | queue | first | offline | blocked | failed | lowdisk | ccdown | signedout | noadobe
 import type { Commands } from "./commands";
+import { matchRank } from "./browse";
 import type {
   ActivityEntry,
   AppEntry,
@@ -54,6 +55,8 @@ function app(p: Partial<AppEntry> & Pick<AppEntry, "id" | "source" | "name" | "c
     running: false,
     canUninstall: true,
     canRollback: true,
+    readOnly: false,
+    storeUrl: null,
     channel: null,
     note: null,
     jobId: null,
@@ -153,6 +156,32 @@ function seedApps(): AppEntry[] {
       version: "6000.3.20f1", latest: "6000.3.27f1", status: "update", updateSize: 3.94 * GB, sizeOnDisk: 7.9 * GB, note: "6000.3.27f1 installs next to 6000.3.20f1, your 6000.3.20f1 stays",
       installDir: "C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.20f1", updatedAt: iso(40 * DAY), tagline: "Game engine and real-time 3D",
     }),
+    // Microsoft Store copies: listed, the Store updates and removes them.
+    app({
+      id: "blender:store:4.5lts", source: "blender", group: "Blender", name: "Blender 4.5 (Microsoft Store)", code: "Bl", fg: "#EA7600", bg: "#2A1500",
+      version: "4.5.3", latest: null, status: "current", sizeOnDisk: 1.1 * GB, channel: "lts", readOnly: true, canUninstall: false, canRollback: false,
+      storeUrl: "ms-windows-store://pdp/?PFN=BlenderFoundation.Blender4.5LTS_ppwjx1n5r4v9t",
+      installDir: "C:\\Program Files\\WindowsApps\\BlenderFoundation.Blender4.5LTS_4.5.3.0_x64__ppwjx1n5r4v9t", updatedAt: iso(15 * DAY),
+      tagline: "Updated by the Microsoft Store", note: "Updated by the Microsoft Store",
+    }),
+    app({
+      id: "tools:krita:store", source: "tools", group: "More apps", name: "Krita (Microsoft Store)", code: "Kr", fg: "#E38BC4", bg: "#2A1222",
+      version: "5.2.9", latest: null, status: "current", sizeOnDisk: 640 * MB, readOnly: true, canUninstall: false, canRollback: false,
+      storeUrl: "ms-windows-store://pdp/?PFN=49800KritaProject.Krita_n3kgb906j1zjg",
+      installDir: "C:\\Program Files\\WindowsApps\\49800KritaProject.Krita_5.2.9.0_x64__n3kgb906j1zjg", updatedAt: iso(50 * DAY),
+      tagline: "Updated by the Microsoft Store", note: "Updated by the Microsoft Store",
+    }),
+    // One winget app installed for all users and again for this user: two copies.
+    app({
+      id: "other:Notepad++.Notepad++", source: "other", group: "Other apps", name: "Notepad++ (all users)", code: "No", fg: "#9CD67A", bg: "#16240F",
+      version: "8.8.5", latest: "8.8.6", status: "update", sizeOnDisk: 15 * MB,
+      installDir: "C:\\Program Files\\Notepad++", updatedAt: iso(30 * DAY), tagline: "A free source code editor",
+    }),
+    app({
+      id: "other:Notepad++.Notepad++:user", source: "other", group: "Other apps", name: "Notepad++ (this user)", code: "No", fg: "#9CD67A", bg: "#16240F",
+      version: "8.8.6", latest: "8.8.6", status: "current", sizeOnDisk: 14 * MB,
+      installDir: "C:\\Users\\Alex\\AppData\\Local\\Programs\\Notepad++", updatedAt: iso(4 * DAY), tagline: "A free source code editor",
+    }),
   );
   if (MODE === "current") {
     const ps = list.find((x) => x.id === "adobe:PHSP")!;
@@ -250,15 +279,9 @@ const SEARCH_LINES: Record<string, string> = {
   "other:Mozilla.Firefox": "Mozilla Firefox is free and open source software, built by a community of thousands from all over the world.",
   "other:7zip.7zip": "Free and open source file archiver with a high compression ratio.",
 };
-/** Winget catalog packages a Get apps search finds (Other apps). */
-const OTHER_SEARCH: CatalogEntry[] = [
-  c("other:Notepad++.Notepad++", "other", "Notepad++", "No", "#9FD69B", "#14261A", "8.9.8.1", null, "Notepad++.Notepad++", "Other apps", AD),
-  c("other:Mozilla.Firefox", "other", "Mozilla Firefox (en-US)", "Mf", "#E8736A", "#2C1311", "157.0.1", null, "Mozilla.Firefox", "Other apps", AD),
-  c("other:7zip.7zip", "other", "7-Zip", "7z", "#E4E4EC", "#24242C", "26.05", null, "7zip.7zip", "Other apps", AD),
-];
-/** The whole winget catalog for Browse all: a few real apps and many made up ones, by name. */
+/** The whole winget catalog for Other apps: real apps (the starter list, in its order) and many made up ones, by name. */
 const BROWSE_CATS = ["Browsers", "Communication", "Media", "Graphics and 3D", "Development", "Games", "Utilities", "Office", "Security", "Networking", "System", "Other"];
-type Browsed = CatalogEntry & { category: string };
+type Browsed = CatalogEntry & { category: string; popular: number; date: string | null };
 const BROWSE: Browsed[] = (() => {
   const real: [string, string, string, string, string][] = [
     ["Mozilla.Firefox", "Mozilla Firefox", "Browsers", "Mozilla Firefox is free and open source software, built by a community of thousands from all over the world.", ""],
@@ -273,7 +296,16 @@ const BROWSE: Browsed[] = (() => {
     ["SumatraPDF.SumatraPDF", "Sumatra PDF", "Office", "Small, fast PDF, eBook and comic book reader.", ""],
     ["voidtools.Everything", "Everything", "Utilities", "Locates files and folders by name instantly.", ""],
     ["Rufus.Rufus", "Rufus", "Utilities", "Creates bootable USB flash drives.", "only a portable copy"],
+    ["Google.Chrome", "Google Chrome", "Browsers", "A fast, secure and free web browser built for the modern web.", ""],
+    ["7zip.7zip", "7-Zip", "Utilities", "Free and open source file archiver with a high compression ratio.", ""],
+    ["VideoLAN.VLC", "VLC media player", "Media", "Free and open source cross-platform multimedia player.", ""],
+    ["Microsoft.VisualStudioCode", "Microsoft Visual Studio Code", "Development", "Code editing. Redefined.", ""],
+    ["Spotify.Spotify", "Spotify", "Media", "Music for everyone.", "only a Store or MSIX package"],
+    ["Zoom.Zoom", "Zoom Workplace", "Communication", "Video meetings, chat and phone.", ""],
+    ["Python.Python.3.13", "Python 3.13", "Development", "Python programming language.", ""],
+    ["Google.ChromeRemoteDesktopHost", "Chrome Remote Desktop Host", "Networking", "Remote access to your computer.", ""],
   ];
+  const popular = ["Google.Chrome", "Mozilla.Firefox", "Discord.Discord", "Zoom.Zoom", "Spotify.Spotify", "VideoLAN.VLC", "Valve.Steam", "7zip.7zip", "Notepad++.Notepad++", "Microsoft.VisualStudioCode", "Python.Python.3.13", "Audacity.Audacity", "Inkscape.Inkscape", "Bitwarden.Bitwarden", "voidtools.Everything", "SumatraPDF.SumatraPDF", "WireGuard.WireGuard"];
   const a = "Swift Bright Open Quiet Tiny Lucid Prime Nova Echo Pixel Rapid Clear Solid Fluent Atlas Orbit Ember Polar Cedar Zen".split(" ");
   const b = "Notes Player Browser Studio Sync Shell Vault Chat Paint Board Mail Tunnel Monitor Reader Forge Launcher Capture Writer Grid Proxy".split(" ");
   const kinds: Record<string, string> = { Notes: "Office", Player: "Media", Browser: "Browsers", Studio: "Graphics and 3D", Sync: "Utilities", Shell: "Development", Vault: "Security", Chat: "Communication", Paint: "Graphics and 3D", Board: "Office", Mail: "Communication", Tunnel: "Networking", Monitor: "System", Reader: "Office", Forge: "Development", Launcher: "Games", Capture: "Media", Writer: "Office", Grid: "Other", Proxy: "Networking" };
@@ -282,7 +314,10 @@ const BROWSE: Browsed[] = (() => {
   const add = (id: string, name: string, category: string, i: number, short: string, blocked: string) => {
     const [fg, bg] = tints[i % tints.length];
     const code = name.replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "Ap";
-    out.push({ ...c(`other:${id}`, "other", name, code, fg, bg, `${1 + (i % 9)}.${i % 13}.${i % 4}`, null, short, "Other apps", { pickVersion: true }), category, blocked: blocked || null });
+    const p = popular.indexOf(id);
+    // about two in three manifests give a release date
+    const date = i % 3 === 0 ? null : `2026-${String(1 + (i % 10)).padStart(2, "0")}-${String(1 + (i % 28)).padStart(2, "0")}`;
+    out.push({ ...c(`other:${id}`, "other", name, code, fg, bg, `${1 + (i % 9)}.${i % 13}.${i % 4}`, null, short, "Other apps", { pickVersion: true }), category, blocked: blocked || null, popular: p < 0 ? 1e9 : p, date });
   };
   real.forEach(([id, name, cat, short, blocked], i) => add(id, name, cat, i, short, blocked));
   for (let i = 0; out.length < 15724; i++) {
@@ -294,6 +329,7 @@ const BROWSE: Browsed[] = (() => {
   return out;
 })();
 const BROWSE_KNOWN = new Set<string>();
+let browseWarm = false;
 function browseLetter(name: string): string {
   const ch = [...name].find((x) => /[\p{L}\p{N}]/u.test(x)) ?? "";
   return /[A-Za-z]/.test(ch) ? ch.toUpperCase() : "#";
@@ -315,9 +351,38 @@ function browseDetailsLater(entries: CatalogEntry[]) {
     );
   }, 700);
 }
+/** Icons the backend found for browsed entries so far. */
+const BROWSE_ICONS = new Map<string, string>();
+/** Icons are found a moment after a page is shown, some later than others; a few apps have none. */
+function browseIconsLater(entries: CatalogEntry[]) {
+  for (const e of entries) {
+    if (BROWSE_ICONS.has(e.id)) continue;
+    const h = [...e.id].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
+    if (h % 9 === 0) continue;
+    // one in six is a dark logo on a transparent background, like Spotify's
+    const dark = h % 6 === 1;
+    const fill = dark ? "#121212" : e.fg;
+    const url = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="${fill}"/><circle cx="24" cy="24" r="8" fill="${dark ? "#2a2a2a" : "white"}" fill-opacity=".85"/></svg>`)}`;
+    BROWSE_ICONS.set(e.id, "");
+    setTimeout(() => {
+      BROWSE_ICONS.set(e.id, url);
+      iconBatch.push({ id: e.id, iconUrl: url });
+      if (!iconTimer) iconTimer = setTimeout(flushIcons, 150);
+    }, 250 + (h % 1400));
+  }
+}
+let iconBatch: { id: string; iconUrl: string }[] = [];
+let iconTimer: ReturnType<typeof setTimeout> | undefined;
+function flushIcons() {
+  iconTimer = undefined;
+  const b = iconBatch;
+  iconBatch = [];
+  if (b.length) emit("other_icons", b);
+}
 /** A browsed entry as the backend sends it: the package id as its line until the manifest is read. */
 function browseShown(e: Browsed): CatalogEntry {
-  const { category: _, ...x } = e;
+  const { category: _, popular: _p, date: _d, ...x } = e;
+  x.iconUrl = BROWSE_ICONS.get(e.id) || null;
   const installed = apps.some((a) => a.id === e.id);
   if (BROWSE_KNOWN.has(e.id)) return { ...x, description: x.description ?? longer(x.tagline), installed };
   return { ...x, tagline: e.id.slice(6), description: null, blocked: null, installed };
@@ -584,7 +649,8 @@ function downloadsRunning() {
 }
 
 function startMore() {
-  const running = jobs.filter((j) => activeState(j.state)).length;
+  // like the backend: only downloads use a slot, a downloaded job waiting to install does not
+  const running = jobs.filter((j) => j.state === "downloading" || (j.state === "installing" && j.total === 0)).length;
   let slots = settings.parallelDownloads - running;
   for (const j of jobs) {
     if (slots <= 0) break;
@@ -656,6 +722,31 @@ function mockDetail(j: Job): string {
   return j.total > 8 * MB ? `Downloading over 6 connections from ${host}` : `Downloading from ${host}`;
 }
 
+/** Live install detail like the backend's: from the installer's log, the programs it runs and its folder. `f` is 0..1 through the install. */
+function mockInstallDetail(j: Job, f: number): string {
+  const pick = (steps: string[]) => steps[Math.min(steps.length - 1, Math.max(0, Math.floor(f * steps.length)))];
+  const n = (total: number) => Math.max(1, Math.round(Math.min(1, Math.max(0, (f - 0.3) / 0.4)) * total)).toLocaleString("en-US");
+  if (f < 0.1) return "Checking the SHA-256 checksum";
+  if (j.appId.startsWith("blender")) return f < 0.85 ? `Unpacking ${n(4312)} of 4,312 files, usually takes about 1 min` : "Adding the Start menu shortcut";
+  if (j.appId.startsWith("adobe")) return pick(["Running Set-up.exe", "Running HDBox.exe", "Installing the Visual C++ runtime", `Copied ${Math.round(f * 900)} MB of about 1.1 GB`, "Optimizing .NET code"]);
+  if (j.appId.startsWith("other:Notepad") || j.appId.startsWith("tools:krita")) {
+    return pick(["Starting the install", `Copying files (${n(212)}): Qt6WebEngineCore.dll`, `Copying files (${n(212)}): plugins\\platforms.dll`, "Creating shortcuts", "Running the installer's own steps"]);
+  }
+  return pick([
+    "Checking disk space",
+    "Removing the old version",
+    `Copying files (${n(1842)} of 1,842), copied ${Math.round(f * 800)} MB of about 1.4 GB`,
+    "Installing the Visual C++ runtime",
+    "Registering, usually takes about 3 min",
+  ]);
+}
+
+/** Live uninstall detail: the folder emptying out. */
+function mockRemoveDetail(j: Job): string {
+  if (j.progress < 0.3) return "Running the uninstaller silently";
+  return `Removing files, ${Math.max(1, Math.round((1 - j.progress) * 400))} MB left`;
+}
+
 function tick(dt: number) {
   let changed = false;
   startMore();
@@ -676,6 +767,9 @@ function tick(dt: number) {
         j.eta = 8;
         j.step = "Installing, step 1 of 4";
         j.detail = "Checking the SHA-256 checksum";
+        // like the backend: one installer at a time, the others wait their turn in queue order
+        j.ready = true;
+        j.cancelable = true;
       }
       changed = true;
     } else if (j.state === "installing" || j.state === "verifying") {
@@ -683,7 +777,21 @@ function tick(dt: number) {
         if (a) syncApp(a, j);
         continue;
       }
-      const rate = j.total > 0 ? 0.2 / 6 : 1 / 2; // seconds to finish the install part
+      if (j.ready) {
+        const holder = jobs.find((x) => !x.ready && (x.state === "installing" || x.state === "verifying" || x.state === "blocked") && x.total > 0);
+        const first = jobs.find((x) => x.ready && x.state === "installing");
+        if (holder || first !== j) {
+          j.step = "Waiting for another install to finish";
+          j.detail = holder ? `${holder.name} is installing now` : "";
+          j.eta = null;
+          if (a) syncApp(a, j);
+          continue;
+        }
+        j.ready = false;
+        j.cancelable = false;
+        changed = true;
+      }
+      const rate = j.total > 0 ? 0.2 / (MODE === "queue" ? 30 : 6) : 1 / 2; // seconds to finish the install part
       if (a?.running && j.total > 0 && MODE === "blocked" && j.progress >= 0.8) {
         j.state = "blocked";
         j.blockedBy = [a.id === "adobe:SBSTD" ? "Substance3DDesigner.exe" : "app.exe"];
@@ -697,7 +805,7 @@ function tick(dt: number) {
         j.progress = Math.min(1, j.progress + rate * dt);
         const step = Math.min(4, 1 + Math.floor(((j.progress - 0.8) / 0.2) * 4));
         j.step = j.total > 0 ? `Installing, step ${Math.max(1, step)} of 4` : "Removing";
-        j.detail = j.total > 0 ? ["Checking the SHA-256 checksum", "Running the installer silently", "Unpacking 1,234 files", "Removing the old version"][Math.max(1, step) - 1] : "Running the uninstaller silently";
+        j.detail = j.total > 0 ? mockInstallDetail(j, (j.progress - 0.8) / 0.2) : mockRemoveDetail(j);
         j.eta = Math.max(1, (1 - j.progress) / rate);
         if (j.progress >= 1) finish(j);
       }
@@ -709,6 +817,22 @@ function tick(dt: number) {
     emit("jobs", jobs);
     emit("apps", apps);
   }
+}
+
+// ---------- Adobe on or off ----------
+/** Adobe apps while the source is off: the backend does not read them, so they are not listed. */
+let adobeAway: AppEntry[] = [];
+function setAdobe(on: boolean) {
+  if (on) {
+    apps = [...adobeAway, ...apps.filter((a) => a.source !== "adobe")];
+    adobeAway = [];
+    // like the backend: switching a source on checks again
+    void handlers.check_now({});
+  } else {
+    adobeAway = apps.filter((a) => a.source === "adobe");
+    apps = apps.filter((a) => a.source !== "adobe");
+  }
+  emit("apps", apps);
 }
 
 // ---------- scenarios ----------
@@ -759,6 +883,14 @@ function setup() {
     });
   }
   if (MODE === "signedout") status.signedIn = false;
+  if (MODE === "noadobe") {
+    // "No" at install on a PC without Creative Cloud
+    settings.sources.adobe = false;
+    status.ccInstalled = false;
+    status.ccRunning = false;
+    status.signedIn = false;
+    setAdobe(false);
+  }
   if (MODE === "updating") {
     for (const a of apps) if (a.status === "update") enqueue(a, "update", a.latest!, a.updateSize ?? 100 * MB);
     advance(2);
@@ -983,14 +1115,16 @@ const handlers: H = {
     emit("jobs", jobs);
   },
   open_app: () => {},
+  open_store_page: () => {},
   show_in_folder: () => {},
   get_versions: ({ appId }) => {
     const a = findApp(appId);
     refreshedLater(appId);
     return a ? clone(versionsFor(a)) : [];
   },
-  get_catalog: () => clone(catalogNow().filter((e) => settings.showInstalledInGetApps || !e.installed)),
+  get_catalog: () => clone(catalogNow().filter((e) => (settings.showInstalledInGetApps || !e.installed) && (settings.sources.adobe || e.source !== "adobe"))),
   window_ready: () => {},
+  allow_admin: () => {},
   take_route: () => null,
   open_logs_folder: () => {},
   prefs_preview: ({ appId }) =>
@@ -1009,22 +1143,26 @@ const handlers: H = {
     browseDetailsLater([e]);
     return e;
   },
-  async browse_other_apps({ category, letter, offset, limit }) {
-    await new Promise((r) => setTimeout(r, 260)); // the first page reads the index
-    const keep = (e: CatalogEntry) => settings.showInstalledInGetApps || !apps.some((a) => a.id === e.id);
-    const all = BROWSE.filter((e) => keep(e) && (!category || e.category === category) && (!letter || browseLetter(e.name) === letter));
-    const entries = all.slice(offset, offset + limit).map(browseShown);
+  async browse_other_apps({ query, category, letter, sort, offset, limit }) {
+    // the first page builds the list from the index; later pages are quick
+    await new Promise((r) => setTimeout(r, browseWarm ? 40 : 260));
+    browseWarm = true;
+    const keep = (e: Browsed) => settings.showInstalledInGetApps || !apps.some((a) => a.id === e.id);
+    // dates are known once a manifest was read (or kept from an earlier run: one in five)
+    const dated = (e: Browsed) => (BROWSE_KNOWN.has(e.id) || e.popular < 1e9 || e.name.length % 5 === 0 ? e.date : null);
+    const ranked = BROWSE.map((e) => ({ e, r: query ? matchRank(e.name, e.id.slice(6), query) : 0 })).filter((x) => x.r !== null && keep(x.e) && (!letter || browseLetter(x.e.name) === letter));
+    const categories = BROWSE_CATS.map((name) => ({ name, count: ranked.filter((x) => x.e.category === name).length }));
+    let all = ranked.filter((x) => !category || x.e.category === category);
+    const boost = (x: { e: Browsed; r: number | null }) => (x.e.popular < 1e9 ? Math.max(0, (x.r ?? 0) - 1) : (x.r ?? 0));
+    if (sort === "popular" && query) all = [...all].sort((x, y) => boost(x) - boost(y) || x.e.popular - y.e.popular || x.e.name.length - y.e.name.length);
+    else if (sort === "popular") all = [...all].sort((x, y) => (x.e.popular === y.e.popular ? 0 : x.e.popular - y.e.popular));
+    else if (sort === "za") all = [...all].reverse();
+    else if (sort === "updated") all = [...all].sort((x, y) => (dated(y.e) ?? "").localeCompare(dated(x.e) ?? ""));
+    const entries = all.slice(offset, offset + limit).map((x) => browseShown(x.e));
     browseDetailsLater(entries);
-    const categories = BROWSE_CATS.map((name) => ({ name, count: BROWSE.filter((e) => keep(e) && e.category === name).length }));
-    return { total: all.length, entries, packages: 15724, categories };
+    browseIconsLater(entries);
+    return { total: all.length, entries, packages: 15724, categories, dated: all.filter((x) => dated(x.e)).length };
   },
-  search_other_apps: ({ query }) =>
-    OTHER_SEARCH.filter((e) => e.name.toLowerCase().includes(query.toLowerCase()) || e.id.toLowerCase().includes(query.toLowerCase())).map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id) }))
-      .filter((e) => settings.showInstalledInGetApps || !e.installed)
-      .map((e) => {
-        browseDetailsLater([e]);
-        return BROWSE_KNOWN.has(e.id) ? { ...e, tagline: SEARCH_LINES[e.id] ?? e.tagline } : e;
-      }),
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
     refreshedLater(id);
@@ -1123,8 +1261,10 @@ const handlers: H = {
   },
   cancel_job({ jobId }) {
     const j = jobs.find((x) => x.id === jobId);
-    // like the backend: an installer that is running cannot be stopped safely
-    if (j && isOpen(j.state) && j.state !== "installing" && j.state !== "verifying") {
+    // like the backend: an installer that is running cannot be stopped safely (one waiting its turn can)
+    if (j && isOpen(j.state) && ((j.state !== "installing" && j.state !== "verifying") || j.cancelable)) {
+      j.ready = false;
+      j.cancelable = false;
       j.state = "canceled";
       j.speed = 0;
       j.eta = null;
@@ -1148,6 +1288,13 @@ const handlers: H = {
     emit("apps", apps);
   },
   reorder_jobs({ jobIds }) {
+    // downloaded jobs waiting for their install turn swap places among themselves
+    const ready = jobIds.filter((id, i) => jobIds.indexOf(id) === i && jobs.some((j) => j.id === id && j.ready));
+    const slots = jobs.flatMap((j, i) => (j.ready && ready.includes(j.id) ? [i] : []));
+    ready.forEach((id, k) => {
+      const p = jobs.findIndex((j) => j.id === id);
+      [jobs[p], jobs[slots[k]]] = [jobs[slots[k]], jobs[p]];
+    });
     const waiting = jobs.filter((j) => j.state === "waiting");
     const ordered = jobIds.map((id) => waiting.find((w) => w.id === id)).filter((x): x is Job => !!x);
     const rest = jobs.filter((j) => j.state !== "waiting");
@@ -1229,7 +1376,9 @@ const handlers: H = {
   },
 
   set_settings({ patch }) {
+    const adobeWas = settings.sources.adobe;
     settings = { ...settings, ...patch, sources: { ...settings.sources, ...(patch.sources ?? {}) } };
+    if (settings.sources.adobe !== adobeWas) setAdobe(settings.sources.adobe);
     emit("settings", settings);
     return clone(settings);
   },
@@ -1262,6 +1411,15 @@ export function handle<K extends keyof Commands>(cmd: K, args: Commands[K]["args
 
 // Failed scenario: a toast shortly after load
 if (MODE === "failed") setTimeout(() => emit("toast", { kind: "err", text: "Substance 3D Painter update failed. Error 183, files in use.", appId: "adobe:SBSTP" }), 1200);
+
+// Queue scenario: 24 jobs, one installer at a time, so most downloaded jobs wait for their turn
+if (MODE === "queue") {
+  handlers.update_all({});
+  for (const c of CATALOG.filter((x) => x.source !== "blender" && !findApp(x.id)).slice(0, Math.max(0, 24 - jobs.length))) handlers.install_app({ id: c.id, version: null });
+  advance(25);
+  emit("jobs", jobs);
+  emit("apps", apps);
+}
 
 // Installing scenario: the installer step is running, so Pause and Cancel are disabled
 if (MODE === "installing") {

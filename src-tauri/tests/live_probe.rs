@@ -136,11 +136,12 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
     println!("OBS Studio detected as {}", obs.version);
     assert_eq!(obs.version, "32.2.2");
     assert!(!obs.missing);
-    // Epic's new launcher (Preview) is installed here as 0.97.0, per user. It is found by its own
+    // Epic's new launcher (Preview) is installed here, per user. It is found by its own
     // setup program as uninstaller, never as the old MSI launcher.
     let epic = inst.iter().find(|i| i.id == "tools:epic").expect("Epic Games Launcher (Preview) is installed here");
     println!("Epic Games Launcher (Preview) detected as {} in {:?}", epic.version, epic.install_dir);
-    assert_eq!(epic.version, "0.97.0");
+    // 0.97.0 when this was written; the app has since updated it.
+    assert!(epic.version.starts_with("0."), "{}", epic.version);
     assert!(!epic.missing && epic.exe.as_ref().is_some_and(|e| e.ends_with("EpicGamesLauncher.exe")));
 
     let feed = tools::fetch(&inst).await.expect("more apps feed");
@@ -158,7 +159,8 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
     println!("epic latest {} size {:?} url {}", epic_rel.version, epic_rel.size, epic_rel.url);
     assert!(epic_rel.size.is_some_and(|n| n > 50_000_000));
     let up = tools::latest(epic, &inst, &feed).expect("epic latest");
-    assert!(updater_lib::version::newer(&up.version, &epic.version), "an update is offered for the installed 0.97.0: {}", up.version);
+    // Current once installed: no update offered for the same or a newer copy.
+    assert!(!updater_lib::version::newer(&epic.version, &up.version), "latest {} is not older than installed {}", up.version, epic.version);
     let ep = tools::plan_install("tools:epic", None, updater_lib::model::JobKind::Update, Some(epic), &inst, &feed, tools::Ctx { godot_root: &godot_root }).await.expect("epic plan");
     println!("epic plan: {:?} signer {:?} size {:?}", ep.steps.iter().map(|s| s.label().to_string()).collect::<Vec<_>>(), ep.downloads[0].signer, ep.downloads[0].size);
     assert_eq!(ep.downloads[0].signer.as_deref(), Some("Epic Games Inc."));
@@ -475,7 +477,10 @@ async fn other_apps_coverage_and_changelogs() {
     // them (newest manifest, then the icon search). The icons found are not saved.
     use updater_lib::sources::{browse, icons};
     let list = browse::list().expect("browse list");
-    let counts = browse::counts(&list, |_| true);
+    let mut counts = vec![0usize; browse::CATEGORIES.len()];
+    for i in &list.items {
+        counts[i.category] += 1;
+    }
     println!("\n=== browse all: {} entries of {} packages", list.items.len(), list.packages);
     for (n, c) in browse::CATEGORIES.iter().zip(&counts) {
         println!("    {n:<16} {c}");
@@ -495,7 +500,7 @@ async fn other_apps_coverage_and_changelogs() {
             let m = async { winget::manifest(winget::versions(&p).await.ok()?.first()?).await.ok() }.await;
             let d = m.as_ref().map(|m| browse::Detail::from_manifest(&p.hash, m));
             let pages: Vec<String> = m.iter().flat_map(|m| [m.package_url.clone(), m.publisher_url.clone()]).flatten().filter(|u| u.starts_with("http")).collect();
-            let icon = tokio::time::timeout(std::time::Duration::from_secs(60), icons::find(&p.id, m.as_ref().and_then(|m| m.icon_url.as_deref()), &pages)).await.ok().flatten().is_some();
+            let icon = tokio::time::timeout(std::time::Duration::from_secs(60), icons::find(&p.id, m.as_ref().and_then(|m| m.icon_url.as_deref()), &pages)).await.is_ok_and(|r| r.is_ok());
             (p.id, d, icon)
         })
         .buffer_unordered(6)
@@ -649,7 +654,7 @@ async fn other_apps_starter_list_and_icons() {
         .map(|id| async move {
             let src = other::icon_source_of(Some(feed_ref), &id).await;
             let got = match src {
-                Some(s) => icons::find(&id, s.icon.as_deref(), &s.pages).await.map(|g| (g.bytes.len(), g.ext, g.via)),
+                Some(s) => icons::find(&id, s.icon.as_deref(), &s.pages).await.ok().map(|g| (g.bytes.len(), g.ext, g.via)),
                 None => None,
             };
             (id, got)
@@ -674,4 +679,192 @@ async fn other_apps_starter_list_and_icons() {
     for m in misses {
         println!("  NO ICON {m}");
     }
+}
+
+/// Microsoft Store copies on this PC (read only: nothing is changed). Lists every Store package
+/// for this user, then what Blender and More apps make of them.
+#[test]
+#[ignore]
+fn store_copies_on_this_pc() {
+    use updater_lib::sources::msstore;
+    let pkgs = msstore::packages();
+    println!("--- {} Store packages for this user", pkgs.len());
+    for p in &pkgs {
+        println!("{:<60} {:<16} {:?}", p.family, p.version, p.install_dir.as_ref().map(|d| d.display().to_string()));
+    }
+    println!("--- listed as Store copies");
+    let found: Vec<_> = blender::store_copies(&pkgs).into_iter().chain(tools::store_copies(&pkgs)).collect();
+    for i in &found {
+        println!("{:<28} {:<34} {:<10} read_only={} exe={:?} store={:?}", i.id, i.name, i.version, i.read_only, i.exe.as_ref().map(|e| e.display().to_string()), i.store);
+        assert!(i.read_only && i.uninstall.is_none() && i.store.is_some());
+    }
+    if found.is_empty() {
+        println!("(none: no Blender or Krita from the Microsoft Store here)");
+    }
+}
+
+/// Other apps in Get apps: how quick the whole catalog list, its pages, orders and searches are,
+/// what the searches find first, and how much of a random sample gets an icon, a description,
+/// a version list and change notes (nothing is written to the icon cache).
+/// cargo test --release --test live_probe other_apps_catalog_browse -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn other_apps_catalog_browse_search_and_sample() {
+    use futures_util::StreamExt;
+    use std::collections::HashSet;
+    use std::time::Instant;
+    use updater_lib::sources::{browse, icons, other, winget};
+    winget::refresh_index(std::time::Duration::from_secs(6 * 3600)).await.expect("winget index");
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let t = Instant::now();
+    let list = browse::list().unwrap();
+    println!("list of {} entries ({} packages) built in {:.0} ms", list.items.len(), list.packages, ms(t));
+    let t = Instant::now();
+    let _ = browse::list().unwrap();
+    println!("list again (kept): {:.2} ms", ms(t));
+    let here = HashSet::new();
+    let req = |query: Option<&str>, sort: &str, offset: usize| browse::Request { query: query.map(String::from), category: None, letter: None, sort: Some(sort.into()), offset, limit: 60 };
+    let timed = |r: browse::Request| {
+        let t = Instant::now();
+        let (p, _) = browse::page_for(&list, &r, &here, false);
+        (p, ms(t))
+    };
+    let (p, a) = timed(req(None, "popular", 0));
+    println!("first page (popular): {:.1} ms, {} of {}; first: {:?}", a, p.entries.len(), p.total, p.entries.iter().take(5).map(|e| e.name.as_str()).collect::<Vec<_>>());
+    assert!(p.total > 10_000, "the whole catalog is listed");
+    let (_, b) = timed(req(None, "popular", 60));
+    let (_, c) = timed(req(None, "popular", 6000));
+    println!("next page: {b:.1} ms, page 101: {c:.1} ms");
+    for s in ["az", "za", "updated"] {
+        let (p, x) = timed(req(None, s, 0));
+        println!("sort {s}: {x:.1} ms, dated {} of {}, first: {:?}", p.dated, p.total, p.entries.iter().take(3).map(|e| e.name.as_str()).collect::<Vec<_>>());
+    }
+    let (p, x) = timed(browse::Request { category: Some("Browsers".into()), ..req(None, "popular", 0) });
+    println!("category Browsers: {x:.1} ms, {} entries", p.total);
+    println!("\n--- searches (top 5)");
+    let mut worst: f64 = 0.0;
+    for q in ["chrome", "vlc", "7zip", "obs", "blender", "vscode", "visual studio code", "discord", "steam", "python", "notepad", "spotify", "zoom"] {
+        let (p, x) = timed(req(Some(q), "popular", 0));
+        worst = worst.max(x);
+        let top: Vec<String> = p.entries.iter().take(5).map(|e| e.id.trim_start_matches("other:").to_string()).collect();
+        println!("{q:<20} {x:5.1} ms {:>5} found  {top:?}", p.total);
+    }
+    println!("slowest search: {worst:.1} ms");
+    let first = |q: &str| browse::page_for(&list, &req(Some(q), "popular", 0), &here, false).0.entries.first().map(|e| e.id.clone()).unwrap_or_default();
+    assert_eq!(first("chrome"), "other:Google.Chrome");
+    assert_eq!(first("vscode"), "other:Microsoft.VisualStudioCode");
+    assert_eq!(first("visual studio code"), "other:Microsoft.VisualStudioCode");
+    assert_eq!(first("vlc"), "other:VideoLAN.VLC");
+    assert_eq!(first("7zip"), "other:7zip.7zip");
+
+    // A random sample (fixed seed) of the whole list.
+    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut pick = HashSet::new();
+    while pick.len() < 100 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        pick.insert((seed % list.items.len() as u64) as usize);
+    }
+    let pkgs: Vec<winget::Pkg> = pick.into_iter().map(|i| list.items[i].pkg.clone()).collect();
+    let t = Instant::now();
+    let rows: Vec<(String, bool, bool, usize, bool, bool, String, bool)> = futures_util::stream::iter(pkgs)
+        .map(|p| async move {
+            let id = p.id.clone();
+            let m = match winget::versions(&p).await {
+                Ok(v) => match v.first() {
+                    Some(r) => winget::manifest(r).await.ok(),
+                    None => None,
+                },
+                Err(_) => None,
+            };
+            let desc = m.as_ref().is_some_and(|m| m.description.as_deref().is_some_and(|d| !d.trim().is_empty()) || m.long_description.is_some());
+            let icon = match other::icon_source_of(None, &id).await {
+                Some(s) => icons::find(&id, s.icon.as_deref(), &s.pages).await.is_ok(),
+                None => false,
+            };
+            let vers = other::catalog_versions(&format!("other:{id}"), None, &[]).await.unwrap_or_default();
+            let notes = vers.first().is_some_and(|v| !v.notes.is_empty() || v.notes_url.is_some());
+            let newest = vers.first().is_some_and(|v| !v.notes.is_empty());
+            let blocked = m.as_ref().map(|m| other::choose(m, &other::Want::fresh()).err().unwrap_or_default()).unwrap_or_else(|| "no manifest".into());
+            let dated = m.as_ref().is_some_and(|m| m.release_date.is_some());
+            (id, icon, desc, vers.len(), notes, newest, blocked, dated)
+        })
+        .buffer_unordered(6)
+        .collect()
+        .await;
+    let n = |f: &dyn Fn(&(String, bool, bool, usize, bool, bool, String, bool)) -> bool| rows.iter().filter(|r| f(r)).count();
+    println!("\n--- sample of {} in {:.0} s", rows.len(), t.elapsed().as_secs_f64());
+    println!("icon {}, description {}, version list {}, newest version with note lines {}, with lines or a notes link {}, installable {}, release date {}", n(&|r| r.1), n(&|r| r.2), n(&|r| r.3 > 0), n(&|r| r.5), n(&|r| r.4), n(&|r| r.6.is_empty()), n(&|r| r.7));
+    for r in &rows {
+        if !r.1 || !r.2 || r.3 == 0 || !r.4 {
+            println!("  GAP {:<48} icon {} desc {} versions {} notes {} {}", r.0, r.1, r.2, r.3, r.4, r.6);
+        }
+    }
+}
+
+/// Install data for the settings audit in Windows Sandbox: for each package, the newest silent
+/// installer with its checksum and the install steps, as JSON lines in U3D_OUT. The packages are
+/// the popular list, or the ids in the file U3D_IDS (one per line).
+/// cargo test --release --test live_probe sandbox_install_data -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn sandbox_install_data() {
+    use futures_util::StreamExt;
+    use updater_lib::sources::{other, winget, Step};
+    let out = std::env::var("U3D_OUT").expect("U3D_OUT");
+    let ids: Vec<String> = match std::env::var("U3D_IDS") {
+        Ok(f) => std::fs::read_to_string(f).unwrap().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+        Err(_) => other::POPULAR.iter().map(|(id, _)| id.to_string()).collect(),
+    };
+    winget::refresh_index(std::time::Duration::from_secs(24 * 3600)).await.expect("index");
+    let got: Vec<(String, Option<other::PkgFeed>)> = futures_util::stream::iter(ids)
+        .map(|id| async move {
+            let pf = other::read_package(&id).await;
+            (id, pf)
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut lines = Vec::new();
+    for (id, pf) in got {
+        let mut row = serde_json::json!({ "id": id });
+        let skip = other::excluded_package(&id).map(str::to_string).or_else(|| other::handled_package(&id).then(|| "handled by its own source".to_string()));
+        match (skip, pf.as_ref().and_then(|p| p.latest.as_ref().map(|m| (p, m)))) {
+            (Some(why), _) => row["skip"] = why.into(),
+            (None, None) => row["skip"] = "not in the catalog".into(),
+            (None, Some((pf, m))) => match other::choose(m, &other::Want::fresh()) {
+                Err(e) => row["skip"] = e.into(),
+                Ok(i) => match other::build_plan(&pf.pkg, m, i, updater_lib::model::JobKind::Install, None, None) {
+                    Err(e) => row["skip"] = format!("{e:#}").into(),
+                    Ok(plan) => {
+                        let d = &plan.downloads[0];
+                        let dest = d.dest.to_string_lossy().to_string();
+                        let base = d.dest.parent().unwrap().to_string_lossy().to_string();
+                        let fix = |s: &str| s.replace(&dest, "{FILE}").replace(&base, "{BASE}").replace(&updater_lib::paths::logs().to_string_lossy().to_string(), "{LOGS}");
+                        let steps: Vec<serde_json::Value> = plan
+                            .steps
+                            .iter()
+                            .map(|s| match s {
+                                Step::Run { exe, args, ok_codes, .. } => serde_json::json!({ "t": "run", "exe": fix(&exe.to_string_lossy()), "args": args.iter().map(|a| fix(a)).collect::<Vec<_>>(), "ok": ok_codes }),
+                                Step::ExtractZip { zip, dest, .. } => serde_json::json!({ "t": "unzip", "zip": fix(&zip.to_string_lossy()), "dest": fix(&dest.to_string_lossy()) }),
+                                other => serde_json::json!({ "t": "other", "label": other.label() }),
+                            })
+                            .collect();
+                        row["name"] = m.name.clone().into();
+                        row["publisher"] = m.publisher.clone().into();
+                        row["version"] = m.version.clone().into();
+                        row["kind"] = i.kind.clone().into();
+                        row["scope"] = i.scope.clone().into();
+                        row["url"] = d.url.clone().into();
+                        row["sha256"] = d.sha256.clone().unwrap_or_default().into();
+                        row["file"] = d.dest.file_name().unwrap().to_string_lossy().to_string().into();
+                        row["steps"] = steps.into();
+                    }
+                },
+            },
+        }
+        lines.push(row.to_string());
+    }
+    std::fs::write(out, lines.join("\n")).unwrap();
 }

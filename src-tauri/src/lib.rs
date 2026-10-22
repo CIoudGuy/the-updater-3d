@@ -3,6 +3,7 @@ pub mod core;
 pub mod download;
 pub mod elevate;
 pub mod http;
+pub mod install_detail;
 pub mod model;
 pub mod notes;
 pub mod paths;
@@ -58,6 +59,8 @@ pub fn run() {
             let core = core::Core::new(app.handle().clone());
             app.manage(core.clone());
             tray::create(app.handle())?;
+            // Before the one-time default changes below mark this copy as started once.
+            let first_start = !core.persisted.lock().autostart_applied;
             // Checking in the background at sign-in is on by default: set it up once.
             {
                 let mut p = core.persisted.lock();
@@ -71,6 +74,17 @@ pub fn run() {
                         use tauri_plugin_autostart::ManagerExt;
                         let _ = app.autolaunch().enable();
                     }
+                }
+            }
+            // Adobe on or off from the installer's question (once; Settings can change it later).
+            {
+                let answer = store::installer_adobe_choice();
+                let mut p = core.persisted.lock();
+                let mut s = core.settings.write();
+                if store::apply_adobe_choice(&mut p, &mut s, answer.as_deref(), first_start, sources::adobe::cc_installed) {
+                    log::info!("Adobe apps {} (installer answer: {})", if s.sources.adobe { "on" } else { "off" }, answer.as_deref().unwrap_or("none"));
+                    store::save_settings(&s);
+                    store::save_state(&p);
                 }
             }
             // Keep the Windows startup entry in step with the setting (an uninstall or a cleanup
@@ -133,6 +147,7 @@ pub fn run() {
             commands::get_catalog_entry,
             commands::prefs_preview,
             commands::window_ready,
+            commands::allow_admin,
             commands::open_logs_folder,
             commands::take_route,
             commands::close_and_continue,
@@ -144,6 +159,7 @@ pub fn run() {
             commands::start_service,
             commands::stop_safe_services,
             commands::open_creative_cloud,
+            commands::open_store_page,
             commands::set_settings,
             commands::pick_folder,
             commands::clear_cache,
@@ -151,7 +167,6 @@ pub fn run() {
             commands::install_self_update,
             commands::test_notification,
             commands::catalog_versions,
-            commands::search_other_apps,
             commands::browse_other_apps,
             commands::quit_app,
         ])

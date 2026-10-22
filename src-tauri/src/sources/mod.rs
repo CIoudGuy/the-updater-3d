@@ -7,6 +7,8 @@ pub mod blender;
 pub mod browse;
 pub mod craft;
 pub mod icons;
+pub mod msstore;
+pub mod locate;
 pub mod other;
 pub mod tools;
 pub mod winget;
@@ -34,10 +36,32 @@ pub struct Installed {
     pub tagline: Option<String>,
     pub channel: Option<String>,
     pub missing: bool,
-    /// Managed elsewhere (Steam): shown, never updated by us.
+    /// Managed elsewhere (Steam, the Microsoft Store): shown, never updated or removed by us.
     pub read_only: bool,
     pub icon_remote: Option<String>,
     pub data: SourceData,
+    /// A Microsoft Store copy: its package, to open it and its Store page.
+    pub store: Option<StoreRef>,
+}
+
+/// A Microsoft Store (MSIX) package an installed copy came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreRef {
+    /// Package family name: "BlenderFoundation.Blender_ppwjx1n5r4v9t"
+    pub family: String,
+    /// The application id inside the package (from its manifest), to start it.
+    pub app: Option<String>,
+}
+
+impl StoreRef {
+    /// The app's page in the Microsoft Store app.
+    pub fn page_url(&self) -> String {
+        format!("ms-windows-store://pdp/?PFN={}", self.family)
+    }
+    /// What starts the app through the shell, when its application id is known.
+    pub fn launch_target(&self) -> Option<String> {
+        self.app.as_ref().map(|a| format!("shell:AppsFolder\\{}!{a}", self.family))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +83,8 @@ pub enum BlenderKind {
     Zip,
     Beta,
     Steam,
+    /// From the Microsoft Store, which updates it.
+    Store,
 }
 
 /// What a source knows about the newest version for an installed app.

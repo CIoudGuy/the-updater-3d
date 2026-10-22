@@ -44,6 +44,10 @@ export interface AppEntry {
   canUninstall: boolean;
   /** Older versions can be installed. */
   canRollback: boolean;
+  /** Steam or the Microsoft Store updates and removes it; this app only lists it. */
+  readOnly: boolean;
+  /** A Microsoft Store copy: its page in the Store app ("ms-windows-store://pdp/?PFN=..."). */
+  storeUrl: string | null;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */
@@ -152,6 +156,10 @@ export interface Job {
   finishedAt: string | null;
   /** installing, but only waiting (for its turn or for Creative Cloud), so Cancel is safe */
   cancelable?: boolean;
+  /** downloaded, waiting for its turn to run the installer (one installer runs at a time) */
+  ready?: boolean;
+  /** waiting for the user to allow admin rights ("Allow admin rights" in the Queue); nothing ran yet */
+  needsAdmin?: boolean;
 }
 
 export type ActivityKind = "update" | "install" | "uninstall" | "rollback" | "check" | "failure" | "service";
@@ -287,6 +295,14 @@ export interface EventMap {
   catalog_changed: null;
   /** descriptions and install verdicts of winget packages read in the background */
   other_details: OtherDetail[];
+  /** Other apps icons found in the background, a few at a time */
+  other_icons: OtherIcon[];
+}
+
+/** A found icon for a Get apps entry. */
+export interface OtherIcon {
+  id: string;
+  iconUrl: string;
 }
 
 /** What a winget package's manifest told about it, for a card already shown. */
@@ -305,4 +321,6 @@ export interface BrowsePage {
   /** packages in the whole winget catalog */
   packages: number;
   categories: { name: string; count: number }[];
+  /** entries of this selection with a known release date */
+  dated: number;
 }

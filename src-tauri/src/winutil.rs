@@ -53,6 +53,13 @@ pub struct UninstallEntry {
     /// Set for updates and hotfixes of another entry (`ParentKeyName`, `ReleaseType`).
     pub parent_key: String,
     pub release_type: String,
+    /// When the entry's key was last written (an installer that rewrites it updates this).
+    pub written: Option<std::time::SystemTime>,
+    /// A WiX Burn bundle (`BundleProviderKey` or `BundleCachePath`): an installer that runs a
+    /// chain of packages, registered with the cached installer as its program.
+    pub bundle: bool,
+    /// Windows Installer products that are part of this app (a bundle's packages), "{GUID}".
+    pub msi_parts: Vec<String>,
 }
 
 /// Every Add/Remove Programs entry from HKLM (64 and 32 bit views) and HKCU.
@@ -89,10 +96,20 @@ pub fn uninstall_entries() -> Vec<UninstallEntry> {
                 system_component: system == 1,
                 parent_key: s("ParentKeyName"),
                 release_type: s("ReleaseType"),
+                written: k.query_info().ok().and_then(|m| filetime(m.last_write_time.dwLowDateTime, m.last_write_time.dwHighDateTime)),
+                bundle: !s("BundleProviderKey").is_empty() || !s("BundleCachePath").is_empty(),
+                msi_parts: Vec::new(),
             });
         }
     }
     out
+}
+
+/// A Windows FILETIME (100 ns steps since 1601) as a system time.
+fn filetime(low: u32, high: u32) -> Option<std::time::SystemTime> {
+    let t = ((high as u64) << 32) | low as u64;
+    let unix = t.checked_sub(116_444_736_000_000_000)?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(unix.saturating_mul(100)))
 }
 
 /// Upgrade code of each installed Windows Installer product, keyed by product code (both
@@ -132,7 +149,8 @@ pub fn unpack_guid(p: &str) -> Option<String> {
 
 /// "20261014" -> "2026-10-14T00:00:00Z"
 pub fn install_date_iso(d: &str) -> Option<String> {
-    if d.len() == 8 && d.chars().all(|c| c.is_ascii_digit()) {
+    // Some installers write the day before the month ("20262408"): not a date.
+    if d.len() == 8 && d.chars().all(|c| c.is_ascii_digit()) && chrono::NaiveDate::parse_from_str(d, "%Y%m%d").is_ok() {
         Some(format!("{}-{}-{}T00:00:00Z", &d[0..4], &d[4..6], &d[6..8]))
     } else {
         None
@@ -576,6 +594,17 @@ pub fn task_xml(name: &str) -> Option<String> {
     with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name))?.Xml() }).ok().map(|b| b.to_string())
 }
 
+/// `task_xml`, telling a task that is not there (Ok(None)) from one that could not be read
+/// (the Task Scheduler not answering yet right after sign-in, say).
+pub fn task_xml_checked(name: &str) -> Result<Option<String>, String> {
+    match with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name))?.Xml() }) {
+        Ok(b) => Ok(Some(b.to_string())),
+        // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND
+        Err(e) if matches!(e.code().0 as u32, 0x8007_0002 | 0x8007_0003) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Start a scheduled task now.
 pub fn run_task(name: &str) -> bool {
     use windows::Win32::System::Variant::VARIANT;
@@ -829,4 +858,82 @@ mod tests {
         let env = std::env::var("PROCESSOR_ARCHITEW6432").or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE")).unwrap_or_default();
         assert_eq!(super::native_arch(), if env.eq_ignore_ascii_case("ARM64") { "arm64" } else { "x64" });
     }
+}
+
+// ---------------------------------------------------------------- installer process trees
+
+/// A Windows job object holding an installer and every process it starts, so the app can wait
+/// for an installer that hands the work to a child (a bootstrapper, a self-elevated copy, the
+/// real setup unpacked to a temp folder) and exits first. Breaking away is not allowed: Windows'
+/// shell asks for it whenever it may when a program is started with ShellExecute (as NSIS and
+/// most installers do), and falls back to staying in the job when it may not. Closing the job
+/// leaves its processes running.
+pub struct InstallerJob(windows::Win32::Foundation::HANDLE);
+
+// The handle is only used through the job functions, which may be called from any thread.
+unsafe impl Send for InstallerJob {}
+unsafe impl Sync for InstallerJob {}
+
+impl InstallerJob {
+    pub fn new() -> Option<InstallerJob> {
+        use windows::Win32::System::JobObjects::CreateJobObjectW;
+        unsafe {
+            let h = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+            let job = InstallerJob(h);
+            Some(job)
+        }
+    }
+
+    /// Put a process (started suspended) into the job.
+    pub fn add(&self, child: &std::process::Child) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+        unsafe { AssignProcessToJobObject(self.0, windows::Win32::Foundation::HANDLE(child.as_raw_handle())).is_ok() }
+    }
+
+    /// Ids of the processes in the job that are still running.
+    pub fn pids(&self) -> Vec<u32> {
+        use windows::Win32::System::JobObjects::*;
+        // Two u32 counts (assigned, listed), then the ids as ULONG_PTR.
+        let mut buf = vec![0usize; 1 + 1024];
+        unsafe {
+            if QueryInformationJobObject(Some(self.0), JobObjectBasicProcessIdList, buf.as_mut_ptr() as *mut _, (buf.len() * std::mem::size_of::<usize>()) as u32, None).is_err() {
+                return vec![];
+            }
+        }
+        let n = ((buf[0] as u64 >> 32) as usize).min(buf.len() - 1);
+        buf[1..1 + n].iter().map(|p| *p as u32).collect()
+    }
+}
+
+impl Drop for InstallerJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// Start the threads of a process created suspended.
+pub fn resume_process(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    let mut resumed = false;
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) else { return false };
+        let mut te = THREADENTRY32 { dwSize: std::mem::size_of::<THREADENTRY32>() as u32, ..Default::default() };
+        let mut more = Thread32First(snap, &mut te).is_ok();
+        while more {
+            if te.th32OwnerProcessID == pid {
+                if let Ok(t) = OpenThread(THREAD_SUSPEND_RESUME, false, te.th32ThreadID) {
+                    resumed |= ResumeThread(t) != u32::MAX;
+                    let _ = CloseHandle(t);
+                }
+            }
+            more = Thread32Next(snap, &mut te).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    resumed
 }

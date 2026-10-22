@@ -18,7 +18,9 @@ const IDLE_EXIT: Duration = Duration::from_secs(15 * 60);
 /// What the app sends to keep the helper from leaving while updates wait in the queue.
 const PING: &str = "ping";
 /// How long the scheduled task gets to start the helper before the normal prompt is used.
-const TASK_START: Duration = Duration::from_secs(20);
+/// How long the helper started by the task may take to connect. Right after sign-in the PC can
+/// be slow; past this the normal prompt is used (or, with no window open, none).
+const TASK_START: Duration = Duration::from_secs(60);
 
 fn idle_exit() -> Duration {
     // Debug builds can test the idle exit without waiting 15 minutes.
@@ -81,6 +83,39 @@ pub fn task_command(xml: &str) -> Option<PathBuf> {
     (!s.is_empty()).then(|| PathBuf::from(s))
 }
 
+/// What is known about the "Fewer admin prompts" task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskState {
+    /// It starts this exe.
+    Current,
+    /// It starts another exe (the app was moved or installed somewhere else).
+    OtherExe,
+    Missing,
+    /// It could not be read; nothing is known.
+    Unknown,
+}
+
+pub fn task_state() -> TaskState {
+    let Ok(me) = std::env::current_exe() else { return TaskState::Unknown };
+    match winutil::task_xml_checked(TASK_NAME) {
+        Ok(None) => TaskState::Missing,
+        Ok(Some(x)) => match task_command(&x) {
+            Some(c) if winutil::same_path(&c, &me) => TaskState::Current,
+            Some(_) => TaskState::OtherExe,
+            None => TaskState::Unknown,
+        },
+        Err(_) => TaskState::Unknown,
+    }
+}
+
+/// Should the app ask for the one admin prompt that sets up the task? Only with the setting on,
+/// with the window open (never at sign-in or from the background), once per run, and only when
+/// the task is known to be missing or to start another exe. An app update installs to the same
+/// path, so its task stays current and nothing is asked again.
+pub fn should_set_up_task(setting_on: bool, task: TaskState, window_open: bool, asked_this_run: bool) -> bool {
+    setting_on && window_open && !asked_this_run && matches!(task, TaskState::Missing | TaskState::OtherExe)
+}
+
 /// The "Fewer admin prompts" task exists and starts this exe (not another, maybe older, copy).
 pub fn task_is_current() -> bool {
     let Ok(me) = std::env::current_exe() else { return false };
@@ -135,9 +170,14 @@ fn lock_and_check(checks: &[FileCheck]) -> Result<Vec<std::fs::File>> {
 
 /// `execute`, after checking the step's files (they stay locked while it runs).
 pub fn execute_checked(step: &Step, checks: &[FileCheck]) -> StepResult {
+    execute_checked_with(step, checks, &|_| {})
+}
+
+/// `execute_checked`, telling `on_procs` the programs an installer started while it runs.
+pub fn execute_checked_with(step: &Step, checks: &[FileCheck], on_procs: &(dyn Fn(Vec<String>) + Sync)) -> StepResult {
     match lock_and_check(checks) {
         Ok(held) => {
-            let r = execute(step);
+            let r = execute_with(step, on_procs);
             drop(held);
             r
         }
@@ -270,8 +310,115 @@ fn remove_dir(p: &Path) -> Result<()> {
     Err(anyhow!("Could not remove {}: {}", p.display(), last.map(|e| e.to_string()).unwrap_or_default()))
 }
 
+/// Folders the helper processes of an installer run from: temp folders (a bootstrapper's
+/// unpacked setup, a self-elevated copy, an uninstaller copy), the download cache and the
+/// installer cache of bundles. The app an installer starts when it is done runs from its install
+/// folder, so it is never waited for.
+fn installer_roots() -> Vec<PathBuf> {
+    let mut v = vec![std::env::temp_dir(), paths::downloads()];
+    if let Some(w) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+        v.push(w.join("Temp"));
+        v.push(w.join("SystemTemp"));
+    }
+    if let Some(l) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        v.push(l.join("Temp"));
+    }
+    if let Some(p) = std::env::var_os("ProgramData").map(PathBuf::from) {
+        v.push(p.join("Package Cache"));
+    }
+    v
+}
+
+/// Is a process the installer started still part of the install? Windows Installer, another
+/// copy of the installer, or a program in one of `roots`.
+pub fn installer_child(image: &Path, installer: &Path, roots: &[PathBuf]) -> bool {
+    let name = image.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if name == "msiexec.exe" || installer.file_name().is_some_and(|i| i.to_string_lossy().eq_ignore_ascii_case(&name)) {
+        return true;
+    }
+    let img = image.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+    roots.iter().any(|r| {
+        let r = r.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+        let r = r.trim_end_matches('\\');
+        !r.is_empty() && img.starts_with(&format!("{r}\\"))
+    })
+}
+
+/// Run an installer and wait for it and for the helper processes it started (see
+/// `installer_child`), within the step's time limit. Installers that hand the work to a child
+/// and exit first would otherwise be checked before they are done. While it runs, `on_procs`
+/// gets the exe names of the other programs in the job whenever they change.
+fn run_tracked(step: &Step, exe: &Path, mut c: std::process::Command, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    let t0 = std::time::Instant::now();
+    let job = winutil::InstallerJob::new();
+    let suspended = job.is_some();
+    if suspended {
+        // Suspended until it is in the job, so nothing it starts escapes the job.
+        c.creation_flags(winutil::CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().with_context(|| format!("Could not start {}", exe.display()))?;
+    let job = job.filter(|j| j.add(&child));
+    if suspended && !winutil::resume_process(child.id()) {
+        let _ = child.kill();
+        bail!("Could not start {}", exe.display());
+    }
+    let root = child.id();
+    let me = std::process::id();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        // Which programs the installer runs, for the job's detail line.
+        if let Some(job) = job.as_ref() {
+            let done = &done;
+            s.spawn(move || {
+                let mut last: Vec<String> = vec![];
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let names: Vec<String> = job
+                        .pids()
+                        .into_iter()
+                        .filter(|p| *p != me && *p != root)
+                        .filter_map(winutil::process_image)
+                        .filter_map(|i| i.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .collect();
+                    if names != last {
+                        on_procs(names.clone());
+                        last = names;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+        }
+        let r = (|| {
+            let out = child.wait_with_output().with_context(|| format!("Could not run {}", exe.display()))?;
+            if let Some(job) = job.as_ref() {
+                let roots = installer_roots();
+                let limit = step_timeout(step);
+                let limit = limit.saturating_sub(limit / 20);
+                while t0.elapsed() < limit {
+                    let busy = job.pids().into_iter().filter(|p| *p != me).filter_map(winutil::process_image).any(|img| installer_child(&img, exe, &roots));
+                    if !busy {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+            Ok(out)
+        })();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        r
+    })
+}
+
 /// Run one step in this process (the helper, or the app when it already runs as admin).
 pub fn execute(step: &Step) -> StepResult {
+    execute_with(step, &|_| {})
+}
+
+/// `execute`, telling `on_procs` the programs an installer started while it runs.
+pub fn execute_with(step: &Step, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> StepResult {
     let r: Result<(Option<u32>, String)> = (|| match step {
         Step::Run { exe, args, cwd, ok_codes, .. } => {
             let mut c = winutil::cmd(exe);
@@ -279,7 +426,7 @@ pub fn execute(step: &Step) -> StepResult {
             if let Some(d) = cwd {
                 c.current_dir(d);
             }
-            let out = c.output().with_context(|| format!("Could not start {}", exe.display()))?;
+            let out = run_tracked(step, exe, c, on_procs)?;
             let code = out.status.code().map(|c| c as u32).unwrap_or(1);
             let mut text = tail(&out.stdout, 3000);
             let err = tail(&out.stderr, 3000);
@@ -416,7 +563,25 @@ pub fn worker_main(args: &[String]) -> i32 {
                 continue;
             };
             let id = req.id;
-            let result = tokio::task::spawn_blocking(move || execute_checked(&req.step, &req.checks)).await.unwrap_or(StepResult {
+            // The programs the installer runs go to the app as they change, before the result.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+            let mut run = tokio::task::spawn_blocking(move || {
+                execute_checked_with(&req.step, &req.checks, &|names| {
+                    let _ = tx.send(names);
+                })
+            });
+            let result = loop {
+                tokio::select! {
+                    r = &mut run => break r,
+                    Some(names) = rx.recv() => {
+                        let line = serde_json::json!({ "id": id, "procs": names });
+                        if w.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                            return 0;
+                        }
+                    }
+                }
+            };
+            let result = result.unwrap_or(StepResult {
                 ok: false,
                 code: None,
                 message: "The admin helper crashed".into(),
@@ -438,6 +603,9 @@ struct Conn {
     next_id: u64,
 }
 
+/// The exe names of the programs a running installer started (see `Elevator::run_watched`).
+pub type Procs = std::sync::Arc<parking_lot::Mutex<Vec<String>>>;
+
 pub struct Elevator {
     conn: tokio::sync::Mutex<Option<Conn>>,
     /// Helpers started so far (tests check that one helper serves a whole batch)
@@ -451,6 +619,27 @@ pub struct Elevator {
 }
 
 const DECLINED: &str = "Admin rights were declined, so nothing was installed.";
+/// No window is open, so no admin prompt is shown (at sign-in nobody may be there to answer it).
+const NO_PROMPT: &str = "Admin rights are needed. Open the app to allow them.";
+
+/// Admin rights could not be had for a step: the prompt was declined, could not be shown or was
+/// not answered, or it was not shown because no window is open. Nothing ran, so the job can
+/// wait for the user to allow admin rights instead of failing.
+#[derive(Debug)]
+pub struct AdminUnavailable(pub String);
+
+impl std::fmt::Display for AdminUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AdminUnavailable {}
+
+/// Did a step fail only because admin rights could not be had (see `AdminUnavailable`)?
+pub fn admin_unavailable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<AdminUnavailable>())
+}
 
 impl Elevator {
     pub fn new() -> Self {
@@ -493,10 +682,30 @@ impl Elevator {
 
     /// `run`, with files the step runs checked against their SHA-256 right before it runs.
     pub async fn run_checked(&self, step: Step, silent: bool, checks: Vec<FileCheck>) -> Result<StepResult> {
+        self.run_with(step, silent, checks, true).await
+    }
+
+    /// `run_checked`; `may_prompt` false: never show an admin prompt (only the "Fewer admin
+    /// prompts" task may start the helper), for work done with no window open.
+    pub async fn run_with(&self, step: Step, silent: bool, checks: Vec<FileCheck>, may_prompt: bool) -> Result<StepResult> {
+        self.run_watched(step, silent, checks, may_prompt, None).await
+    }
+
+    /// `run_with`; `procs` gets the exe names of the programs an installer started while it
+    /// runs (from the helper too), for the job's detail line.
+    pub async fn run_watched(&self, step: Step, silent: bool, checks: Vec<FileCheck>, may_prompt: bool, procs: Option<Procs>) -> Result<StepResult> {
         let limit = step_timeout(&step);
         if !step.elevated() || winutil::is_elevated() {
             let s2 = step.clone();
-            return match tokio::time::timeout(limit, tokio::task::spawn_blocking(move || execute_checked(&s2, &checks))).await {
+            let p2 = procs.clone();
+            let run = move || {
+                execute_checked_with(&s2, &checks, &|names| {
+                    if let Some(p) = &p2 {
+                        *p.lock() = names;
+                    }
+                })
+            };
+            return match tokio::time::timeout(limit, tokio::task::spawn_blocking(run)).await {
                 Ok(r) => Ok(r?),
                 Err(_) => Err(timed_out(&step, limit)),
             };
@@ -506,19 +715,22 @@ impl Elevator {
             if guard.is_none() {
                 // Declined once in this batch: the other updates do not open a prompt each.
                 if self.declined.load(std::sync::atomic::Ordering::SeqCst) {
-                    bail!("{DECLINED}");
+                    return Err(AdminUnavailable(DECLINED.into()).into());
                 }
                 self.prompts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                match connect(silent, self.decline_for_test).await {
+                match connect(silent, self.decline_for_test, may_prompt).await {
                     Ok(c) => {
                         self.connects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         *guard = Some(c);
                     }
                     Err(e) => {
-                        if e.to_string() == DECLINED {
+                        let text = format!("{e:#}");
+                        // Declined, failed or not answered: the rest of the batch does not ask
+                        // again until the user allows admin rights.
+                        if text != NO_PROMPT {
                             self.declined.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
-                        return Err(e);
+                        return Err(AdminUnavailable(text).into());
                     }
                 }
             }
@@ -528,19 +740,29 @@ impl Elevator {
             let line = serde_json::to_string(&Request { id, step: step.clone(), checks: checks.clone() })? + "\n";
             let sent = c.writer.write_all(line.as_bytes()).await;
             if sent.is_ok() {
-                let mut reply = String::new();
                 // Installers can take a long time, but not forever: past the limit the step fails
                 // and this helper (still busy with it) is let go.
-                match tokio::time::timeout(limit, c.reader.read_line(&mut reply)).await {
-                    Err(_) => {
-                        *guard = None;
-                        return Err(timed_out(&step, limit));
+                let deadline = tokio::time::Instant::now() + limit;
+                loop {
+                    let mut reply = String::new();
+                    match tokio::time::timeout_at(deadline, c.reader.read_line(&mut reply)).await {
+                        Err(_) => {
+                            *guard = None;
+                            return Err(timed_out(&step, limit));
+                        }
+                        Ok(Ok(n)) if n > 0 => {
+                            let v: serde_json::Value = serde_json::from_str(&reply)?;
+                            // The programs the installer runs, sent while it runs.
+                            if let Some(names) = v.get("procs").and_then(|p| p.as_array()) {
+                                if let Some(p) = &procs {
+                                    *p.lock() = names.iter().filter_map(|n| n.as_str().map(str::to_string)).collect();
+                                }
+                                continue;
+                            }
+                            return Ok(serde_json::from_value(v["result"].clone())?);
+                        }
+                        Ok(_) => break,
                     }
-                    Ok(Ok(n)) if n > 0 => {
-                        let v: serde_json::Value = serde_json::from_str(&reply)?;
-                        return Ok(serde_json::from_value(v["result"].clone())?);
-                    }
-                    Ok(_) => {}
                 }
             }
             // The helper went away (idle timeout); start a new one once.
@@ -611,11 +833,14 @@ async fn handshake(server: NamedPipeServer, token: &str) -> Result<Conn> {
     Ok(Conn { reader, writer: w, next_id: 0 })
 }
 
-async fn connect(silent: bool, decline_for_test: bool) -> Result<Conn> {
+async fn connect(silent: bool, decline_for_test: bool, may_prompt: bool) -> Result<Conn> {
     if silent {
         if let Some(c) = connect_via_task().await {
             return Ok(c);
         }
+    }
+    if !may_prompt {
+        bail!("{NO_PROMPT}");
     }
     if decline_for_test {
         bail!("{DECLINED}");
@@ -787,5 +1012,44 @@ mod tests {
         drop(held);
         assert!(execute_checked(&step, &[FileCheck { path: f.clone(), sha256: good.into() }]).ok);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::{installer_child, should_set_up_task, TaskState};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn the_task_prompt_is_asked_only_with_the_window_open_and_only_when_needed() {
+        use TaskState::*;
+        // Set up once when it is missing or starts another exe, with the window open.
+        assert!(should_set_up_task(true, Missing, true, false));
+        assert!(should_set_up_task(true, OtherExe, true, false));
+        // Never at sign-in or from the background.
+        assert!(!should_set_up_task(true, Missing, false, false));
+        assert!(!should_set_up_task(true, OtherExe, false, false));
+        // Not again in the same run, not with the setting off.
+        assert!(!should_set_up_task(true, Missing, true, true));
+        assert!(!should_set_up_task(false, Missing, true, false));
+        // An app update keeps the exe path, so its task stays current.
+        assert!(!should_set_up_task(true, Current, true, false));
+        // A task that could not be read (Task Scheduler slow right after sign-in) is not
+        // registered again with a prompt.
+        assert!(!should_set_up_task(true, Unknown, true, false));
+    }
+
+    #[test]
+    fn only_the_installers_own_helpers_are_waited_for() {
+        let roots = vec![PathBuf::from(r"C:\Users\A\AppData\Local\Temp"), PathBuf::from(r"C:\Users\A\AppData\Local\app.theupdater3d\data\downloads")];
+        let setup = Path::new(r"C:\Users\A\AppData\Local\app.theupdater3d\data\downloads\other\Mega\MEGAsyncSetup64.exe");
+        assert!(installer_child(Path::new(r"C:\Users\A\AppData\Local\Temp\nsu1.tmp\Au_.exe"), setup, &roots));
+        assert!(installer_child(Path::new(r"C:\Windows\System32\msiexec.exe"), setup, &roots));
+        assert!(installer_child(Path::new(r"C:\Somewhere\MEGAsyncSetup64.exe"), setup, &roots));
+        assert!(installer_child(Path::new(r"c:\users\a\appdata\local\temp\{GUID}\.cr\python-3.14.7-amd64.exe"), setup, &roots));
+        // The app the installer starts when it is done keeps running and is not waited for.
+        assert!(!installer_child(Path::new(r"C:\Users\A\AppData\Local\MEGAsync\MEGAsync.exe"), setup, &roots));
+        assert!(!installer_child(Path::new(r"C:\Windows\System32\cmd.exe"), setup, &roots));
+        assert!(!installer_child(Path::new(r"C:\Users\A\AppData\Local\Temperature\x.exe"), setup, &roots));
     }
 }

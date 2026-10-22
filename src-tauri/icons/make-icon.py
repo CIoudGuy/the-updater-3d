@@ -12,9 +12,9 @@ from PIL import Image, ImageDraw
 
 SRC, OUT = sys.argv[1], sys.argv[2]
 S = 4096                      # work size
-INSET = 0.035                 # gap around the tile
+INSET = 0.0                   # the tile fills the icon
 RADIUS = 0.22                 # corner radius, share of the tile size
-LOGO = 0.66                   # longest side of the logo, share of the tile size
+LOGO = 0.80                   # longest side of the logo, share of the tile size
 TILE = (30, 30, 32, 255)      # one solid dark grey
 
 logo = Image.open(SRC).convert("RGBA")

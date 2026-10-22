@@ -708,6 +708,7 @@ fn make(d: &AppDef, id: String, name: String, ver: String, series: String, dir: 
         tagline: Some(d.tagline.into()),
         missing,
         read_only: false,
+        store: None,
         icon_remote: None,
         data: SourceData::Tools { key: d.key.into(), series },
     }
@@ -969,6 +970,35 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], godot_root: &Path) -> Vec<Ins
     scan_freecad(uninstall, &mut out);
     scan_godot(godot_root, &mut out);
     scan_unity(uninstall, &mut out);
+    out.extend(store_copies(&super::msstore::packages()));
+    out
+}
+
+/// Apps of this source that the Microsoft Store has as MSIX packages, by publisher id and the
+/// end of the package name. OBS Studio's Store listing runs its normal installer, so that copy is
+/// found in the uninstall list like any other.
+const STORE_APPS: &[(&str, &str, &str)] = &[("krita", "n3kgb906j1zjg", ".Krita")];
+
+/// Copies from the Microsoft Store: listed only, the Store updates and removes them.
+pub fn store_copies(pkgs: &[super::msstore::Package]) -> Vec<Installed> {
+    let mut out: Vec<Installed> = Vec::new();
+    for p in pkgs {
+        let Some(&(key, _, _)) = STORE_APPS.iter().find(|(_, publisher, suffix)| p.publisher_id() == *publisher && p.name.ends_with(suffix)) else { continue };
+        let Some(d) = def(key) else { continue };
+        let id = format!("tools:{key}:store");
+        if out.iter().any(|o| o.id == id) {
+            continue;
+        }
+        let c = super::msstore::copy_of(p);
+        let mut i = make(d, id, format!("{} (Microsoft Store)", d.name), c.version, "store".into(), p.install_dir.clone(), c.exe);
+        // The Store keeps the program file out of reach of a plain check: the package is there.
+        i.missing = false;
+        i.updated_at = p.installed_at.clone().or(i.updated_at);
+        i.tagline = Some("Updated by the Microsoft Store".into());
+        i.read_only = true;
+        i.store = Some(c.store);
+        out.push(i);
+    }
     out
 }
 
@@ -978,6 +1008,10 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], godot_root: &Path) -> Vec<Ins
 /// (`inst` has siblings in `all`) are only offered newer builds of their own series, and nothing
 /// when a sibling already has it; the newest installed series is offered the next series.
 pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest> {
+    // A Store copy is the Store's to update.
+    if inst.read_only {
+        return None;
+    }
     let key = tools_key(inst);
     let d = def(key)?;
     let list: &[Rel] = if key == "unity" { feed.unity_series.get(&version::series(&inst.version)).map(|v| v.as_slice())? } else { feed.list(key) };
@@ -1021,7 +1055,8 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
     for d in APPS {
         let list = feed.list(d.key);
         let Some(r) = list.iter().find(|r| !r.prerelease && !r.url.is_empty()).or(list.iter().find(|r| !r.url.is_empty())) else { continue };
-        let have = installed.iter().filter(|i| tools_key(i) == d.key);
+        // A Store copy does not count: the app can still be installed from its own site.
+        let have = installed.iter().filter(|i| tools_key(i) == d.key && !i.read_only);
         let is_installed = match d.key {
             "freecad" => have.into_iter().any(|i| series_of(i) == version::series(&r.version)),
             "godot" | "unity" => have.into_iter().any(|i| cmp_ver(&i.version, &r.version) == Ordering::Equal),
@@ -1380,7 +1415,7 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
     // Installing a version of an app that is already here (OBS, Krita, a FreeCAD series) goes
     // over that copy.
     let here = current.or_else(|| {
-        installed.iter().find(|i| tools_key(i) == key && match key {
+        installed.iter().find(|i| tools_key(i) == key && !i.read_only && match key {
             "obs" | "krita" | "unityhub" | "epic" => true,
             "freecad" => series_of(i) == version::series(&rel.version),
             _ => false,

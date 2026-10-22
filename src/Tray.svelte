@@ -65,7 +65,7 @@
           <div class="jt">
             <Mark app={j} size={22} fs={9} />
             <span class="jn ellipsis">{j.name}</span>
-            <span class="js">{j.state === "downloading" || j.state === "installing" || j.state === "verifying" ? `${j.state === "downloading" ? "Downloading" : "Installing"}, ${pct(j)}%` : jobStatus(j, false)}</span>
+            <span class="js">{j.ready ? "Downloaded, ready to install" : j.state === "downloading" || j.state === "installing" || j.state === "verifying" ? `${j.state === "downloading" ? "Downloading" : "Installing"}, ${pct(j)}%` : jobStatus(j, false)}</span>
           </div>
           <span class="jb"><BrushBar value={j.progress} color={j.fg} height={5} shine={false} /></span>
         </div>
