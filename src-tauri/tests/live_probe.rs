@@ -38,7 +38,7 @@ async fn detects_installed_apps_and_finds_latest_versions() {
 
 #[tokio::test]
 #[ignore]
-async fn builds_an_adobe_update_plan_without_installing() {
+async fn adobe_updates_use_remote_update_manager() {
     let un = winutil::uninstall_entries();
     let cat = adobe::fetch_catalog().await.unwrap();
     let all = adobe::scan(Some(&cat), &un);
@@ -61,19 +61,9 @@ async fn builds_an_adobe_update_plan_without_installing() {
     )
     .await
     .unwrap();
-    let total: u64 = plan.downloads.iter().filter_map(|d| d.size).sum();
-    println!("{} -> {}: {} files, {:.2} GB", des.version, plan.to_version, plan.downloads.len(), total as f64 / 1e9);
-    for d in &plan.downloads {
-        println!("  {} {:?}", d.url, d.size);
-    }
-    for s in &plan.steps {
-        println!("  step {:?}", s);
-    }
-    let root = plan.cleanup[0].clone();
-    println!("{}", std::fs::read_to_string(root.join("products").join("driver.xml")).unwrap());
-    assert!(plan.downloads.iter().all(|d| d.url.starts_with("https://")));
-    assert!(plan.fallback.is_some());
-    let _ = std::fs::remove_dir_all(root);
+    // Updates to the newest version run through Adobe's Remote Update Manager.
+    println!("{} -> {}: {:?}", des.version, plan.to_version, plan.steps);
+    assert!(plan.steps.iter().any(|st| matches!(st, updater_lib::sources::Step::Run { exe, .. } if exe.to_string_lossy().contains("RemoteUpdateManager"))));
 }
 
 #[tokio::test]

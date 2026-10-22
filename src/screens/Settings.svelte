@@ -217,9 +217,9 @@
           <SRow label="Blender" desc="Every installed series is listed. New versions install next to the old ones.">
             {#snippet control()}<Toggle checked={s.sources.blender} label="Blender" onchange={(v) => store.patchSettings({ sources: { ...s.sources, blender: v } })} />{/snippet}
           </SRow>
-          <SRow label="Blender channel" desc="Beta builds are marked Beta in Get apps.">
+          <SRow label="Blender pre-releases" desc="Alpha, beta and release candidate builds appear in Get apps, marked Pre-release.">
             {#snippet control()}
-              <Segmented options={[{ value: "stable", label: "Stable" }, { value: "beta", label: "Stable and beta" }]} value={s.blenderChannel} onchange={(v) => store.patchSettings({ blenderChannel: v })} label="Blender channel" />
+              <Segmented options={[{ value: "beta", label: "Show" }, { value: "stable", label: "Hide" }]} value={s.blenderChannel} onchange={(v) => store.patchSettings({ blenderChannel: v })} label="Blender pre-releases" />
             {/snippet}
           </SRow>
           <SRow label="Keep bug-fix versions" desc="A bug-fix update, for example 5.2.2 to 5.2.3, keeps the old copy instead of replacing it." id="keep-patch">

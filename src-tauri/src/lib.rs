@@ -39,6 +39,20 @@ pub fn run() {
             // Checking in the background at sign-in is on by default: set it up once.
             {
                 let mut p = core.persisted.lock();
+                if !p.prereleases_default_on {
+                    let mut s = core.settings.write();
+                    s.blender_channel = "beta".into();
+                    store::save_settings(&s);
+                    p.prereleases_default_on = true;
+                    store::save_state(&p);
+                }
+                if !p.keep_previous_default_off {
+                    let mut s = core.settings.write();
+                    s.keep_previous_versions = false;
+                    store::save_settings(&s);
+                    p.keep_previous_default_off = true;
+                    store::save_state(&p);
+                }
                 if !p.autostart_applied {
                     // Also turns it on for copies that saved the old default (off).
                     use tauri_plugin_autostart::ManagerExt;

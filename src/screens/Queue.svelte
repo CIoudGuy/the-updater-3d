@@ -14,7 +14,7 @@
   import { store } from "../lib/store.svelte";
   import { isPaused, togglePauseAll } from "../lib/actions";
   import { approx, bytes, clock, countOf, inUnit, unitFor } from "../lib/format";
-  import { jobStatus, jobWhat, pct } from "../lib/jobs";
+  import { NO_STOP_TIP, canCancel, canPause, cancelTip, jobStatus, jobWhat, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced } from "../lib/motion";
   import type { Job } from "../lib/types";
 
@@ -112,7 +112,7 @@
     <div class="ctl">
       <label for="bw" class="lbl">Bandwidth limit</label>
       <Select id="bw" options={bwOpts} value={String(limitMb)} onchange={setLimit} width={130} label="Bandwidth limit" title="Bandwidth limit  Ctrl Shift L" />
-      <Btn variant="secondary" size="md" hint="Ctrl P" title="{paused ? 'Resume all' : 'Pause all'}  Ctrl P" onclick={togglePauseAll} disabled={store.openJobs.length === 0}>{paused ? "Resume all" : "Pause all"}</Btn>
+      <Btn variant="secondary" size="md" hint="Ctrl P" title={!store.openJobs.some(canPause) && store.openJobs.length > 0 ? NO_STOP_TIP : `${paused ? "Resume all" : "Pause all"}  Ctrl P`} onclick={togglePauseAll} disabled={!store.openJobs.some(canPause)}>{paused ? "Resume all" : "Pause all"}</Btn>
     </div>
   </div>
 
@@ -150,8 +150,8 @@
           <span class="et">{j.eta != null && j.state !== "paused" && j.state !== "blocked" ? approx(j.eta).replace("About ", "") : ""}</span>
           <span class="pc" style:color={j.state === "paused" ? "var(--text-3)" : "var(--text)"}><Num value={pct(j)} />%</span>
           <span class="bt">
-            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title="{j.state === 'paused' ? 'Resume' : 'Pause'}  Space" disabled={j.state === "blocked"} onclick={() => send(j.state === "paused" ? "resume_job" : "pause_job", { jobId: j.id })}><Icon d={j.state === "paused" ? I.play : I.pause} /></button>
-            <button class="ib" aria-label="Cancel {j.name}" title="Cancel  Del" onclick={() => send("cancel_job", { jobId: j.id })}><Icon d={I.close} /></button>
+            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j, "  Space")} disabled={!canPause(j)} onclick={() => send(j.state === "paused" ? "resume_job" : "pause_job", { jobId: j.id })}><Icon d={j.state === "paused" ? I.play : I.pause} /></button>
+            <button class="ib" aria-label="Cancel {j.name}" title={cancelTip(j, "Cancel", "  Del")} disabled={!canCancel(j)} onclick={() => send("cancel_job", { jobId: j.id })}><Icon d={I.close} /></button>
           </span>
           <span class="bar"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
         </div>

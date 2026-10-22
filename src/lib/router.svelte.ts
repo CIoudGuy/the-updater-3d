@@ -1,5 +1,5 @@
-// Tiny hash router: #/home, #/installed, #/installed/<appId>, #/get, #/queue, #/activity, #/services, #/settings/<section>
-export type RouteName = "home" | "installed" | "detail" | "get" | "queue" | "activity" | "services" | "settings";
+// Tiny hash router: #/home, #/installed, #/installed/<appId>, #/get, #/get/<catalogId>, #/queue, #/activity, #/services, #/settings/<section>
+export type RouteName = "home" | "installed" | "detail" | "get" | "getdetail" | "queue" | "activity" | "services" | "settings";
 export const SETTINGS_SECTIONS = ["sources", "updates", "notifications", "background", "downloads", "storage", "account", "about"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
@@ -15,6 +15,7 @@ function parse(hash: string): Route {
     case "installed":
       return b ? { name: "detail", param: b } : { name: "installed", param: null };
     case "get":
+      return b ? { name: "getdetail", param: b } : { name: "get", param: null };
     case "queue":
     case "activity":
     case "services":
@@ -52,7 +53,7 @@ class Router {
   /** key for transitions: detail pages for different apps count as different pages */
   get key() {
     const r = this.route;
-    return r.name === "detail" ? `detail:${r.param}` : r.name;
+    return r.name === "detail" || r.name === "getdetail" ? `${r.name}:${r.param}` : r.name;
   }
 }
 
@@ -60,4 +61,8 @@ export const router = new Router();
 
 export function appHref(id: string) {
   return "#/installed/" + encodeURIComponent(id);
+}
+
+export function getHref(id: string) {
+  return "#/get/" + encodeURIComponent(id);
 }

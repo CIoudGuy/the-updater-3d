@@ -1205,7 +1205,7 @@ impl Core {
             j.eta = None;
             j.finished_at = Some(now());
             app_id = j.app_id.clone();
-            title = format!("{} {} {} failed", j.name, j.to_version, j.kind.verb().to_lowercase());
+            title = format!("{} {} failed", with_version(&j.name, &j.to_version), j.kind.verb().to_lowercase());
         });
         self.st.lock().failed.insert(app_id.clone(), err.clone());
         self.activity(ActivityKind::Failure, title.clone(), Some(err.code.clone()), Some(app_id.clone()), Some(err.clone()));
@@ -1239,7 +1239,7 @@ impl Core {
                 log::warn!("{}: {e:#}; trying fallback", plan.name);
                 self.set_job(id, |j| {
                     j.state = JobState::Downloading;
-                    j.step = "Trying Adobe Remote Update Manager".into();
+                    j.step = "Trying another way".into();
                     j.downloaded = 0;
                     j.total = 0;
                 });
@@ -1281,16 +1281,20 @@ impl Core {
                 self.st.lock().sizes.remove(&app_id);
                 let to = plan.to_version.clone();
                 let (akind, title) = match kind {
-                    JobKind::Update => (ActivityKind::Update, match &from { Some(f) => format!("Updated {name} {f} to {to}"), None => format!("Updated {name} to {to}") }),
-                    JobKind::Install => (ActivityKind::Install, format!("Installed {name} {to}")),
-                    JobKind::Uninstall => (ActivityKind::Uninstall, format!("Uninstalled {name} {to}")),
-                    JobKind::Rollback => (ActivityKind::Rollback, match &from { Some(f) => format!("Rolled back {name} {f} to {to}"), None => format!("Installed {name} {to}") }),
-                    JobKind::Repair => (ActivityKind::Install, format!("Repaired {name} {to}")),
+                    JobKind::Update => (ActivityKind::Update, match &from { Some(f) => format!("Updated {} to {to}", with_version(&name, f)), None => format!("Updated {}", with_version(&name, &to)) }),
+                    JobKind::Install => (ActivityKind::Install, format!("Installed {}", with_version(&name, &to))),
+                    JobKind::Uninstall => (ActivityKind::Uninstall, format!("Uninstalled {}", with_version(&name, &to))),
+                    JobKind::Rollback => (ActivityKind::Rollback, match &from { Some(f) => format!("Rolled back {} to {to}", with_version(&name, f)), None => format!("Installed {}", with_version(&name, &to)) }),
+                    JobKind::Repair => (ActivityKind::Install, format!("Repaired {}", with_version(&name, &to))),
                 };
                 let meta = if total > 0 { format!("{}, {}", fmt_bytes(total), fmt_dur(started.elapsed())) } else { fmt_dur(started.elapsed()) };
                 self.activity(akind, title.clone(), Some(meta), Some(app_id.clone()), None);
                 if s.notify_finished {
-                    self.notify(&title, "Ready to use.");
+                    let body = match kind {
+                        JobKind::Uninstall => "Removed from this PC.",
+                        _ => "Ready to use.",
+                    };
+                    self.notify(&title, body);
                 }
                 self.toast("ok", title, Some(app_id));
                 self.emit_apps();
@@ -1335,6 +1339,14 @@ impl Core {
             j.step = if plan.downloads.is_empty() { "Preparing".into() } else { "Downloading".into() };
         });
 
+        // Split the bar by expected time: a Blender MSI downloads in seconds but installs for
+        // minutes, an Adobe app the other way round. Learned install times beat the defaults.
+        let (time_key, default_secs) = install_estimate(plan, total);
+        let inst_est = self.persisted.lock().install_times.get(&time_key).copied().unwrap_or(default_secs).max(5.0);
+        let left_to_fetch = total.saturating_sub(plan.downloads.iter().map(download::existing_bytes).sum::<u64>());
+        let dl_est = left_to_fetch as f64 / (15.0 * 1024.0 * 1024.0);
+        let dl_share = if plan.downloads.is_empty() { 0.0 } else { (dl_est / (dl_est + inst_est)).clamp(0.1, 0.9) };
+
         // Room on disk: downloads plus about the same again while installing.
         let have_already: u64 = plan.downloads.iter().map(download::existing_bytes).sum();
         let need = total.saturating_sub(have_already);
@@ -1355,6 +1367,7 @@ impl Core {
             let p2 = progress.clone();
             let jid = id.to_string();
             let base = completed;
+            let share = dl_share;
             let ticker = tokio::spawn(async move {
                 let mut last = (Instant::now(), p2.done.load(Ordering::Relaxed));
                 let mut ema = 0.0f64;
@@ -1372,7 +1385,7 @@ impl Core {
                         j.speed = ema;
                         let remaining = j.total.saturating_sub(j.downloaded) as f64;
                         j.eta = if ema > 1.0 { Some(remaining / ema) } else { None };
-                        j.progress = if j.total > 0 { 0.85 * (j.downloaded as f64 / j.total as f64).min(1.0) } else { 0.0 };
+                        j.progress = if j.total > 0 { share * (j.downloaded as f64 / j.total as f64).min(1.0) } else { 0.0 };
                     });
                 }
             });
@@ -1391,7 +1404,7 @@ impl Core {
             j.total = j.total.max(completed);
             j.speed = 0.0;
             j.eta = None;
-            j.progress = 0.85;
+            j.progress = dl_share;
             j.state = JobState::Installing;
             j.step = "Waiting for another install to finish".into();
         });
@@ -1433,30 +1446,58 @@ impl Core {
         // ---- install steps
         let silent = self.settings.read().silent_elevation;
         let n = plan.steps.len();
+        let install_t0 = Instant::now();
         for (k, step) in plan.steps.iter().enumerate() {
             let label = if n > 1 { format!("{}, step {} of {}", step.label(), k + 1, n) } else { step.label().to_string() };
-            let base = 0.85 + 0.13 * (k as f64 / n.max(1) as f64);
-            let span = 0.13 / n.max(1) as f64;
-            self.set_job(id, |j| {
-                j.step = label.clone();
-                j.progress = base;
-            });
-            // Installers report no progress, so show they are alive: elapsed time, and a bar
-            // that creeps toward the end of this step without ever claiming to be done.
+            self.set_job(id, |j| j.step = label.clone());
+            // Installers report no progress: move the bar along the expected install time, and
+            // past it keep creeping instead of stopping, so it never looks frozen.
+            let rum = rum_watch(step, &plan.to_version, &self.adobe_sizes.lock());
             let ticker = {
                 let me = self.clone();
                 let jid = id.to_string();
                 let label = label.clone();
                 tokio::spawn(async move {
-                    let t0 = Instant::now();
+                    // Remote Update Manager downloads by itself; its folder shows how far it is.
+                    let mut last = (Instant::now(), 0u64);
+                    let mut ema = 0.0f64;
+                    let mut dl_done_at: Option<Instant> = None;
                     loop {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        let s = t0.elapsed().as_secs();
-                        let frac = 1.0 - (-(s as f64) / 90.0).exp();
-                        me.set_job(&jid, |j| {
-                            j.step = format!("{label}, {}:{:02}", s / 60, s % 60);
-                            j.progress = base + span * 0.95 * frac;
-                        });
+                        let s = install_t0.elapsed().as_secs_f64();
+                        if let Some((dir, prefix, expected)) = &rum {
+                            let got = folder_bytes(dir, prefix);
+                            let dt = last.0.elapsed().as_secs_f64().max(0.001);
+                            let inst = got.saturating_sub(last.1) as f64 / dt;
+                            ema = if ema == 0.0 { inst } else { ema * 0.8 + inst * 0.2 };
+                            last = (Instant::now(), got);
+                            let frac = if *expected > 0 { (got as f64 / *expected as f64).min(1.0) } else { 0.0 };
+                            if frac < 0.995 && dl_done_at.is_none() {
+                                me.set_job(&jid, |j| {
+                                    j.step = if got == 0 { format!("{label}, starting") } else { "Downloading from Adobe".into() };
+                                    j.downloaded = got;
+                                    j.total = *expected;
+                                    j.speed = ema;
+                                    j.eta = if ema > 1.0 { Some(expected.saturating_sub(got) as f64 / ema) } else { None };
+                                    j.progress = 0.75 * frac;
+                                });
+                            } else {
+                                let t0 = *dl_done_at.get_or_insert_with(Instant::now);
+                                let s2 = t0.elapsed().as_secs_f64();
+                                me.set_job(&jid, |j| {
+                                    j.step = format!("Installing, {}:{:02}", s2 as u64 / 60, s2 as u64 % 60);
+                                    j.downloaded = *expected;
+                                    j.speed = 0.0;
+                                    j.eta = None;
+                                    j.progress = 0.75 + 0.24 * install_curve(s2 / 180.0);
+                                });
+                            }
+                        } else {
+                            me.set_job(&jid, |j| {
+                                j.step = format!("{label}, {}:{:02}", s as u64 / 60, s as u64 % 60);
+                                j.progress = dl_share + (1.0 - dl_share) * 0.98 * install_curve(s / inst_est);
+                            });
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 })
             };
@@ -1479,12 +1520,44 @@ impl Core {
             }
         }
 
+        if !plan.steps.is_empty() {
+            let took = install_t0.elapsed().as_secs_f64();
+            let mut p = self.persisted.lock();
+            let e = p.install_times.entry(time_key.clone()).or_insert(took);
+            *e = *e * 0.5 + took * 0.5;
+            store::save_state(&p);
+        }
+
         // ---- verify
         self.set_job(id, |j| {
             j.state = JobState::Verifying;
             j.step = "Checking the result".into();
             j.progress = 0.98;
         });
+        // Handed to another program: wait for it to finish, showing the wait.
+        if let Verify::Wait { app_id, version: v, minutes } = &plan.verify {
+            let t0 = Instant::now();
+            loop {
+                self.rescan().await;
+                let done = self.st.lock().installed.iter().any(|i| &i.id == app_id && !i.missing && !version::newer(v, &i.version));
+                if done {
+                    return Ok(Outcome::Done);
+                }
+                if *ctl.borrow() == Control::Cancel {
+                    return Ok(Outcome::Canceled);
+                }
+                let s = t0.elapsed().as_secs();
+                if s > minutes * 60 {
+                    return Err(anyhow!("VERIFY|Creative Cloud did not finish installing {} {} within {} minutes", plan.name, v, minutes));
+                }
+                self.set_job(id, |j| {
+                    j.state = JobState::Installing;
+                    j.step = format!("Finishing in Creative Cloud, {}:{:02}", s / 60, s % 60);
+                    j.progress = 0.05 + 0.94 * install_curve(s as f64 / 600.0);
+                });
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
         // Installers sometimes finish registering a moment after they exit.
         for attempt in 0..6 {
             self.rescan().await;
@@ -1497,6 +1570,7 @@ impl Core {
                     .iter()
                     .any(|i| &i.id == app_id && !i.missing && !version::newer(v, &i.version)),
                 Verify::Removed { app_id } => !self.st.lock().installed.iter().any(|i| &i.id == app_id),
+                Verify::Wait { .. } => true,
             };
             if ok {
                 return Ok(Outcome::Done);
@@ -1511,7 +1585,7 @@ impl Core {
                 Err(anyhow!("VERIFY|The installer finished, but {} reports {} instead of {}", plan.name, now_v, v))
             }
             Verify::Removed { .. } => Err(anyhow!("VERIFY|The uninstaller finished, but {} is still installed", plan.name)),
-            Verify::None => unreachable!(),
+            Verify::None | Verify::Wait { .. } => unreachable!(),
         }
     }
 
@@ -1603,6 +1677,73 @@ async fn with_adobe_notes(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
     list
 }
 
+/// What kind of install this is (for learned timings) and a first guess of its seconds.
+fn install_estimate(plan: &Plan, bytes: u64) -> (String, f64) {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    let runs_msi = plan.steps.iter().any(|s| matches!(s, sources::Step::Run { exe, .. } if exe.to_string_lossy().to_ascii_lowercase().contains("msiexec")));
+    let runs_rum = plan.steps.iter().any(|s| matches!(s, sources::Step::Run { exe, .. } if exe.to_string_lossy().contains("RemoteUpdateManager")));
+    let src = plan.app_id.split(':').next().unwrap_or("app");
+    if plan.kind == JobKind::Uninstall {
+        return (format!("{src}:uninstall"), 30.0);
+    }
+    if runs_rum {
+        return ("adobe:rum".into(), 600.0);
+    }
+    match src {
+        // Keyed per product: Photoshop and Bridge install at very different speeds.
+        "adobe" => (format!("adobe:{}", plan.app_id.split(':').nth(1).unwrap_or("")), 30.0 + mb / 12.0),
+        "blender" if runs_msi => ("blender:msi".into(), 150.0),
+        "blender" => ("blender:zip".into(), 20.0 + mb / 30.0),
+        "craft" => ("craft".into(), 25.0),
+        other => (other.to_string(), 30.0),
+    }
+}
+
+/// Remote Update Manager step: its download folder, the folder prefix for this product and the
+/// expected download size, so the job can show real progress while it downloads.
+fn rum_watch(step: &sources::Step, to_version: &str, sizes: &HashMap<String, u64>) -> Option<(PathBuf, String, u64)> {
+    let sources::Step::Run { exe, args, .. } = step else { return None };
+    if !exe.to_string_lossy().contains("RemoteUpdateManager") {
+        return None;
+    }
+    let sap = args.iter().find_map(|a| a.strip_prefix("--productVersions="))?.split('#').next()?.to_string();
+    let expected = sizes.get(&format!("{sap}@{to_version}")).copied().unwrap_or(0);
+    Some((paths::local_app_data().join("Adobe").join("RemoteUpdateManager_Downloads"), format!("{sap}_"), expected))
+}
+
+/// Bytes in the sub-folders of `dir` whose names start with `prefix`.
+fn folder_bytes(dir: &std::path::Path, prefix: &str) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        .map(|e| winutil::dir_size(&e.path()))
+        .sum()
+}
+
+/// Share of the install phase to show after `x` = elapsed / expected: steady up to 90% at the
+/// expected time, then slower and slower toward 100% without ever stopping.
+fn install_curve(x: f64) -> f64 {
+    let x = x.max(0.0);
+    if x <= 1.0 {
+        0.9 * x
+    } else {
+        0.9 + 0.1 * (1.0 - (-(x - 1.0)).exp())
+    }
+}
+
+/// "Blender 2.83" + "2.83.20" -> "Blender 2.83.20" (no repeated version); otherwise "name version".
+fn with_version(name: &str, ver: &str) -> String {
+    if let Some((head, last)) = name.rsplit_once(' ') {
+        if last.chars().next().is_some_and(|c| c.is_ascii_digit()) && ver.starts_with(last) {
+            return format!("{head} {ver}");
+        }
+    }
+    if name.ends_with(ver) {
+        return name.to_string();
+    }
+    format!("{name} {ver}")
+}
+
 fn sanitize(s: &str) -> String {
     let mut h = sha2::Sha256::new();
     use sha2::Digest;
@@ -1650,4 +1791,58 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
     let first = text.lines().next().unwrap_or(text).to_string();
     let code = if text.contains("Checksum") { "Checksum mismatch" } else if text.contains("declined") { "Not allowed" } else if text.contains("HTTP") || text.contains("reach") || text.contains("download") { "Download failed" } else { "Failed" };
     (code.into(), first, text.to_string(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{folder_bytes, install_curve, rum_watch, with_version};
+
+    #[test]
+    fn remote_update_manager_progress_comes_from_its_folder() {
+        let step = crate::sources::Step::Run {
+            exe: "C:/x/RemoteUpdateManager.exe".into(),
+            args: vec!["--action=install".into(), "--productVersions=SBSTP".into()],
+            cwd: None,
+            ok_codes: vec![0],
+            elevated: true,
+            label: String::new(),
+            log: None,
+        };
+        let mut sizes = std::collections::HashMap::new();
+        sizes.insert("SBSTP@12.2.0".to_string(), 2_500_000u64);
+        let (dir, prefix, expected) = rum_watch(&step, "12.2.0", &sizes).unwrap();
+        assert!(dir.ends_with("RemoteUpdateManager_Downloads"));
+        assert_eq!((prefix.as_str(), expected), ("SBSTP_", 2_500_000));
+        // Only folders of this product count.
+        let root = std::env::temp_dir().join(format!("u3d-rum-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("SBSTP_12.2.0.5909_win64")).unwrap();
+        std::fs::create_dir_all(root.join("PHSP_27.11_win64")).unwrap();
+        std::fs::write(root.join("SBSTP_12.2.0.5909_win64").join("a.zip"), vec![0u8; 1000]).unwrap();
+        std::fs::write(root.join("PHSP_27.11_win64").join("b.zip"), vec![0u8; 500]).unwrap();
+        assert_eq!(folder_bytes(&root, "SBSTP_"), 1000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn names_do_not_repeat_the_version() {
+        assert_eq!(with_version("Blender 2.83", "2.83.20"), "Blender 2.83.20");
+        assert_eq!(with_version("Blender 4.5", "4.5.5"), "Blender 4.5.5");
+        assert_eq!(with_version("Photoshop 2026", "27.11"), "Photoshop 2026 27.11");
+        assert_eq!(with_version("PhotoCraft", "0.12.0"), "PhotoCraft 0.12.0");
+        assert_eq!(with_version("Blender 5.2.3", "5.2.3"), "Blender 5.2.3");
+    }
+
+    #[test]
+    fn install_bar_always_moves_and_never_finishes() {
+        assert_eq!(install_curve(0.0), 0.0);
+        assert!((install_curve(0.5) - 0.45).abs() < 1e-9);
+        assert!((install_curve(1.0) - 0.9).abs() < 1e-9);
+        // Past the estimate it keeps creeping: every extra second still moves the bar.
+        let mut last = install_curve(1.0);
+        for k in 1..50 {
+            let v = install_curve(1.0 + k as f64 * 0.1);
+            assert!(v > last && v < 1.0, "at {k}: {v}");
+            last = v;
+        }
+    }
 }

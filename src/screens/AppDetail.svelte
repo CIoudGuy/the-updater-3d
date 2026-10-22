@@ -18,8 +18,8 @@
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router } from "../lib/router.svelte";
   import { installVersion, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
-  import { bytes, cmpVersion, dateLong, dateShort, splitVersion } from "../lib/format";
-  import { jobStatus, pct } from "../lib/jobs";
+  import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
+  import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import type { VersionInfo } from "../lib/types";
 
@@ -53,7 +53,7 @@
   });
   const pickInfo = $derived(installable.find((v) => v.version === pick));
   const pickBack = $derived(!!app && !!pick && !isBlender && cmpVersion(pick, app.version) < 0);
-  const pickOpts = $derived(installable.map((v) => ({ value: v.version, label: `${v.version}${v.prerelease ? " (Beta)" : ""}${v.date ? ", " + dateShort(v.date) : ""}` })));
+  const pickOpts = $derived(installable.map((v) => ({ value: v.version, label: `${v.version}${v.prerelease ? " (Pre-release)" : ""}${v.date ? ", " + dateShort(v.date) : ""}` })));
 
   let picker = $state<{ focus: () => void }>();
   onMount(() => {
@@ -131,10 +131,10 @@
         </span>
         <div class="btns">
           {#if job}
-            <Btn variant="ghost" onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })} title="{job.state === 'paused' ? 'Resume' : 'Pause'}  Space">
+            <Btn variant="ghost" disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })} title={pauseTip(job, "  Space")}>
               <Icon d={job.state === "paused" ? I.play : I.pause} />{job.state === "paused" ? "Resume" : "Pause"}
             </Btn>
-            <Btn variant="secondary" onclick={() => send("cancel_job", { jobId: job.id })} title="Cancel  Esc">Cancel</Btn>
+            <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job, "Cancel", "  Esc")}>Cancel</Btn>
           {:else}
             {#if app.status !== "missing"}
               <Btn variant="ghost" title="Open {app.name}  O" onclick={() => openApp(app.id)}>Open</Btn>
@@ -170,7 +170,7 @@
             {@const act = rowAction(v)}
             <article class="vrow" class:hasnotes={v.notes.length > 0} animate:flip={{ duration: reduced() ? 0 : 200 }} use:enter={i}>
               <div class="vtop">
-                <span class="vn">{v.version}</span>
+                <span class="vn">{preParts(v.version)[0]}{#if preParts(v.version)[1]}<span class="vs">{preParts(v.version)[1]}</span>{/if}</span>
                 <span class="vd">{dateLong(v.date)}</span>
                 {#if v.installed}
                   <span class="tag" style="color:var(--text)"><Paint kind="swatch" fill="#232323" /><span class="tx">Installed</span></span>
@@ -179,7 +179,7 @@
                   <span class="tag" style="color:var(--warn)"><Paint kind="swatch" fill="#232323" /><span class="tx">Latest</span></span>
                 {/if}
                 {#if v.prerelease}
-                  <span class="tag" style="color:var(--cobalt)"><Paint kind="swatch" fill="#232323" /><span class="tx">Beta</span></span>
+                  <span class="tag" style="color:var(--cobalt)"><Paint kind="swatch" fill="#232323" /><span class="tx">Pre-release</span></span>
                 {/if}
                 <span class="grow"></span>
                 {#if v.notesUrl}
@@ -224,7 +224,7 @@
             {/if}
           </dd>
           {#if isAdobe}<dt>Language</dt><dd>{lang}</dd>{/if}
-          {#if isBlender && app.channel}<dt>Channel</dt><dd class="cap">{app.channel === "lts" ? "Long-term support" : app.channel === "beta" ? "Beta" : "Stable"}</dd>{/if}
+          {#if isBlender && app.channel}<dt>Channel</dt><dd class="cap">{app.channel === "lts" ? "Long-term support" : app.channel === "beta" ? "Pre-release" : "Stable"}</dd>{/if}
           <dt>Size on disk</dt>
           <dd>{app.sizeOnDisk ? bytes(app.sizeOnDisk) : "Not known"}</dd>
           <dt>Updated</dt>
@@ -369,6 +369,13 @@
     letter-spacing: var(--track-heading);
     white-space: nowrap;
   }
+  .vs {
+    margin-left: 8px;
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--text-3);
+  }
   .vd {
     font-size: 12px;
     color: var(--text-3);
@@ -391,6 +398,7 @@
   .lnk,
   .lnk2 {
     font-size: 12px;
+    white-space: nowrap;
     color: var(--text-3);
     transition: color var(--t-fast);
   }

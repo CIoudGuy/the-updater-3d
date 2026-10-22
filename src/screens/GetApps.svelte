@@ -14,10 +14,11 @@
   import { enter, reduced } from "../lib/motion";
   import type { CatalogEntry } from "../lib/types";
 
-  let catalog = $state<CatalogEntry[] | null>(null);
+  const catalog = $derived(ui.catalog);
   let searchInput = $state<HTMLInputElement>();
   onMount(() => {
-    call("get_catalog", {}).then((c) => (catalog = c));
+    // a list kept from an earlier visit is shown at once and refreshed in the background
+    call("get_catalog", {}).then((c) => (ui.catalog = c));
     ui.searchEl = searchInput ?? null;
     return () => {
       if (ui.searchEl === searchInput) ui.searchEl = null;

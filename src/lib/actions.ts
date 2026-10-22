@@ -104,9 +104,9 @@ export function updateAll() {
   if (!store.updates.length) return;
   guard(store.updates.map(upd), () => void send("update_all", {}));
 }
-export function installApp(entry: CatalogEntry, version: string | null = null) {
+export function installApp(entry: CatalogEntry, version: string | null = null, size: number | null = null) {
   guard(
-    [{ name: entry.name, bytes: entry.size ?? 0, dir: null, source: entry.source, relocatable: true }],
+    [{ name: entry.name, bytes: size ?? entry.size ?? 0, dir: null, source: entry.source, relocatable: true }],
     () => void send("install_app", { id: entry.id, version }),
   );
 }

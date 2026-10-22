@@ -15,10 +15,11 @@
   import { I } from "../lib/icons";
   import { call, send } from "../lib/api";
   import { store } from "../lib/store.svelte";
+  import { router, getHref } from "../lib/router.svelte";
   import { ui } from "../lib/ui.svelte";
   import { installApp, openApp } from "../lib/actions";
   import { bytes } from "../lib/format";
-  import { pct } from "../lib/jobs";
+  import { canCancel, cancelTip, pct } from "../lib/jobs";
   import type { CatalogEntry } from "../lib/types";
 
   let { c, eager = false }: { c: CatalogEntry; eager?: boolean } = $props();
@@ -37,16 +38,26 @@
   let hover = $state(false);
   const level = $derived(job && job.state !== "waiting" ? 0.3 + 0.7 * progress : hover ? 0.5 : 0.4);
 
+  function open(e: MouseEvent) {
+    if ((e.target as HTMLElement).closest("button, a")) return;
+    router.go(getHref(c.id));
+  }
+  function key(e: KeyboardEvent) {
+    if (e.target === e.currentTarget && e.key === "Enter") router.go(getHref(c.id));
+  }
+
   // ----- version list -----
   const CACHE_MS = 5 * 60_000;
   function items(list: VersionInfo[]) {
     return list.map((v) => ({
       id: v.version,
       label: v.version,
-      meta: [v.latest ? "Latest" : "", v.prerelease ? "Beta" : "", v.installed ? "Installed" : "", v.size ? bytes(v.size) : ""].filter(Boolean).join(", "),
+      meta: [v.latest ? "Latest" : "", v.prerelease ? "Pre-release" : "", v.installed ? "Installed" : "", v.size ? bytes(v.size) : ""].filter(Boolean).join(", "),
       disabled: v.installed,
     }));
   }
+  /** Pre-release builds carry long names such as "5.4.0 Alpha fbe82a4", so their list is wider. */
+  const widthFor = (list: VersionInfo[]) => (list.some((v) => v.prerelease) ? 344 : 272);
   function openVersions(anchor: HTMLElement) {
     if (ui.popover?.anchor === anchor) return ui.closePopover();
     const hit = versionCache.get(c.id);
@@ -54,7 +65,7 @@
     ui.openList({
       rect: anchor.getBoundingClientRect(),
       items: fresh ? items(hit.list) : Array.from({ length: 5 }, (_, i) => ({ id: "sk" + i, label: "", disabled: true, skeleton: true })),
-      width: 272,
+      width: fresh ? widthFor(hit.list) : c.prerelease ? 344 : 272,
       align: "end",
       label: `Versions of ${c.name}`,
       anchor,
@@ -65,7 +76,7 @@
       .then((list) => {
         versionCache.set(c.id, { at: Date.now(), list });
         // the menu may have been closed or moved to another card while the list loaded
-        if (ui.popover?.anchor === anchor) ui.popover = { ...ui.popover, items: items(list) };
+        if (ui.popover?.anchor === anchor) ui.popover = { ...ui.popover, items: items(list), width: widthFor(list) };
       })
       .catch(() => {
         if (ui.popover?.anchor === anchor) ui.closePopover();
@@ -74,9 +85,14 @@
   }
 </script>
 
+<!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
 <article
   class="card"
   aria-label={c.name}
+  role="link"
+  tabindex="0"
+  onclick={open}
+  onkeydown={key}
   onpointerenter={() => (hover = true)}
   onpointerleave={() => (hover = false)}
 >
@@ -86,7 +102,7 @@
     <div class="top">
       <Mark app={c} size={48} fs={17} {eager} />
       <div class="nm">
-        <span class="n"><span class="nt ellipsis" title={c.name}>{c.name}</span>{#if c.prerelease}<span class="beta">Beta</span>{/if}</span>
+        <span class="n"><span class="nt ellipsis" title={c.name}>{c.name}</span>{#if c.prerelease}<span class="beta">Pre-release</span>{/if}</span>
         <span class="s ellipsis">{c.version}{c.size ? `, ${bytes(c.size)}` : ""}</span>
       </div>
     </div>
@@ -100,7 +116,7 @@
         {/if}
       </span>
       {#if job}
-        <button class="ib" aria-label="Cancel install of {c.name}" title="Cancel" onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
+        <button class="ib" aria-label="Cancel install of {c.name}" title={cancelTip(job)} disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
       {:else if c.installed}
         <Btn variant="raised" size="sm" title="Open {c.name}" onclick={() => openApp(c.id)}>Open<Icon d={I.external} size={13} width={2.5} /></Btn>
       {:else if c.pickVersion}
@@ -211,7 +227,7 @@
     justify-content: center;
     transition: background-color var(--t-fast), color var(--t-fast), transform var(--t-fast) var(--ease);
   }
-  .ib:hover {
+  .ib:hover:not(:disabled) {
     background: var(--raised);
     color: var(--text);
   }

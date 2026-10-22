@@ -1,5 +1,5 @@
 // In-memory mock backend for browser preview (npm run dev).
-// Dev switch: ?state=ready (default) | current | repair | updating | first | offline | blocked | failed | lowdisk | ccdown | signedout
+// Dev switch: ?state=ready (default) | current | repair | updating | installing | first | offline | blocked | failed | lowdisk | ccdown | signedout
 import type { Commands } from "./commands";
 import type {
   ActivityEntry,
@@ -174,7 +174,7 @@ const CATALOG: CatalogEntry[] = [
   c("craft:artcraft", "craft", "ArtCraft", "Ar", "#A98BD8", "#1D1030", "0.41.0", 340 * MB, "Painting and illustration", "Craft apps"),
   c("craft:sculptcraft", "craft", "SculptCraft", "Sk", "#D9B26A", "#2A2005", "0.3.0", 300 * MB, "Digital sculpting", "Craft apps", { prerelease: true }),
   c("blender:5.2", "blender", "Blender 5.2", "Bl", "#EA7600", "#2A1500", "5.2.2", 390 * MB, "Latest stable release", "Blender"),
-  c("blender:5.3", "blender", "Blender 5.3", "Bl", "#EA7600", "#2A1500", "5.3.0", 392 * MB, "Beta, try what comes next", "Blender", { prerelease: true }),
+  c("blender:5.3-beta", "blender", "Blender 5.3", "Bl", "#EA7600", "#2A1500", "5.3.0 Beta 873fa96", 392 * MB, "Alpha, beta and release candidate builds", "Blender", { prerelease: true, pickVersion: true }),
   c("blender:3.6", "blender", "Blender 3.6 LTS", "Bl", "#EA7600", "#2A1500", "3.6.23", 318 * MB, "Long-term support release", "Blender"),
   c("blender:older", "blender", "Older Blender versions", "Bl", "#EA7600", "#2A1500", "Choose a version", null, "Any release back to 2.93", "Blender", { pickVersion: true }),
 ];
@@ -183,7 +183,18 @@ function catalogNow(): CatalogEntry[] {
   return CATALOG.map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id && !(a.jobId && a.status !== "current" && !a.updatedAt)) }));
 }
 
-const BLENDER_RELEASES = ["5.3.0", "5.2.2", "5.2.1", "5.2.0", "5.1.2", "5.1.1", "5.0.1", "4.5.6", "4.5.5", "4.4.3", "4.2.9"];
+/** Pre-release builds the beta entry offers, newest first. */
+const BLENDER_PRE = [
+  "5.4.0 Alpha fbe82a4",
+  "5.3.0 Beta 873fa96",
+  "5.3.0 Beta 5be0e41",
+  "5.3.0 Alpha 20d1f7c",
+  "5.2.0 Release Candidate a41b9c3",
+  "5.2.0 Beta d09e3a2",
+  "5.2.0 Alpha 7c13e58",
+  "5.1.0 Release Candidate 3e8f0b6",
+];
+const BLENDER_RELEASES = ["5.4.0 Alpha fbe82a4", "5.3.0 Beta 873fa96", "5.2.2", "5.2.1", "5.2.0", "5.1.2", "5.1.1", "5.0.1", "4.5.6", "4.5.5", "4.4.3", "4.2.9"];
 const BLENDER_OLDER = ["5.1.2", "5.0.1", "4.5.6", "4.4.3", "4.3.2", "4.2.9", "4.1.1", "4.0.2", "3.6.23", "3.3.21", "2.93.18"];
 
 let apps: AppEntry[] = [];
@@ -287,6 +298,8 @@ function seedActivity() {
 let jobSeq = 1;
 let failOnce = MODE === "failed";
 const hidden = new Map<string, { resume: Job["state"] }>();
+/** Jobs that stay in the installer step (?state=installing), to look at the disabled controls. */
+const held = new Set<string>();
 
 function activeState(s: Job["state"]) {
   return s === "downloading" || s === "installing" || s === "verifying";
@@ -433,6 +446,10 @@ function tick(dt: number) {
       }
       changed = true;
     } else if (j.state === "installing" || j.state === "verifying") {
+      if (held.has(j.id)) {
+        if (a) syncApp(a, j);
+        continue;
+      }
       const rate = j.total > 0 ? 0.2 / 6 : 1 / 2; // seconds to finish the install part
       if (a?.running && j.total > 0 && MODE === "blocked" && j.progress >= 0.8) {
         j.state = "blocked";
@@ -563,7 +580,7 @@ function versionsFor(a: AppEntry): VersionInfo[] {
         size: (320 + i * 9) * MB,
         installed,
         latest: v === "5.2.2",
-        prerelease: v === "5.3.0",
+        prerelease: v.includes(" "),
       });
     });
     return list;
@@ -627,11 +644,13 @@ const handlers: H = {
   install_app({ id, version }) {
     let cat = CATALOG.find((x) => x.id === id);
     if (!cat) return;
-    if (cat.id === "blender:older") {
-      // "Older Blender versions" installs the chosen release as its own series entry
-      if (!version) return;
-      const series = version.split(".").slice(0, 2).join(".");
-      cat = { ...cat, id: `blender:${series}`, name: `Blender ${series}`, version, size: 320 * MB, tagline: "3D creation suite" };
+    if (cat.id === "blender:older" || (cat.source === "blender" && cat.prerelease)) {
+      // "Older Blender versions" and the pre-release builds install the chosen release as its own series entry
+      const chosen = version ?? (cat.pickVersion && /^\d/.test(cat.version) ? cat.version : null);
+      if (!chosen) return;
+      const series = chosen.split(".").slice(0, 2).join(".");
+      cat = { ...cat, id: `blender:${series}`, name: `Blender ${series}`, version: chosen, size: cat.size ?? 320 * MB, tagline: "3D creation suite" };
+      version = chosen;
     }
     let a = findApp(cat.id);
     if (!a) {
@@ -709,6 +728,35 @@ const handlers: H = {
         prerelease: false,
       }));
     }
+    if (cat.source === "blender" && cat.prerelease) {
+      return BLENDER_PRE.map((v, i) => ({
+        version: v,
+        date: iso((i * 9 + 2) * DAY).slice(0, 10),
+        notes: i < 4 ? NOTES[i % NOTES.length] : [],
+        notesUrl: i < 4 ? `https://developer.blender.org/docs/release_notes/${v.split(".").slice(0, 2).join(".")}/` : null,
+        size: (385 + ((i * 7) % 19)) * MB,
+        installed: apps.some((x) => x.source === "blender" && x.version === v),
+        latest: i === 0,
+        prerelease: true,
+      }));
+    }
+    const patch = /^(\d+\.\d+)\.(\d+)$/.exec(cat.version);
+    if (cat.source === "blender" && patch) {
+      // every bug-fix release of the series, newest first
+      return Array.from({ length: Number(patch[2]) + 1 }, (_, i) => {
+        const v = `${patch[1]}.${Number(patch[2]) - i}`;
+        return {
+          version: v,
+          date: iso((i * 38 + 6) * DAY).slice(0, 10),
+          notes: i < 3 ? NOTES[i % NOTES.length] : [],
+          notesUrl: `https://www.blender.org/download/releases/${patch[1].replace(".", "-")}/`,
+          size: cat.size ? Math.round(cat.size * (1 - i * 0.01)) : null,
+          installed: apps.some((x) => x.source === "blender" && x.version === v),
+          latest: i === 0,
+          prerelease: false,
+        };
+      });
+    }
     const list: VersionInfo[] = [];
     let v = cat.version;
     const have = apps.find((x) => x.id === id);
@@ -730,7 +778,8 @@ const handlers: H = {
 
   pause_job({ jobId }) {
     const j = jobs.find((x) => x.id === jobId);
-    if (j && (j.state === "downloading" || j.state === "waiting" || j.state === "installing")) {
+    // like the backend: only a download (or a queued job) can be paused
+    if (j && (j.state === "downloading" || j.state === "waiting")) {
       hidden.set(j.id, { resume: j.state });
       j.state = "paused";
       j.speed = 0;
@@ -755,7 +804,8 @@ const handlers: H = {
   },
   cancel_job({ jobId }) {
     const j = jobs.find((x) => x.id === jobId);
-    if (j && isOpen(j.state)) {
+    // like the backend: an installer that is running cannot be stopped safely
+    if (j && isOpen(j.state) && j.state !== "installing" && j.state !== "verifying") {
       j.state = "canceled";
       j.speed = 0;
       j.eta = null;
@@ -893,3 +943,22 @@ export function handle<K extends keyof Commands>(cmd: K, args: Commands[K]["args
 
 // Failed scenario: a toast shortly after load
 if (MODE === "failed") setTimeout(() => emit("toast", { kind: "err", text: "Substance 3D Painter update failed. Error 183, files in use.", appId: "adobe:SBSTP" }), 1200);
+
+// Installing scenario: the installer step is running, so Pause and Cancel are disabled
+if (MODE === "installing") {
+  handlers.update_all({});
+  handlers.install_app({ id: "adobe:ILST", version: null });
+  handlers.install_app({ id: "craft:vectorcraft", version: null });
+  for (const j of jobs) {
+    if (j.appId === "craft:figcraft") continue; // keeps downloading, so Pause and Cancel stay usable there
+    j.state = "installing";
+    j.downloaded = j.total;
+    j.progress = 0.86;
+    j.step = "Installing, step 2 of 4";
+    j.eta = 40;
+    j.startedAt = new Date().toISOString();
+    held.add(j.id);
+  }
+  emit("jobs", jobs);
+  emit("apps", apps);
+}

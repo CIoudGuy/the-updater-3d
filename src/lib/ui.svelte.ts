@@ -1,5 +1,5 @@
 // Transient UI state: popovers, dialogs, view preferences.
-import type { AppEntry } from "./types";
+import type { AppEntry, CatalogEntry } from "./types";
 
 export interface PopItem {
   id: string;
@@ -81,6 +81,11 @@ class Ui {
   getQuery = $state("");
   /** Get apps source filter: "all", or a group name */
   getGroup = $state<"all" | "Adobe" | "Craft apps" | "Blender">("all");
+
+  /** Get apps list kept across visits, so coming back from a detail page does not reload it */
+  catalog = $state<CatalogEntry[] | null>(null);
+  /** Scroll position of the page when Get apps was left for a detail page */
+  getScroll = 0;
 
   searchEl: HTMLInputElement | null = null;
   /** app under the pointer or keyboard focus, target of the U shortcut */

@@ -8,6 +8,7 @@
   import Installed from "./screens/Installed.svelte";
   import AppDetail from "./screens/AppDetail.svelte";
   import GetApps from "./screens/GetApps.svelte";
+  import GetDetail from "./screens/GetDetail.svelte";
   import Queue from "./screens/Queue.svelte";
   import Activity from "./screens/Activity.svelte";
   import Services from "./screens/Services.svelte";
@@ -38,12 +39,16 @@
     }
     phase = "out";
     clearTimeout(timer);
+    // Get apps keeps its scroll position while one of its detail pages is open
+    if (shownKey === "get" && r.name === "getdetail") ui.getScroll = page?.scrollTop ?? 0;
+    const leaving = shownKey;
     timer = setTimeout(
       () => {
         shownKey = key;
         shown = r;
         phase = "in";
         page?.scrollTo({ top: 0 });
+        if (key === "get" && leaving.startsWith("getdetail")) tick().then(() => page?.scrollTo({ top: ui.getScroll }));
       },
       reduced() ? 0 : 90,
     );
@@ -219,6 +224,8 @@
         {#key shown.param}<AppDetail id={shown.param} />{/key}
       {:else if shown.name === "get"}
         <GetApps />
+      {:else if shown.name === "getdetail" && shown.param}
+        {#key shown.param}<GetDetail id={shown.param} />{/key}
       {:else if shown.name === "queue"}
         <Queue />
       {:else if shown.name === "activity"}

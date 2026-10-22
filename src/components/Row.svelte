@@ -10,7 +10,7 @@
   import { openMenuFor, go, retryFor } from "../lib/appview";
   import { openApp, repairApp, updateOne } from "../lib/actions";
   import { bytes, dateShort } from "../lib/format";
-  import { jobStatus } from "../lib/jobs";
+  import { canCancel, canPause, cancelTip, jobStatus, pauseTip } from "../lib/jobs";
   import type { AppEntry } from "../lib/types";
 
   let { app }: { app: AppEntry } = $props();
@@ -67,8 +67,8 @@
     {:else if app.status === "failed"}
       <Btn variant="raised" size="sm" title="Retry  R" onclick={() => retryFor(app)}>Retry</Btn>
     {:else if job}
-      <button class="ib" aria-label={job.state === "paused" ? "Resume" : "Pause"} title="{job.state === 'paused' ? 'Resume' : 'Pause'}  Space" onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}><Icon d={job.state === "paused" ? I.play : I.pause} /></button>
-      <button class="ib" aria-label="Cancel" title="Cancel  Esc" onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
+      <button class="ib" aria-label={job.state === "paused" ? "Resume" : "Pause"} title={pauseTip(job, "  Space")} disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}><Icon d={job.state === "paused" ? I.play : I.pause} /></button>
+      <button class="ib" aria-label="Cancel" title={cancelTip(job, "Cancel", "  Esc")} disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
     {:else}
       <Btn variant="ghost" size="sm" title="Open {app.name}  O" onclick={() => openApp(app.id)}>Open</Btn>
     {/if}
@@ -153,12 +153,12 @@
     justify-content: center;
     transition: background-color var(--t-fast), color var(--t-fast), transform var(--t-fast) var(--ease);
   }
-  .ib:hover,
+  .ib:hover:not(:disabled),
   .ib.on {
     background: var(--raised);
     color: var(--text);
   }
-  .ib:active {
+  .ib:active:not(:disabled) {
     transform: scale(0.92);
   }
 </style>
