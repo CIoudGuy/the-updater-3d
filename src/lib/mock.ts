@@ -117,6 +117,33 @@ function seedApps(): AppEntry[] {
     bl("5.1", "5.1.2", { updatedAt: iso(33 * DAY) }),
     bl("5.2", "5.2.2", { updatedAt: iso(2 * DAY) }),
   );
+  list.push(
+    app({
+      id: "tools:obs", source: "tools", group: "More apps", name: "OBS Studio", code: "Ob", fg: "#E4E4EC", bg: "#1E1E27",
+      version: "32.2.1", latest: "32.2.2", status: "update", updateSize: 152 * MB, sizeOnDisk: 780 * MB,
+      installDir: "C:\\Program Files\\obs-studio", updatedAt: iso(26 * DAY), tagline: "Recording and live streaming",
+    }),
+    app({
+      id: "tools:krita", source: "tools", group: "More apps", name: "Krita", code: "Kr", fg: "#E38BC4", bg: "#2A1222",
+      version: "6.0.4.1", latest: "6.0.4.1", status: "current", sizeOnDisk: 1.1 * GB,
+      installDir: "C:\\Program Files\\Krita (x64)", updatedAt: iso(12 * DAY), tagline: "Digital painting and illustration",
+    }),
+    app({
+      id: "tools:freecad:1.1", source: "tools", group: "More apps", name: "FreeCAD 1.1", code: "Fc", fg: "#E8736A", bg: "#2C1311",
+      version: "1.1.3", latest: "1.1.4", status: "update", updateSize: 495 * MB, sizeOnDisk: 2.4 * GB,
+      installDir: "C:\\Users\\Cloud\\AppData\\Local\\Programs\\FreeCAD 1.1", updatedAt: iso(60 * DAY), tagline: "Parametric 3D CAD modeler",
+    }),
+    app({
+      id: "tools:godot:4.7.1", source: "tools", group: "More apps", name: "Godot 4.7.1", code: "Gd", fg: "#6FB1E3", bg: "#0F2131",
+      version: "4.7.1", latest: "4.7.2", status: "update", updateSize: 82 * MB, sizeOnDisk: 190 * MB, note: "4.7.2 installs next to 4.7.1, your 4.7.1 stays",
+      installDir: "C:\\Users\\Cloud\\AppData\\Local\\Programs\\Godot\\Godot 4.7.1", updatedAt: iso(100 * DAY), tagline: "Game engine and editor",
+    }),
+    app({
+      id: "tools:unity:6000.3.20f1", source: "tools", group: "More apps", name: "Unity 6000.3.20f1", code: "Un", fg: "#F0F0F2", bg: "#2A2F36",
+      version: "6000.3.20f1", latest: "6000.3.27f1", status: "update", updateSize: 3.94 * GB, sizeOnDisk: 7.9 * GB, note: "6000.3.27f1 installs next to 6000.3.20f1, your 6000.3.20f1 stays",
+      installDir: "C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.20f1", updatedAt: iso(40 * DAY), tagline: "Game engine and real-time 3D",
+    }),
+  );
   if (MODE === "current") {
     const ps = list.find((x) => x.id === "adobe:PHSP")!;
     ps.status = "current";
@@ -130,7 +157,7 @@ function seedApps(): AppEntry[] {
         a.version = a.latest ?? a.version;
         a.status = "current";
         a.updateSize = null;
-        a.note = a.source === "blender" && a.channel !== "lts" ? null : a.note;
+        a.note = (a.source === "blender" && a.channel !== "lts") || a.source === "tools" ? null : a.note;
       }
     }
   }
@@ -173,11 +200,72 @@ const CATALOG: CatalogEntry[] = [
   c("craft:gridcraft", "craft", "GridCraft", "Gc", "#D9706A", "#2E100E", "0.10.0", 90 * MB, "Spreadsheets", "Craft apps"),
   c("craft:artcraft", "craft", "ArtCraft", "Ar", "#A98BD8", "#1D1030", "0.41.0", 340 * MB, "Painting and illustration", "Craft apps"),
   c("craft:sculptcraft", "craft", "SculptCraft", "Sk", "#D9B26A", "#2A2005", "0.3.0", 300 * MB, "Digital sculpting", "Craft apps", { prerelease: true }),
+  c("tools:obs", "tools", "OBS Studio", "Ob", "#E4E4EC", "#1E1E27", "32.2.2", 152 * MB, "Recording and live streaming", "More apps", AD),
+  c("tools:krita", "tools", "Krita", "Kr", "#E38BC4", "#2A1222", "6.0.4.1", 167 * MB, "Digital painting and illustration", "More apps", AD),
+  c("tools:freecad", "tools", "FreeCAD", "Fc", "#E8736A", "#2C1311", "1.1.4", 495 * MB, "Parametric 3D CAD modeler", "More apps", AD),
+  c("tools:godot", "tools", "Godot", "Gd", "#6FB1E3", "#0F2131", "4.7.2", 82 * MB, "Game engine and editor", "More apps", AD),
+  c("tools:unity", "tools", "Unity Editor", "Un", "#F0F0F2", "#2A2F36", "6000.3.27f1", 3.94 * GB, "Game engine and real-time 3D", "More apps", AD),
   c("blender:5.2", "blender", "Blender 5.2", "Bl", "#EA7600", "#2A1500", "5.2.2", 390 * MB, "Latest stable release", "Blender"),
   c("blender:5.3-beta", "blender", "Blender 5.3", "Bl", "#EA7600", "#2A1500", "5.3.0 Beta 873fa96", 392 * MB, "Alpha, beta and release candidate builds", "Blender", { prerelease: true, pickVersion: true }),
   c("blender:3.6", "blender", "Blender 3.6 LTS", "Bl", "#EA7600", "#2A1500", "3.6.23", 318 * MB, "Long-term support release", "Blender"),
   c("blender:older", "blender", "Older Blender versions", "Bl", "#EA7600", "#2A1500", "Choose a version", null, "Any release back to 2.93", "Blender", { pickVersion: true }),
 ];
+/** Releases of the "More apps" entries (newest first), as the backend lists them. */
+const TOOLS_RELEASES: Record<string, { v: string; pre?: boolean; size: number; notes: string[] }[]> = {
+  obs: [
+    { v: "33.0.0-rc3", pre: true, size: 186 * MB, notes: ["Fixed a crash when switching scene collections", "Improved NVENC rate control"] },
+    { v: "32.2.2", size: 152 * MB, notes: ["Fixed an issue where plugins might not load properly on the first start after updating OBS on Windows"] },
+    { v: "32.2.1", size: 152 * MB, notes: ["Fixed game capture failing after updating OBS if the previous hook was still in use"] },
+    { v: "32.2.0", size: 151 * MB, notes: ["Added a new audio monitoring device selector", "Updated the NVIDIA SDK"] },
+  ],
+  krita: [
+    { v: "6.0.4.1", size: 167 * MB, notes: ["Fix a crash when opening the brush editor"] },
+    { v: "6.0.4", size: 167 * MB, notes: ["No change list is published for this release"] },
+    { v: "5.3.4.1", size: 160 * MB, notes: ["Fix layer thumbnails scaling when using display scaling", "Fix opening large exr files"] },
+  ],
+  freecad: [
+    { v: "26.3rc2", pre: true, size: 416 * MB, notes: ["Fixes made since the first release candidate"] },
+    { v: "1.1.4", size: 495 * MB, notes: ["Fix handling of crafted FCStd files", "Improve performance of the sketcher"] },
+    { v: "1.1.3", size: 495 * MB, notes: ["Maintenance release"] },
+    { v: "1.1.2", size: 495 * MB, notes: ["Maintenance release"] },
+  ],
+  godot: [
+    { v: "4.8-beta1", pre: true, size: 62 * MB, notes: ["Godot 4.8 beta 1 is ready for testing"] },
+    { v: "4.7.2", size: 82 * MB, notes: ["Godot 4.7.2 is a maintenance release addressing stability and usability issues"] },
+    { v: "4.7.1", size: 82 * MB, notes: ["Godot 4.7.1 is a maintenance release"] },
+    { v: "4.7", size: 81 * MB, notes: ["Godot 4.7 is a new feature release"] },
+    { v: "3.6.3", size: 34 * MB, notes: ["Godot 3.6.3 is a maintenance release"] },
+  ],
+  unity: [
+    { v: "6000.3.27f1", size: 3.94 * GB, notes: ["Asset Import: Improved the security of model import by updating the bundled Autodesk FBX SDK", "Graphics: Added Graphics.disableDepthAndStencilBuffers"] },
+    { v: "6000.3.26f1", size: 3.94 * GB, notes: ["Editor: Fixed a crash when closing the Profiler"] },
+    { v: "6000.0.85f1", size: 3.7 * GB, notes: ["Scripting: Fixed a crash on domain reload"] },
+    { v: "2022.3.62f3", size: 3.3 * GB, notes: ["Physics: Fixed a rare crash in the broadphase"] },
+    { v: "6000.7.0b6", pre: true, size: 4.1 * GB, notes: ["Beta build"] },
+  ],
+};
+function toolsVersions(key: string, installedVersions: string[], within?: string): VersionInfo[] {
+  const rel = TOOLS_RELEASES[key] ?? [];
+  const series = (v: string) => v.split(".").slice(0, 2).join(".");
+  const list = within ? rel.filter((r) => series(r.v) === series(within)) : rel;
+  const newest = list.find((r) => !r.pre)?.v;
+  return list.map((r, i) => ({
+    version: r.v,
+    date: iso((i * 19 + 3) * DAY).slice(0, 10),
+    notes: r.notes,
+    notesUrl: null,
+    size: r.size,
+    installed: installedVersions.includes(r.v),
+    latest: r.v === newest,
+    prerelease: !!r.pre,
+  }));
+}
+/** FreeCAD installs one copy per series, Godot and Unity one per version; OBS Studio and Krita one in all. */
+function toolsId(key: string, version: string): string {
+  if (key === "freecad") return `tools:freecad:${/^\d+\.\d+/.exec(version)?.[0] ?? version}`;
+  return key === "godot" || key === "unity" ? `tools:${key}:${version}` : `tools:${key}`;
+}
+
 /** Catalog as the backend would send it: installed flags follow the installed list. */
 function catalogNow(): CatalogEntry[] {
   return CATALOG.map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id && !(a.jobId && a.status !== "current" && !a.updatedAt)) }));
@@ -218,10 +306,11 @@ let settings: Settings = {
   language: "en_US",
   adobeInstallDir: "C:\\Program Files\\Adobe",
   blenderInstallDir: "D:\\Blender",
+  godotInstallDir: "C:\\Users\\Cloud\\AppData\\Local\\Programs\\Godot",
   blenderChannel: "beta",
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
-  sources: { adobe: true, craft: true, blender: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true },
   parallelDownloads: 3,
   silentElevation: false,
   uiZoom: 1,
@@ -569,6 +658,10 @@ const NOTES = [
 
 function versionsFor(a: AppEntry): VersionInfo[] {
   const list: VersionInfo[] = [];
+  if (a.source === "tools") {
+    const key = a.id.split(":")[1];
+    return toolsVersions(key, [a.version], key === "freecad" || key === "godot" || key === "unity" ? a.version : undefined);
+  }
   if (a.source === "blender") {
     BLENDER_RELEASES.forEach((v, i) => {
       const installed = apps.some((x) => x.source === "blender" && x.version === v);
@@ -644,6 +737,14 @@ const handlers: H = {
   install_app({ id, version }) {
     let cat = CATALOG.find((x) => x.id === id);
     if (!cat) return;
+    if (cat.source === "tools") {
+      const key = cat.id.split(":")[1];
+      const chosen = version ?? cat.version;
+      const tid = toolsId(key, chosen);
+      const nm = key === "freecad" ? `FreeCAD ${tid.split(":")[2]}` : key === "godot" ? `Godot ${chosen}` : key === "unity" ? `Unity ${chosen}` : cat.name;
+      cat = { ...cat, id: tid, name: nm, version: chosen };
+      version = chosen;
+    }
     if (cat.id === "blender:older" || (cat.source === "blender" && cat.prerelease)) {
       // "Older Blender versions" and the pre-release builds install the chosen release as its own series entry
       const chosen = version ?? (cat.pickVersion && /^\d/.test(cat.version) ? cat.version : null);
@@ -658,7 +759,7 @@ const handlers: H = {
         id: cat.id, source: cat.source, group: cat.group, name: cat.name, code: cat.code, fg: cat.fg, bg: cat.bg,
         version: version ?? cat.version, latest: version ?? cat.version, status: "queued", sizeOnDisk: cat.size, tagline: cat.tagline,
         channel: cat.prerelease ? "beta" : cat.source === "blender" ? "stable" : null,
-        installDir: cat.source === "blender" ? `${settings.blenderInstallDir}\\${cat.name}` : null,
+        installDir: cat.source === "blender" ? `${settings.blenderInstallDir}\\${cat.name}` : cat.id.startsWith("tools:godot") ? `${settings.godotInstallDir}\\${cat.name}` : null,
         updatedAt: null,
       });
       apps.push(a);
@@ -670,6 +771,11 @@ const handlers: H = {
   install_version({ appId, version }) {
     const a = findApp(appId);
     if (!a) return;
+    if (a.source === "tools" && a.id.split(":").length > 2 && toolsId(a.id.split(":")[1], version) !== a.id) {
+      // a version of another series or build installs as a copy of its own
+      handlers.install_app({ id: `tools:${a.id.split(":")[1]}`, version });
+      return;
+    }
     if (a.source === "blender" && version.split(".").slice(0, 2).join(".") !== a.id.split(":")[1]) {
       const series = version.split(".").slice(0, 2).join(".");
       handlers.install_app({ id: `blender:${series}`, version });
@@ -716,6 +822,10 @@ const handlers: H = {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
     const cat = CATALOG.find((x) => x.id === id);
     if (!cat) return [];
+    if (cat.source === "tools") {
+      const key = id.split(":")[1];
+      return toolsVersions(key, apps.filter((x) => x.id.startsWith(`tools:${key}`)).map((x) => x.version));
+    }
     if (id === "blender:older") {
       return BLENDER_OLDER.map((v, i) => ({
         version: v,

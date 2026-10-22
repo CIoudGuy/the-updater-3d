@@ -41,6 +41,6 @@
     width: calc(100% + 26px);
     height: 24px;
     overflow: visible;
-    animation: draw 0.42s var(--ease) both;
+    animation: draw 0.28s var(--ease) both;
   }
 </style>

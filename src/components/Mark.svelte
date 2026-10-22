@@ -73,7 +73,7 @@
   /* once the real icon is fully in, drop the mark underneath so transparent corners stay clean */
   svg.gone {
     opacity: 0;
-    transition: opacity 0.01s linear 0.2s;
+    transition: opacity 0.01s linear 0.13s;
   }
   img {
     position: absolute;
@@ -81,7 +81,7 @@
     border-radius: 22%;
     object-fit: contain;
     opacity: 0;
-    transition: opacity 0.18s ease;
+    transition: opacity 0.12s ease;
   }
   img.on {
     opacity: 1;
@@ -90,7 +90,7 @@
     position: relative;
     font-weight: 600;
     letter-spacing: -0.02em;
-    transition: opacity 0.18s ease;
+    transition: opacity 0.12s ease;
   }
   .code.gone {
     opacity: 0;

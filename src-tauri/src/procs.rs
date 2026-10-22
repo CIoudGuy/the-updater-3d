@@ -79,7 +79,7 @@ pub fn friendly(name: &str) -> String {
 /// Ask the processes to close (like clicking X), then force them after `grace`.
 pub fn close(pids: &[u32], grace: std::time::Duration) {
     for pid in pids {
-        let _ = crate::winutil::cmd("taskkill.exe").args(["/PID", &pid.to_string()]).output();
+        crate::winutil::close_process_windows(*pid);
     }
     let deadline = std::time::Instant::now() + grace;
     loop {
@@ -89,7 +89,7 @@ pub fn close(pids: &[u32], grace: std::time::Duration) {
         }
         if std::time::Instant::now() > deadline {
             for pid in alive {
-                let _ = crate::winutil::cmd("taskkill.exe").args(["/F", "/PID", &pid.to_string()]).output();
+                crate::winutil::kill_process(pid);
             }
             return;
         }

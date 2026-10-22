@@ -29,6 +29,8 @@
   const job = $derived(app ? store.jobByApp.get(app.id) : undefined);
   const isBlender = $derived(app?.source === "blender");
   const isAdobe = $derived(app?.source === "adobe");
+  /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
+  const sideBySide = $derived(isBlender || (app?.source === "tools" && app.id.split(":").length > 2));
 
   let versions = $state<VersionInfo[] | null>(null);
   let reqSeq = 0;
@@ -52,7 +54,7 @@
     }
   });
   const pickInfo = $derived(installable.find((v) => v.version === pick));
-  const pickBack = $derived(!!app && !!pick && !isBlender && cmpVersion(pick, app.version) < 0);
+  const pickBack = $derived(!!app && !!pick && !sideBySide && cmpVersion(pick, app.version) < 0);
   const pickOpts = $derived(installable.map((v) => ({ value: v.version, label: `${v.version}${v.prerelease ? " (Pre-release)" : ""}${v.date ? ", " + dateShort(v.date) : ""}` })));
 
   let picker = $state<{ focus: () => void }>();
@@ -79,7 +81,7 @@
   }
   function rowAction(v: VersionInfo): { label: string; title: string } | null {
     if (!app || v.installed) return null;
-    if (isBlender) return { label: `Install ${v.version}`, title: `Install ${v.version} next to ${app.version}` };
+    if (sideBySide) return { label: `Install ${v.version}`, title: `Install ${v.version} next to ${app.version}` };
     if (v.latest && cmpVersion(v.version, app.version) > 0) return null;
     if (cmpVersion(v.version, app.version) < 0) return app.canRollback ? { label: `Roll back to ${v.version}`, title: `Roll back to ${v.version}` } : null;
     return { label: `Install ${v.version}`, title: `Install ${v.version}` };
@@ -209,7 +211,7 @@
             <Btn variant="raised" size="md" disabled={!pick || !!job} title="{pickBack ? 'Roll back to' : 'Install'} {pick}  Ctrl Enter" onclick={doInstallPick}>{pickBack ? "Roll back" : "Install"}</Btn>
           </div>
           <span class="hint">
-            {#if isBlender}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
+            {#if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
           </span>
         </div>
 

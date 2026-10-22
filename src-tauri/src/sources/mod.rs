@@ -1,9 +1,10 @@
-//! The three sources of apps. Each one can scan what is installed, look up the latest
+//! The sources of apps. Each one can scan what is installed, look up the latest
 //! versions, list what can be installed, and turn a request into a Plan the job runner executes.
 
 pub mod adobe;
 pub mod blender;
 pub mod craft;
+pub mod tools;
 
 use crate::model::{JobKind, Source};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,9 @@ pub enum SourceData {
     Adobe { sap: String, codex: String, platform: String, product_name: String },
     Craft { key: String, msi_product_code: Option<String> },
     Blender { series: String, kind: BlenderKind, msi_product_code: Option<String> },
+    /// OBS Studio, Krita, FreeCAD, Godot, Unity. `series` is what makes an installed copy unique
+    /// for apps that install side by side (FreeCAD "1.1", Godot "4.7.2", Unity "6000.3.27f1").
+    Tools { key: String, series: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +69,9 @@ pub struct Download {
     pub dest: PathBuf,
     pub size: Option<u64>,
     pub sha256: Option<String>,
+    /// Lowercase hex MD5, for vendors that only publish that (Unity).
+    #[serde(default)]
+    pub md5: Option<String>,
     pub headers: Vec<(String, String)>,
 }
 

@@ -9,6 +9,8 @@ pub enum Source {
     Adobe,
     Craft,
     Blender,
+    /// OBS Studio, Krita, FreeCAD, Godot and Unity Editor.
+    Tools,
 }
 
 impl Source {
@@ -17,6 +19,7 @@ impl Source {
             Source::Adobe => "Adobe",
             Source::Craft => "Craft apps",
             Source::Blender => "Blender",
+            Source::Tools => "More apps",
         }
     }
 }
@@ -168,6 +171,9 @@ pub struct Job {
     pub error: Option<JobError>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// An installing job that is only waiting (for its turn, or for Creative Cloud), so Cancel is safe
+    #[serde(default)]
+    pub cancelable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +228,14 @@ pub struct Sources {
     pub adobe: bool,
     pub craft: bool,
     pub blender: bool,
+    /// OBS Studio, Krita, FreeCAD, Godot, Unity. Settings saved by older versions have no
+    /// value for it, and must keep loading: it defaults to on.
+    #[serde(default = "yes")]
+    pub tools: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -244,6 +258,8 @@ pub struct Settings {
     pub language: String,
     pub adobe_install_dir: String,
     pub blender_install_dir: String,
+    /// Root that new Godot versions go into (one folder per version)
+    pub godot_install_dir: String,
     pub blender_channel: String,
     pub blender_keep_patch_versions: bool,
     pub craft_prereleases: bool,
@@ -274,10 +290,11 @@ impl Default for Settings {
             language: "en_US".into(),
             adobe_install_dir: format!("{pf}\\Adobe"),
             blender_install_dir: format!("{pf}\\Blender Foundation"),
+            godot_install_dir: format!("{}\\Programs\\Godot", std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\Users\\Public\\AppData\\Local".into())),
             blender_channel: "beta".into(),
             blender_keep_patch_versions: false,
             craft_prereleases: false,
-            sources: Sources { adobe: true, craft: true, blender: true },
+            sources: Sources { adobe: true, craft: true, blender: true, tools: true },
             parallel_downloads: 2,
             silent_elevation: false,
             ui_zoom: 1.0,
@@ -326,4 +343,23 @@ pub struct Toast {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_saved_before_the_tools_source_still_load() {
+        // A settings.json from before "More apps" has sources without a "tools" value and no
+        // godotInstallDir. It must keep its values instead of falling back to defaults.
+        let old = r#"{"checkInterval":9,"sources":{"adobe":true,"craft":false,"blender":true}}"#;
+        let s: Settings = serde_json::from_str(old).expect("old settings load");
+        assert_eq!(s.check_interval, 9);
+        assert!(!s.sources.craft);
+        assert!(s.sources.tools);
+        assert!(s.godot_install_dir.ends_with("Programs\\Godot"));
+        assert_eq!(Source::Tools.group(), "More apps");
+        assert_eq!(serde_json::to_string(&Source::Tools).unwrap(), "\"tools\"");
+    }
 }

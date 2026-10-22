@@ -244,9 +244,49 @@ pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
     None
 }
 
+/// The change list of a Krita release post: the list items under its "Changelog" heading.
+/// Krita answers unknown posts with a normal page titled "404 Page not found", so that gives none.
+pub fn krita_changelog(html: &str) -> Vec<String> {
+    if html.contains("<title>404") {
+        return vec![];
+    }
+    let heads = headings(html);
+    let Some(k) = heads.iter().position(|h| h.1.trim().eq_ignore_ascii_case("changelog")) else { return vec![] };
+    let level = heads[k].0;
+    let stop = heads[k + 1..].iter().find(|h| h.0 <= level).map(|h| h.2).unwrap_or(html.len());
+    items(&html[heads[k].3..stop])
+}
+
+/// Krita's post for a release. Posts are named with dots for recent releases and dashes for old
+/// ones, under the year they came out. Returns the post address and its change list.
+pub async fn krita(ver: &str, year: i32) -> Option<(String, Vec<String>)> {
+    for y in [year, year - 1] {
+        for name in [ver.to_string(), ver.replace('.', "-")] {
+            let url = format!("https://krita.org/en/posts/{y}/krita-{name}-released/");
+            if let Some(html) = page(&url).await {
+                let lines = krita_changelog(&html);
+                if !lines.is_empty() {
+                    return Some((url, lines));
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn krita_post_changelog() {
+        let post = r#"<html><title>Krita 5.3.4 Released! | Krita</title><ul><li>Download</li></ul><h1>Krita 5.3.4 Released!</h1><p>text</p>
+<h2>Changelog</h2><ul><li>Fix layer thumbnails scaling when using display scaling</li><li>Fix openening large exr files (<a href="x">Bug 525361</a>)</li></ul>
+<h2>Download 5.3.4</h2><ul><li>Not a note</li></ul></html>"#;
+        assert_eq!(krita_changelog(post), vec!["Fix layer thumbnails scaling when using display scaling", "Fix openening large exr files (Bug 525361)"]);
+        assert!(krita_changelog("<html><title>404 Page not found | Krita</title><h2>Changelog</h2><ul><li>x</li></ul>").is_empty());
+        assert!(krita_changelog("<html><h1>No list here</h1></html>").is_empty());
+    }
 
     #[test]
     fn reads_list_items_without_refs() {

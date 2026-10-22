@@ -179,7 +179,7 @@
     width: 64px;
     height: 5px;
     transform-origin: 0 50%;
-    transition: transform 0.6s var(--ease);
+    transition: transform 0.36s var(--ease);
   }
   .mbar svg {
     width: 100%;

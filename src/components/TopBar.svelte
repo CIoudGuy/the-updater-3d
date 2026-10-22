@@ -164,7 +164,7 @@
     overflow: visible;
   }
   .marker.anim {
-    transition: transform 0.38s var(--ease), opacity 0.2s;
+    transition: transform 0.24s var(--ease), opacity 0.13s;
   }
   .item {
     position: relative;

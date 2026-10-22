@@ -91,8 +91,8 @@
 
   /* Motion: quick and functional */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --t-fast: 120ms;  /* hover, press */
-  --t-base: 150ms;  /* list changes, menus */
-  --t-slow: 180ms;  /* dialogs, progress steps */
+  --t-fast: 80ms;  /* hover, press */
+  --t-base: 100ms;  /* list changes, menus */
+  --t-slow: 120ms;  /* dialogs, progress steps */
 }
 

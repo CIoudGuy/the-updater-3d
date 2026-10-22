@@ -139,7 +139,7 @@
     style="left:{pos.left}px;top:{pos.top}px;width:{width}px"
     onkeydown={onkey}
     in:pop|global={{ origin: pos.origin }}
-    out:pop|global={{ origin: pos.origin, duration: 100 }}
+    out:pop|global={{ origin: pos.origin, duration: 70 }}
   >
     <Paint kind="blob" fill="#262626" />
     <div class="scroll" style="max-height:{height - 8}px">
@@ -210,7 +210,7 @@
     pointer-events: none;
   }
   .hi.anim {
-    transition: transform 0.09s var(--ease), height 0.09s, opacity 0.12s;
+    transition: transform 0.07s var(--ease), height 0.07s, opacity 0.08s;
   }
   .item {
     position: relative;

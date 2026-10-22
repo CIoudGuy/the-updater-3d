@@ -5,6 +5,7 @@ A fast Windows app that keeps creative software up to date in one place:
 - **Adobe Creative Cloud apps** (Photoshop, Illustrator, Substance 3D and the rest)
 - **Blender**, every installed version side by side, plus betas
 - **The Craft apps** from ArtCraft (PhotoCraft, VectorCraft, FilmCraft and the others)
+- **More apps**: OBS Studio, Krita, FreeCAD, Godot and Unity Editor
 
 It finds what is installed, shows what can be updated with release notes, and installs, updates,
 rolls back or removes apps. A tiny background checker starts with Windows and sends a notification
@@ -28,6 +29,13 @@ SHA-256 checks, betas from builder.blender.org, and fix lists from blender.org.
 
 **Craft apps.** Versions come from the ArtCraft release feed and GitHub Releases, installed from
 each release's MSI with SHA-256 checks.
+
+**More apps.** OBS Studio, Krita, FreeCAD, Godot and Unity Editor are looked up in their own
+release feeds (GitHub Releases, the KDE download index, Unity's release API) and installed with
+their own installers, silently, after the download has been checked (SHA-256, or exact size and MD5
+for Unity). FreeCAD (per release series), Godot and Unity (per version) install next to the
+copies you already have; OBS Studio and Krita update in place. Godot is a portable copy unpacked
+into its own folder with a Start menu shortcut.
 
 **Admin rights.** The app itself runs without them. When an install needs them, it starts a copy of
 itself elevated (one UAC prompt per batch) and talks to it over a private named pipe. "Fewer admin

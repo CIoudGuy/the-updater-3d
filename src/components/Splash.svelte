@@ -40,7 +40,7 @@
     height: 380px;
   }
   path {
-    transition: fill 0.5s ease;
+    transition: fill 0.32s ease;
   }
   .drift {
     transform-origin: 150px 150px;

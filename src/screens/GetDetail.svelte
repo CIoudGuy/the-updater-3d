@@ -23,7 +23,7 @@
 
   let { id }: { id: string } = $props();
 
-  const FROM: Record<string, string> = { Adobe: "from Creative Cloud", "Craft apps": "from ArtCraft", Blender: "from blender.org" };
+  const FROM: Record<string, string> = { Adobe: "from Creative Cloud", "Craft apps": "from ArtCraft", Blender: "from blender.org", "More apps": "from the makers" };
 
   const c = $derived(ui.catalog?.find((x) => x.id === id));
   // Only a running install of this entry shows progress, like the card in the list.
@@ -217,7 +217,7 @@
           {#if c.prerelease}<dt>Release</dt><dd>Pre-release</dd>{/if}
         </dl>
         <span class="hint">
-          {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
+          {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "tools"}FreeCAD, Godot and Unity install next to your other versions. OBS Studio and Krita are updated in place. Your projects and settings stay as they are.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
           {#if c.prerelease} Pre-release builds can be unstable. Do not rely on them for important work.{/if}
         </span>
       </aside>

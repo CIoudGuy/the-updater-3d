@@ -42,7 +42,7 @@ export type DialogState =
     };
 
 export type InstalledFilter = "updates" | "all" | "recent";
-export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender";
+export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps";
 export type SortKey = "name" | "size" | "updated" | "status";
 
 function load<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
@@ -80,7 +80,7 @@ class Ui {
   query = $state("");
   getQuery = $state("");
   /** Get apps source filter: "all", or a group name */
-  getGroup = $state<"all" | "Adobe" | "Craft apps" | "Blender">("all");
+  getGroup = $state<"all" | "Adobe" | "Craft apps" | "Blender" | "More apps">("all");
 
   /** Get apps list kept across visits, so coming back from a detail page does not reload it */
   catalog = $state<CatalogEntry[] | null>(null);

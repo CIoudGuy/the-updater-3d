@@ -42,7 +42,7 @@
   }
 </script>
 
-<div class="scrim" role="presentation" transition:fade|global={{ duration: reduced() ? 0 : 150 }} onpointerdown={onclose}></div>
+<div class="scrim" role="presentation" transition:fade|global={{ duration: reduced() ? 0 : 100 }} onpointerdown={onclose}></div>
 <div class="wrap">
   <div
     class="dlg"
@@ -53,8 +53,8 @@
     tabindex="-1"
     style="width:{width}px"
     onkeydown={onkey}
-    in:pop|global={{ duration: 180, origin: "center 40%", from: 0.96 }}
-    out:pop|global={{ duration: 120, origin: "center 40%", from: 0.97 }}
+    in:pop|global={{ duration: 120, origin: "center 40%", from: 0.96 }}
+    out:pop|global={{ duration: 80, origin: "center 40%", from: 0.97 }}
   >
     <Paint kind="blob" fill="#262626" lines="M14 10c50-1.4 120-1.6 172-.4M18 190c60 1 110 .8 164-.6" lineStroke="#2E2E2E" />
     <div class="body">{@render children()}</div>

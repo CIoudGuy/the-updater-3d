@@ -25,7 +25,7 @@
   const updating = $derived(app.status === "updating");
   const progress = $derived(job ? job.progress : 0);
   const level = $derived(updating ? Math.max(0.04, progress) : 0.18);
-  const lv = Tween.of(() => level, { duration: reduced() ? 0 : 700, easing: cubicOut });
+  const lv = Tween.of(() => level, { duration: reduced() ? 0 : 420, easing: cubicOut });
   const [vm, vb] = $derived(splitVersion(app.version));
   const pctVal = $derived(Math.round(progress * 100));
   let menuBtn = $state<HTMLButtonElement>();

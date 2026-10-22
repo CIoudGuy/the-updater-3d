@@ -12,7 +12,7 @@ export function enter(node: HTMLElement, index: number | { i: number; y?: number
   const i = typeof index === "number" ? index : index.i;
   const y = typeof index === "number" ? 8 : (index.y ?? 8);
   if (reduced()) {
-    node.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 120, fill: "backwards" });
+    node.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 80, fill: "backwards" });
     return;
   }
   node.animate(
@@ -20,12 +20,12 @@ export function enter(node: HTMLElement, index: number | { i: number; y?: number
       { opacity: 0, transform: `translateY(${y}px)` },
       { opacity: 1, transform: "translateY(0)" },
     ],
-    { duration: 260, delay: Math.min(i, 14) * 26, easing: EASE, fill: "backwards" },
+    { duration: 170, delay: Math.min(i, 10) * 14, easing: EASE, fill: "backwards" },
   );
 }
 
 /** Svelte transition: scale from 0.96 and fade, from a given origin */
-export function pop(_node: Element, { duration = 140, origin = "top right", from = 0.96 }: { duration?: number; origin?: string; from?: number } = {}) {
+export function pop(_node: Element, { duration = 95, origin = "top right", from = 0.96 }: { duration?: number; origin?: string; from?: number } = {}) {
   return {
     duration: reduced() ? 0 : duration,
     easing: cubicOut,
@@ -34,7 +34,7 @@ export function pop(_node: Element, { duration = 140, origin = "top right", from
 }
 
 /** Slide in from the right (toasts) */
-export function slideIn(_node: Element, { duration = 220, x = 28 }: { duration?: number; x?: number } = {}) {
+export function slideIn(_node: Element, { duration = 150, x = 28 }: { duration?: number; x?: number } = {}) {
   return {
     duration: reduced() ? 0 : duration,
     easing: cubicOut,
@@ -43,7 +43,7 @@ export function slideIn(_node: Element, { duration = 220, x = 28 }: { duration?:
 }
 
 /** Quick fade and rise for items that appear later */
-export function rise(_node: Element, { duration = 200, y = 6 }: { duration?: number; y?: number } = {}) {
+export function rise(_node: Element, { duration = 130, y = 6 }: { duration?: number; y?: number } = {}) {
   return {
     duration: reduced() ? 0 : duration,
     easing: cubicOut,
@@ -52,15 +52,15 @@ export function rise(_node: Element, { duration = 200, y = 6 }: { duration?: num
 }
 
 /** Settings pages: the new page slides in a little from the side it comes from, the old one fades out quickly. */
-export function pageIn(_node: Element, { dir = 1, duration = 200, x = 16 }: { dir?: number; duration?: number; x?: number } = {}) {
+export function pageIn(_node: Element, { dir = 1, duration = 130, x = 16 }: { dir?: number; duration?: number; x?: number } = {}) {
   return {
-    delay: reduced() ? 0 : 60,
+    delay: reduced() ? 0 : 30,
     duration: reduced() ? 0 : duration,
     easing: cubicOut,
     css: (t: number) => `opacity:${t};transform:translateX(${(1 - t) * x * dir}px)`,
   };
 }
-export function pageOut(_node: Element, { dir = 1, duration = 110, x = 10 }: { dir?: number; duration?: number; x?: number } = {}) {
+export function pageOut(_node: Element, { dir = 1, duration = 70, x = 10 }: { dir?: number; duration?: number; x?: number } = {}) {
   return {
     duration: reduced() ? 0 : duration,
     easing: cubicOut,

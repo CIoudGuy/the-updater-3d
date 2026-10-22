@@ -131,7 +131,7 @@ pub fn execute(step: &Step) -> StepResult {
     let r: Result<(Option<u32>, String)> = (|| match step {
         Step::Run { exe, args, cwd, ok_codes, .. } => {
             let mut c = winutil::cmd(exe);
-            c.args(args);
+            winutil::add_args(&mut c, args);
             if let Some(d) = cwd {
                 c.current_dir(d);
             }
@@ -312,8 +312,7 @@ async fn connect(silent: bool) -> Result<Conn> {
     if silent && task_exists() {
         let wf = WorkerFile { pipe: pipe.clone(), token: token.clone(), created: chrono::Utc::now().timestamp() };
         std::fs::write(paths::worker_file(), serde_json::to_vec(&wf)?)?;
-        let out = winutil::cmd("schtasks.exe").args(["/Run", "/TN", TASK_NAME]).output();
-        started = out.map(|o| o.status.success()).unwrap_or(false);
+        started = tokio::task::spawn_blocking(|| winutil::run_task(TASK_NAME)).await.unwrap_or(false);
     }
     // Debug builds can test the helper protocol without a UAC prompt.
     #[cfg(debug_assertions)]
@@ -352,13 +351,7 @@ async fn connect(silent: bool) -> Result<Conn> {
 }
 
 pub fn task_exists() -> bool {
-    winutil::cmd("schtasks.exe").args(["/Query", "/TN", TASK_NAME]).output().map(|o| o.status.success()).unwrap_or(false)
-}
-
-fn current_user_sid() -> Option<String> {
-    let out = winutil::cmd("whoami.exe").args(["/user", "/fo", "csv", "/nh"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.trim().rsplit(',').next().map(|s| s.trim_matches('"').to_string()).filter(|s| s.starts_with("S-1-"))
+    winutil::task_exists(TASK_NAME)
 }
 
 /// Steps that register (or remove) the scheduled task used for prompt-free installs.
@@ -375,7 +368,7 @@ pub fn task_steps(enable: bool) -> Result<Vec<Step>> {
         }]);
     }
     let exe = std::env::current_exe()?;
-    let sid = current_user_sid().ok_or_else(|| anyhow!("Could not read your Windows account"))?;
+    let sid = winutil::current_user_sid().ok_or_else(|| anyhow!("Could not read your Windows account"))?;
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">

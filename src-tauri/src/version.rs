@@ -8,9 +8,24 @@ pub fn parts(v: &str) -> Vec<u64> {
     // Stop at a pre-release or build suffix: "5.3.0-beta+v53" -> "5.3.0"
     let core = v.split(['-', '+', ' ']).next().unwrap_or("");
     core.split('.')
-        .map(|p| {
+        .flat_map(|p| {
             let digits: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse::<u64>().unwrap_or(0)
+            let n = digits.parse::<u64>().unwrap_or(0);
+            // Unity builds: "62f3" is patch 62, final release 3 (a < b < f < p), so f3 is newer
+            // than f1 and a beta of a patch is older than its final build.
+            let rest = &p[digits.len()..];
+            let mut it = rest.chars();
+            let build = match (it.next(), it.as_str().parse::<u64>()) {
+                (Some(l @ ('a' | 'b' | 'f' | 'p')), Ok(b)) if !digits.is_empty() => Some((l, b)),
+                _ => None,
+            };
+            match build {
+                Some((l, b)) => {
+                    let rank = match l { 'a' => 1, 'b' => 2, 'f' => 3, _ => 4 };
+                    vec![n, rank * 1_000_000 + b]
+                }
+                None => vec![n],
+            }
         })
         .collect()
 }
@@ -62,6 +77,19 @@ mod tests {
         assert!(newer("v0.6.1", "0.4.1"));
         assert_eq!(cmp("5.3.0-beta+v53.873f", "5.3.0"), Ordering::Equal);
         assert!(!newer("5.2.2", "5.2.2"));
+    }
+
+    #[test]
+    fn unity_builds_compare_by_their_build_number() {
+        assert!(newer("2022.3.62f3", "2022.3.62f1"));
+        assert!(newer("2022.3.62f1", "2022.3.61f9"));
+        assert!(newer("6000.7.0f1", "6000.7.0b6"));
+        assert!(newer("6000.7.0b6", "6000.7.0b5"));
+        assert_eq!(cmp("6000.3.27f1", "6000.3.27f1"), Ordering::Equal);
+        assert_eq!(series("6000.3.27f1"), "6000.3");
+        // Other schemes are untouched.
+        assert_eq!(cmp("26.3rc2", "26.3"), Ordering::Equal);
+        assert_eq!(parts("5.3.0-beta+v53"), vec![5, 3, 0]);
     }
 
     #[test]

@@ -259,10 +259,10 @@
     overflow-y: auto;
   }
   .page.in {
-    animation: page-in 0.18s var(--ease) both;
+    animation: page-in 0.12s var(--ease) both;
   }
   .page.out {
-    animation: page-out 0.09s linear forwards;
+    animation: page-out 0.06s linear forwards;
     pointer-events: none;
   }
 </style>
