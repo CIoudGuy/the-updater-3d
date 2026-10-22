@@ -688,6 +688,11 @@ impl Core {
         loop {
             tick.tick().await;
             n += 1;
+            // Keep the admin helper while updates wait: a big download can take longer than its
+            // idle time, and a new helper would need a new admin prompt in the middle of a batch.
+            if n % (240 / TICK_SECS) == 0 && self.jobs.lock().iter().any(|j| !j.job.state.is_finished()) {
+                self.elevator.keep_alive().await;
+            }
             // "Running" flags and disk space: every minute, and every tick while Creative Cloud
             // is down so the warning goes away as soon as it starts (whatever the check interval).
             let cc_down = self.st.lock().status.as_ref().is_some_and(|s| s.cc_installed && !s.cc_running);
@@ -856,6 +861,59 @@ impl Core {
         let inst = installed.iter().find(|i| i.id == app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
         let rest: Vec<sources::Installed> = installed.iter().filter(|i| i.id != inst.id).cloned().collect();
         Ok(crate::prefs::preview(&crate::prefs::steps(inst, &rest, &crate::prefs::Roots::system())))
+    }
+
+    /// Register (or remove) the scheduled task behind "Fewer admin prompts": one admin prompt.
+    /// `automatic`: the app does it by itself (the setting is on but the task is missing); a "No"
+    /// then switches the setting off with a note, so it is not asked again every start.
+    pub fn set_up_silent_task(self: &Arc<Self>, enable: bool, automatic: bool) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let r: Result<()> = async {
+                for step in crate::elevate::task_steps(enable)? {
+                    let res = me.elevator.run(step, false).await?;
+                    if !res.ok {
+                        return Err(anyhow!("{} {}", res.message, res.output));
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            // The prompt for the task is its own question, not a batch.
+            me.elevator.reset_declined();
+            match r {
+                Ok(()) => me.toast("ok", if enable { "Updates now install without a prompt each time" } else { "Each install asks for admin rights again" }, None),
+                Err(e) => {
+                    let mut s = me.settings.write();
+                    s.silent_elevation = !enable;
+                    store::save_settings(&s);
+                    let s2 = s.clone();
+                    drop(s);
+                    me.emit("settings", s2);
+                    if automatic {
+                        me.toast("info", "Each install asks for admin rights. Turn on Fewer admin prompts in Settings anytime.", None);
+                    } else {
+                        me.toast("err", format!("Could not change admin prompts: {e:#}"), None);
+                    }
+                }
+            }
+        });
+    }
+
+    /// When the window first opens: "Fewer admin prompts" is on but its task is not set up yet
+    /// (a new install, or the task was removed): ask for the one admin prompt now, once per run.
+    pub fn ensure_silent_task(self: &Arc<Self>) {
+        static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !self.settings.read().silent_elevation || ASKED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let missing = !tokio::task::spawn_blocking(crate::elevate::task_exists).await.unwrap_or(true);
+            if missing {
+                me.set_up_silent_task(true, true);
+            }
+        });
     }
 
     /// One Get apps entry, installed or not (its page stays open after the install finishes).
@@ -1046,6 +1104,8 @@ impl Core {
     // ------------------------------------------------------------ jobs
 
     pub fn enqueue(self: &Arc<Self>, req: JobRequest) -> Result<String> {
+        // A new batch (or a retry) may ask for admin rights again after an earlier "No".
+        self.elevator.reset_declined();
         let (app_id, kind, to_version) = match &req {
             JobRequest::Update { app_id, version } => {
                 let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
@@ -1878,32 +1938,7 @@ impl Core {
             }
         }
         if new.silent_elevation != old.silent_elevation {
-            let me = self.clone();
-            let enable = new.silent_elevation;
-            tokio::spawn(async move {
-                let r: Result<()> = async {
-                    for step in crate::elevate::task_steps(enable)? {
-                        let res = me.elevator.run(step, false).await?;
-                        if !res.ok {
-                            return Err(anyhow!("{} {}", res.message, res.output));
-                        }
-                    }
-                    Ok(())
-                }
-                .await;
-                match r {
-                    Ok(()) => me.toast("ok", if enable { "Updates now install without a prompt each time" } else { "Each install asks for admin rights again" }, None),
-                    Err(e) => {
-                        let mut s = me.settings.write();
-                        s.silent_elevation = !enable;
-                        store::save_settings(&s);
-                        let s2 = s.clone();
-                        drop(s);
-                        me.emit("settings", s2);
-                        me.toast("err", format!("Could not change admin prompts: {e:#}"), None);
-                    }
-                }
-            });
+            self.set_up_silent_task(new.silent_elevation, false);
         }
         let rescan = new.sources.adobe != old.sources.adobe
             || new.sources.craft != old.sources.craft

@@ -40,6 +40,15 @@ pub fn run() {
             // Checking in the background at sign-in is on by default: set it up once.
             {
                 let mut p = core.persisted.lock();
+                if !p.silent_elevation_default_on {
+                    // Fewer admin prompts became on by default in 1.1.2; the task behind it is set
+                    // up (one admin prompt) when the window opens.
+                    let mut s = core.settings.write();
+                    s.silent_elevation = true;
+                    store::save_settings(&s);
+                    p.silent_elevation_default_on = true;
+                    store::save_state(&p);
+                }
                 if !p.other_apps_default_on {
                     let mut s = core.settings.write();
                     s.sources.other = true;
@@ -131,6 +140,7 @@ pub fn run() {
             commands::clear_finished_jobs,
             commands::get_catalog_entry,
             commands::prefs_preview,
+            commands::window_ready,
             commands::close_and_continue,
             commands::get_activity,
             commands::export_activity,

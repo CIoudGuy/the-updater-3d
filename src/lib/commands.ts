@@ -18,6 +18,7 @@ export interface Commands {
   install_version: { args: { appId: string; version: string }; ret: void };
   uninstall_app: { args: { appId: string; removePrefs: boolean }; ret: void };
   prefs_preview: { args: { appId: string }; ret: PrefsItem[] };
+  window_ready: { args: {}; ret: void };
   repair_app: { args: { appId: string }; ret: void };
 
   open_app: { args: { appId: string }; ret: void };

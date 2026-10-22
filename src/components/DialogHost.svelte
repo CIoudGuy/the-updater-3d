@@ -11,6 +11,7 @@
   import type { PrefsItem } from "../lib/types";
   import { bytes, bytesParts, unitFor } from "../lib/format";
   import { SPLASH } from "../lib/paths";
+  import { blockedText } from "../lib/blocked";
 
   const d = $derived(ui.dialog);
   const blocked = $derived(store.blockedJobs.find((j) => !ui.dismissedBlocked.includes(j.id)));
@@ -109,16 +110,15 @@
   <Dialog labelledby="blk-title" onclose={later} onenter={closeAndUpdate}>
     <svg class="splash" viewBox="0 0 300 300" aria-hidden="true"><path d={SPLASH[2]} transform="translate(80 -60)" fill={blocked.fg} fill-opacity="0.08" /></svg>
     <Mark app={a ?? blocked} size={44} fs={16} />
-    <h2 id="blk-title">Close {blocked.name} to continue</h2>
-    <p class="lead">
-      {blocked.name} {blocked.toVersion} is downloaded and ready to install. Save your work, then close {blocked.name}.{otherJobs > 0 ? " The other updates keep going." : ""}
-    </p>
+    {@const t = blockedText(blocked, otherJobs)}
+    <h2 id="blk-title">{t.title}</h2>
+    <p class="lead">{t.lead}</p>
     <div class="opt info">
-      <span class="grow">Installs by itself when {blocked.blockedBy.length ? blocked.blockedBy.join(", ") : blocked.name} closes</span>
+      <span class="grow">{t.info}</span>
     </div>
     <div class="actions">
       <Btn variant="raised" onclick={later} hint="Esc">Later</Btn>
-      <Btn variant="primary" onclick={closeAndUpdate} hint="Enter">Close and update</Btn>
+      <Btn variant="primary" onclick={closeAndUpdate} hint="Enter">{t.action}</Btn>
     </div>
   </Dialog>
 {:else if d?.type === "lowdisk"}

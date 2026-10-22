@@ -15,6 +15,19 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOpti
 
 pub const TASK_NAME: &str = "The Updater 3D Helper";
 const IDLE_EXIT: Duration = Duration::from_secs(15 * 60);
+/// What the app sends to keep the helper from leaving while updates wait in the queue.
+const PING: &str = "ping";
+/// How long the scheduled task gets to start the helper before the normal prompt is used.
+const TASK_START: Duration = Duration::from_secs(20);
+
+fn idle_exit() -> Duration {
+    // Debug builds can test the idle exit without waiting 15 minutes.
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("UPDATER3D_TEST_IDLE_MS").ok().and_then(|v| v.parse().ok()) {
+        return Duration::from_millis(ms);
+    }
+    IDLE_EXIT
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Request {
@@ -239,10 +252,14 @@ pub fn worker_main(args: &[String]) -> i32 {
         }
         loop {
             let mut line = String::new();
-            let read = tokio::time::timeout(IDLE_EXIT, r.read_line(&mut line)).await;
+            let read = tokio::time::timeout(idle_exit(), r.read_line(&mut line)).await;
             match read {
                 Ok(Ok(0)) | Err(_) | Ok(Err(_)) => return 0,
                 Ok(Ok(_)) => {}
+            }
+            // The app is still busy with a batch: stay.
+            if line.trim() == PING {
+                continue;
             }
             let Ok(req) = serde_json::from_str::<Request>(&line) else { continue };
             let result = tokio::task::spawn_blocking(move || execute(&req.step)).await.unwrap_or(StepResult {
@@ -269,11 +286,50 @@ struct Conn {
 
 pub struct Elevator {
     conn: tokio::sync::Mutex<Option<Conn>>,
+    /// Helpers started so far (tests check that one helper serves a whole batch)
+    connects: std::sync::atomic::AtomicU32,
+    /// Times a helper was asked for (each one can be an admin prompt)
+    prompts: std::sync::atomic::AtomicU32,
+    /// The admin prompt was declined during this batch: the rest of the batch does not ask again
+    declined: std::sync::atomic::AtomicBool,
+    /// Debug builds: act as if the prompt was declined, to test that without a real prompt
+    decline_for_test: bool,
 }
+
+const DECLINED: &str = "Admin rights were declined, so nothing was installed.";
 
 impl Elevator {
     pub fn new() -> Self {
-        Elevator { conn: tokio::sync::Mutex::new(None) }
+        Elevator { conn: tokio::sync::Mutex::new(None), connects: Default::default(), prompts: Default::default(), declined: Default::default(), decline_for_test: false }
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn declining_for_test() -> Self {
+        Elevator { decline_for_test: true, ..Self::new() }
+    }
+
+    pub fn connects(&self) -> u32 {
+        self.connects.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn prompts(&self) -> u32 {
+        self.prompts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A new batch (or a retry) may ask for admin rights again.
+    pub fn reset_declined(&self) {
+        self.declined.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Keep the helper from leaving while updates still wait (a long download can take longer
+    /// than its idle time). Does nothing while a step runs or when there is no helper.
+    pub async fn keep_alive(&self) {
+        let Ok(mut guard) = self.conn.try_lock() else { return };
+        if let Some(c) = guard.as_mut() {
+            if c.writer.write_all(format!("{PING}\n").as_bytes()).await.is_err() {
+                *guard = None;
+            }
+        }
     }
 
     /// Run a step with admin rights when it needs them.
@@ -284,7 +340,23 @@ impl Elevator {
         let mut guard = self.conn.lock().await;
         for attempt in 0..2 {
             if guard.is_none() {
-                *guard = Some(connect(silent).await?);
+                // Declined once in this batch: the other updates do not open a prompt each.
+                if self.declined.load(std::sync::atomic::Ordering::SeqCst) {
+                    bail!("{DECLINED}");
+                }
+                self.prompts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match connect(silent, self.decline_for_test).await {
+                    Ok(c) => {
+                        self.connects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        *guard = Some(c);
+                    }
+                    Err(e) => {
+                        if e.to_string() == DECLINED {
+                            self.declined.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        return Err(e);
+                    }
+                }
             }
             let c = guard.as_mut().unwrap();
             c.next_id += 1;
@@ -315,17 +387,26 @@ impl Elevator {
     }
 }
 
-async fn connect(silent: bool) -> Result<Conn> {
+async fn connect(silent: bool, decline_for_test: bool) -> Result<Conn> {
     let pipe = format!(r"\\.\pipe\the-updater-3d-{}", uuid::Uuid::new_v4().simple());
     let token = uuid::Uuid::new_v4().simple().to_string();
     let server = ServerOptions::new().first_pipe_instance(true).max_instances(1).create(&pipe)?;
     let exe = std::env::current_exe()?;
 
     let mut started = false;
+    let mut connected = false;
     if silent && task_exists() {
         let wf = WorkerFile { pipe: pipe.clone(), token: token.clone(), created: chrono::Utc::now().timestamp() };
         std::fs::write(paths::worker_file(), serde_json::to_vec(&wf)?)?;
-        started = tokio::task::spawn_blocking(|| winutil::run_task(TASK_NAME)).await.unwrap_or(false);
+        if tokio::task::spawn_blocking(|| winutil::run_task(TASK_NAME)).await.unwrap_or(false) {
+            // A task that points at an older copy of the app never connects: after a short wait
+            // the normal prompt is used instead of failing the update.
+            connected = matches!(tokio::time::timeout(TASK_START, server.connect()).await, Ok(Ok(())));
+            started = connected;
+        }
+    }
+    if decline_for_test && !started {
+        bail!("{DECLINED}");
     }
     // Debug builds can test the helper protocol without a UAC prompt.
     #[cfg(debug_assertions)]
@@ -344,14 +425,16 @@ async fn connect(silent: bool) -> Result<Conn> {
                     winutil::wait_process(h);
                 });
             }
-            Err(e) if e.to_string() == "declined" => bail!("Admin rights were declined, so nothing was installed."),
+            Err(e) if e.to_string() == "declined" => bail!("{DECLINED}"),
             Err(e) => return Err(e),
         }
     }
     // Wait for the helper (the user may take a while on the UAC prompt).
-    tokio::time::timeout(Duration::from_secs(180), server.connect())
-        .await
-        .map_err(|_| anyhow!("The admin helper did not start"))??;
+    if !connected {
+        tokio::time::timeout(Duration::from_secs(180), server.connect())
+            .await
+            .map_err(|_| anyhow!("The admin helper did not start"))??;
+    }
     let _ = std::fs::remove_file(paths::worker_file());
     let (r, w) = tokio::io::split(server);
     let mut reader = BufReader::new(r);
