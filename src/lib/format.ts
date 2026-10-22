@@ -43,13 +43,19 @@ export function unitFor(n: number): string {
   return UNITS[u];
 }
 
+/** Number and unit of a speed, for places that show them apart: ["38", "MB/s"], ["380", "KB/s"] */
+export function speedParts(bps: number): [string, string] {
+  if (!bps || bps < 1) return ["0", "MB/s"];
+  const mb = bps / 1e6;
+  if (mb >= 10) return [String(Math.round(mb)), "MB/s"];
+  if (mb >= 1) return [mb.toFixed(1), "MB/s"];
+  return [String(Math.max(1, Math.round(bps / 1e3))), "KB/s"];
+}
+
 /** 38 MB/s */
 export function speed(bps: number): string {
-  if (!bps || bps < 1) return "0 MB/s";
-  const mb = bps / 1e6;
-  if (mb >= 10) return `${Math.round(mb)} MB/s`;
-  if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
-  return `${Math.max(1, Math.round(bps / 1e3))} KB/s`;
+  const [n, u] = speedParts(bps);
+  return `${n} ${u}`;
 }
 
 /** 1 min 15 s, 20 s, 1 h 5 min */

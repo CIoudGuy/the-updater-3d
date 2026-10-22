@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{watch, Notify};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum JobRequest {
     Update { app_id: String, version: Option<String> },
     Install { id: String, version: Option<String> },
@@ -26,11 +26,311 @@ pub enum JobRequest {
     Repair { app_id: String },
 }
 
+/// An Other app without an icon is searched for again after this many days.
+const ICON_RETRY_DAYS: i64 = 7;
+
+/// The icon of a package kept in the icon cache from an earlier run.
+fn other_icon_on_disk(id: &str) -> Option<std::path::PathBuf> {
+    let stem = crate::sources::icons::file_stem(id);
+    ["png", "svg", "webp", "jpg", "gif", "ico"].iter().map(|e| paths::icons().join(format!("{stem}.{e}"))).find(|p| p.metadata().is_ok_and(|m| m.len() > 0))
+}
+
 struct JobRec {
     job: Job,
     req: JobRequest,
     ctl: watch::Sender<Control>,
     active: bool,
+    /// The plan's folders and exe names that must be closed (set while the job waits for them),
+    /// so "Close and continue" closes exactly those and not another copy of the app.
+    block: (Vec<PathBuf>, Vec<String>),
+    /// Queue order (installs that wait for their turn go in this order).
+    seq: u64,
+    phase: Phase,
+    /// Restored after a restart: waits until the app knows what is installed again.
+    held: bool,
+    /// Where its downloads go, so a restart keeps their partial files.
+    dests: Vec<PathBuf>,
+    /// How to tell after a restart whether an install that was cut off finished.
+    verify: Option<SavedVerify>,
+}
+
+/// Where a job is in its run. Only jobs that are downloading use a "downloads at once" slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Phase {
+    /// Not started.
+    #[default]
+    Queued,
+    /// Planning and downloading.
+    Download,
+    /// Downloaded and checked; waiting for its turn or for the app to close. Nothing ran yet.
+    Ready,
+    /// Install steps are running.
+    Running,
+    /// Checking the result.
+    Verifying,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum SavedVerify {
+    Version { app_id: String, version: String },
+    Removed { app_id: String },
+}
+
+/// An unfinished job as saved in the queue file.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct SavedJob {
+    job: Job,
+    req: JobRequest,
+    #[serde(default)]
+    phase: Phase,
+    #[serde(default)]
+    dests: Vec<PathBuf>,
+    #[serde(default)]
+    verify: Option<SavedVerify>,
+}
+
+/// What a restart does with a saved job.
+#[derive(Debug, PartialEq, Eq)]
+enum Restore {
+    /// Queue it again in this state (Waiting or Paused). Its download continues where it was.
+    Queue(JobState),
+    /// It was installing when the app or PC stopped: look at the installed version first.
+    Check,
+}
+
+fn restore_kind(state: JobState, phase: Phase) -> Restore {
+    match phase {
+        Phase::Running | Phase::Verifying => Restore::Check,
+        _ if state == JobState::Paused => Restore::Queue(JobState::Paused),
+        _ => Restore::Queue(JobState::Waiting),
+    }
+}
+
+/// The installer of an interrupted job finished after all, by what the scan finds now.
+fn finished_anyway(v: Option<&SavedVerify>, installed: &[Installed]) -> bool {
+    match v {
+        Some(SavedVerify::Version { app_id, version: want }) => installed.iter().any(|i| &i.id == app_id && !i.missing && !version::newer(want, &i.version)),
+        Some(SavedVerify::Removed { app_id }) => !installed.iter().any(|i| &i.id == app_id),
+        None => false,
+    }
+}
+
+fn saved_verify(plan: &Plan) -> Option<SavedVerify> {
+    if plan.kind == JobKind::Repair {
+        // The version does not change: nothing tells whether it finished.
+        return None;
+    }
+    match &plan.verify {
+        Verify::Version { app_id, version } | Verify::Wait { app_id, version, .. } => Some(SavedVerify::Version { app_id: app_id.clone(), version: version.clone() }),
+        Verify::Removed { app_id } => Some(SavedVerify::Removed { app_id: app_id.clone() }),
+        Verify::None => None,
+    }
+}
+
+/// Saved jobs: unfinished ones only.
+fn queue_file() -> PathBuf {
+    paths::data_dir().join("queue.json")
+}
+
+fn save_queue_to(file: &std::path::Path, jobs: &[SavedJob]) {
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec(jobs).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
+}
+
+fn load_queue_from(file: &std::path::Path) -> Vec<SavedJob> {
+    std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// The jobs a free "downloads at once" slot goes to: waiting jobs in queue order, while fewer
+/// than `limit` jobs are downloading. Jobs that finished downloading and wait to install do not
+/// hold a slot. Each job is (running, phase, state, held).
+fn pick_to_start(jobs: &[(bool, Phase, JobState, bool)], limit: usize) -> Vec<usize> {
+    let downloading = jobs.iter().filter(|(active, phase, _, _)| *active && matches!(phase, Phase::Queued | Phase::Download)).count();
+    let mut picked = Vec::new();
+    for (k, (active, _, state, held)) in jobs.iter().enumerate() {
+        if downloading + picked.len() >= limit {
+            break;
+        }
+        if !active && !held && *state == JobState::Waiting {
+            picked.push(k);
+        }
+    }
+    picked
+}
+
+/// One installer at a time. The jobs waiting get their turn in queue order, not in the order
+/// their downloads happened to finish.
+struct TurnGate {
+    st: Mutex<GateSt>,
+    notify: Notify,
+}
+
+#[derive(Default)]
+struct GateSt {
+    /// Job id and app name of the job installing now.
+    holder: Option<(String, String)>,
+    /// Queue position and job id of the jobs waiting.
+    waiting: Vec<(u64, String)>,
+}
+
+struct Turn<'a> {
+    gate: &'a TurnGate,
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.gate.st.lock().holder = None;
+        self.gate.notify.notify_waiters();
+    }
+}
+
+impl TurnGate {
+    fn new() -> Self {
+        TurnGate { st: Mutex::new(GateSt::default()), notify: Notify::new() }
+    }
+    /// The app installing now.
+    fn holder(&self) -> Option<String> {
+        self.st.lock().holder.as_ref().map(|h| h.1.clone())
+    }
+    /// Wait for this job's turn; None when the job is canceled meanwhile.
+    async fn take(&self, id: &str, name: &str, seq: u64, mut ctl: watch::Receiver<Control>) -> Option<Turn<'_>> {
+        self.st.lock().waiting.push((seq, id.to_string()));
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut st = self.st.lock();
+                let first = st.waiting.iter().min_by_key(|w| w.0).map(|w| w.1.clone());
+                if st.holder.is_none() && first.as_deref() == Some(id) {
+                    st.waiting.retain(|w| w.1 != id);
+                    st.holder = Some((id.to_string(), name.to_string()));
+                    return Some(Turn { gate: self });
+                }
+            }
+            if *ctl.borrow_and_update() == Control::Cancel {
+                self.st.lock().waiting.retain(|w| w.1 != id);
+                self.notify.notify_waiters();
+                return None;
+            }
+            tokio::select! {
+                _ = &mut notified => {}
+                r = ctl.changed() => {
+                    if r.is_err() {
+                        notified.await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Locks by name (an app, a folder): two jobs that write the same place take turns.
+#[derive(Default)]
+struct KeyLocks {
+    m: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl KeyLocks {
+    /// Take every lock in `keys` (in sorted order, so two jobs never wait for each other).
+    async fn take(&self, keys: &[String], mut ctl: watch::Receiver<Control>) -> Option<Vec<tokio::sync::OwnedMutexGuard<()>>> {
+        let mut keys = keys.to_vec();
+        keys.sort();
+        keys.dedup();
+        let mut held = Vec::new();
+        for k in keys {
+            let m = self.m.lock().entry(k).or_default().clone();
+            let canceled = async {
+                loop {
+                    if *ctl.borrow_and_update() == Control::Cancel {
+                        return;
+                    }
+                    if ctl.changed().await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            };
+            tokio::select! {
+                g = m.lock_owned() => held.push(g),
+                _ = canceled => return None,
+            }
+        }
+        Some(held)
+    }
+}
+
+/// What an install step does, for the job's detail line. `files` is the number of files in a
+/// zip being unpacked.
+fn step_detail(step: &sources::Step, files: Option<usize>) -> String {
+    use sources::Step;
+    match step {
+        Step::Run { exe, args, label, .. } => {
+            let file = exe.file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let low = label.to_ascii_lowercase();
+            let uninstall = low.contains("uninstall") || low.contains("removing") || file.contains("uninst") || args.iter().any(|a| a.eq_ignore_ascii_case("/x"));
+            if file.contains("remoteupdatemanager") {
+                "Adobe Remote Update Manager is working".into()
+            } else if file == "msiexec.exe" {
+                if uninstall { "Windows Installer is removing it silently".into() } else { "Windows Installer is running silently".into() }
+            } else if uninstall {
+                "Running the uninstaller silently".into()
+            } else {
+                "Running the installer silently".into()
+            }
+        }
+        Step::ExtractZip { .. } => match files {
+            Some(n) => format!("Unpacking {} file{}", thousands(n as u64), if n == 1 { "" } else { "s" }),
+            None => "Unpacking".into(),
+        },
+        Step::RemoveDir { path, .. } => format!("Deleting the folder {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()),
+        Step::RemoveIfOnlyUninstaller { .. } => "Removing the empty app folder".into(),
+        Step::WriteFile { .. } => "Writing a settings file".into(),
+        Step::Shortcut { lnk, .. } => {
+            if lnk.to_string_lossy().to_ascii_lowercase().contains("start menu") {
+                "Adding the Start menu shortcut".into()
+            } else {
+                "Adding a shortcut".into()
+            }
+        }
+        Step::RemoveFile { .. } => "Removing a file".into(),
+        Step::OpenUri { uri, .. } => format!("Handing over to {}", uri.split(':').next().unwrap_or("another app")),
+        Step::RemoveUserRegKey { .. } => "Removing its registry entries".into(),
+        Step::CheckSigner { signer, .. } => format!("Checking the signature by {signer}"),
+    }
+}
+
+/// 1234567 -> "1,234,567"
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (k, c) in s.chars().enumerate() {
+        if k > 0 && (s.len() - k) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Files (not folders) in a zip, read from its directory.
+fn zip_files(p: &std::path::Path) -> Option<usize> {
+    let f = std::fs::File::open(p).ok()?;
+    let mut z = zip::ZipArchive::new(std::io::BufReader::new(f)).ok()?;
+    let mut n = 0;
+    for i in 0..z.len() {
+        if z.by_index_raw(i).ok().is_some_and(|e| !e.is_dir()) {
+            n += 1;
+        }
+    }
+    Some(n)
+}
+
+/// The processes "Close and continue" closes: only the ones that block this job.
+fn close_targets(list: &[procs::Proc], dirs: &[PathBuf], names: &[String]) -> Vec<u32> {
+    procs::blocking(list, dirs, names).iter().map(|p| p.pid).collect()
 }
 
 #[derive(Default)]
@@ -40,8 +340,12 @@ struct St {
     icons: HashMap<String, String>,
     failed: HashMap<String, JobError>,
     sizes: HashMap<String, u64>,
+    /// "<app id>@<version>" -> download size of that update (0: the server did not say)
+    dl_sizes: HashMap<String, u64>,
     /// Catalog id -> local icon URL (Adobe CDN and getartcraft.com icons, cached on disk)
     catalog_icons: HashMap<String, String>,
+    /// Other apps ids ("other:<package>") whose icon is being searched for right now
+    icon_busy: HashSet<String>,
     status: Option<Status>,
     /// Sources whose latest-version lookup failed on the last check.
     unknown_sources: HashSet<&'static str>,
@@ -60,7 +364,14 @@ pub struct Core {
     pub elevator: Elevator,
     pub throttle: Arc<Throttle>,
     wake: Notify,
-    install_lock: tokio::sync::Mutex<()>,
+    install_gate: TurnGate,
+    /// Jobs that write the same app or folder take turns, installers or not.
+    write_locks: KeyLocks,
+    /// A screen the tray asked the main window to show; read once by the window.
+    pub pending_route: Mutex<Option<String>>,
+    next_seq: std::sync::atomic::AtomicU64,
+    /// What the saved queue file holds, to write it only when that changes.
+    queue_saved: Mutex<String>,
     check_lock: tokio::sync::Mutex<()>,
     /// A check was asked for while one ran: run once more when it ends
     check_again: std::sync::atomic::AtomicBool,
@@ -118,7 +429,11 @@ impl Core {
             elevator: Elevator::new(),
             throttle,
             wake: Notify::new(),
-            install_lock: tokio::sync::Mutex::new(()),
+            install_gate: TurnGate::new(),
+            write_locks: KeyLocks::default(),
+            pending_route: Mutex::new(None),
+            next_seq: std::sync::atomic::AtomicU64::new(0),
+            queue_saved: Mutex::new(String::new()),
             check_lock: tokio::sync::Mutex::new(()),
             check_again: std::sync::atomic::AtomicBool::new(false),
             persisted: Mutex::new(persisted),
@@ -141,7 +456,124 @@ impl Core {
             app_version: env!("CARGO_PKG_VERSION").into(),
             self_update: None,
         });
+        core.restore_queue();
         core
+    }
+
+    // ------------------------------------------------------------ the saved queue
+
+    /// Bring back the jobs that were not finished when the app or the PC stopped. They wait until
+    /// the first scan (`release_restored`); their downloads continue where they were. Partial
+    /// downloads no job needs any more are deleted.
+    fn restore_queue(&self) {
+        let saved = load_queue_from(&queue_file());
+        let mut keep: HashSet<PathBuf> = HashSet::new();
+        let mut jobs = self.jobs.lock();
+        for s in saved {
+            if s.job.state.is_finished() || jobs.iter().any(|j| j.job.app_id == s.job.app_id) {
+                continue;
+            }
+            keep.extend(s.dests.iter().cloned());
+            let mut job = s.job;
+            let (state, phase) = match restore_kind(job.state, s.phase) {
+                Restore::Queue(st) => (st, Phase::Queued),
+                Restore::Check => (JobState::Installing, s.phase),
+            };
+            job.state = state;
+            job.step = match state {
+                JobState::Paused => "Paused".into(),
+                JobState::Waiting => "Waiting".into(),
+                _ => "Checking whether it finished".into(),
+            };
+            job.detail = match state {
+                JobState::Installing => "The app stopped while this was installing".into(),
+                _ if job.downloaded > 0 => "Continues where it stopped".into(),
+                _ => String::new(),
+            };
+            job.speed = 0.0;
+            job.eta = None;
+            job.blocked_by.clear();
+            job.cancelable = false;
+            let (tx, _) = watch::channel(if state == JobState::Paused { Control::Pause } else { Control::Run });
+            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            jobs.push(JobRec { job, req: s.req, ctl: tx, active: false, block: Default::default(), seq, phase, held: true, dests: s.dests, verify: s.verify });
+        }
+        let n = jobs.len();
+        drop(jobs);
+        if n > 0 {
+            log::info!("restored {n} unfinished jobs");
+        }
+        let freed = download::sweep(&paths::downloads(), &keep);
+        if freed > 0 {
+            log::info!("deleted {} of unfinished downloads no job needs", fmt_bytes(freed));
+        }
+    }
+
+    /// After the first scan: jobs cut off while installing are checked against what is installed
+    /// now (never run again by themselves), and the others start.
+    fn release_restored(self: &Arc<Self>) {
+        let installed = self.st.lock().installed.clone();
+        let mut failed: Vec<(String, String)> = Vec::new();
+        let mut done: Vec<(String, String)> = Vec::new();
+        {
+            let mut jobs = self.jobs.lock();
+            for j in jobs.iter_mut().filter(|j| j.held) {
+                j.held = false;
+                if !matches!(j.phase, Phase::Running | Phase::Verifying) {
+                    continue;
+                }
+                j.phase = Phase::Queued;
+                j.job.detail.clear();
+                j.job.finished_at = Some(now());
+                if finished_anyway(j.verify.as_ref(), &installed) {
+                    j.job.state = JobState::Done;
+                    j.job.progress = 1.0;
+                    j.job.step = "Done".into();
+                    done.push((j.job.id.clone(), with_version(&j.job.name, &j.job.to_version)));
+                } else {
+                    failed.push((j.job.id.clone(), j.job.name.clone()));
+                }
+            }
+        }
+        for (id, name) in failed {
+            self.fail(
+                &id,
+                "Interrupted",
+                "The PC or the app stopped while it was installing. It may be partly installed. Retry to install it again".into(),
+                format!("{name} was installing when the app or the PC stopped. The installed version shows it did not finish, so it was not run again by itself."),
+                None,
+            );
+        }
+        for (_, name) in done {
+            self.activity(ActivityKind::Install, format!("{name} finished installing before the restart"), None, None, None);
+        }
+        self.mark_jobs_dirty();
+        self.emit_apps();
+        self.wake.notify_one();
+    }
+
+    /// Save the unfinished jobs when what is saved would change.
+    fn save_queue(&self) {
+        let list: Vec<SavedJob> = self
+            .jobs
+            .lock()
+            .iter()
+            .filter(|j| !j.job.state.is_finished())
+            .map(|j| SavedJob { job: j.job.clone(), req: j.req.clone(), phase: j.phase, dests: j.dests.clone(), verify: j.verify.clone() })
+            .collect();
+        let sig: String = list.iter().map(|s| format!("{}:{:?}:{:?}:{}:{};", s.job.id, s.job.state, s.phase, s.dests.len(), s.job.to_version)).collect();
+        let mut saved = self.queue_saved.lock();
+        if *saved == sig {
+            return;
+        }
+        save_queue_to(&queue_file(), &list);
+        *saved = sig;
+    }
+
+    /// Saved at exit with the progress of each job.
+    pub fn save_queue_now(&self) {
+        self.queue_saved.lock().clear();
+        self.save_queue();
     }
 
     // ------------------------------------------------------------ events
@@ -154,8 +586,13 @@ impl Core {
         self.emit("toast", Toast { kind: kind.into(), text: text.into(), app_id });
     }
 
+    /// A Windows notification with a sound (Windows toasts are silent unless a sound is named).
     fn notify(&self, title: &str, body: &str) {
-        let _ = self.app.notification().builder().title(title).body(body).show();
+        self.notify_with(title, body, NOTIFY_SOUND);
+    }
+
+    fn notify_with(&self, title: &str, body: &str, sound: &str) {
+        let _ = self.app.notification().builder().title(title).body(body).sound(sound).show();
     }
 
     fn activity(&self, kind: ActivityKind, title: impl Into<String>, meta: Option<String>, app_id: Option<String>, error: Option<JobError>) {
@@ -187,6 +624,8 @@ impl Core {
             if self.jobs_dirty.swap(false, Ordering::Relaxed) {
                 let jobs = self.jobs();
                 self.emit("jobs", jobs);
+                // A crash or power cut must not lose the queue.
+                self.save_queue();
             }
         }
     }
@@ -231,7 +670,7 @@ impl Core {
             let is_beta = i.channel.as_deref() == Some("beta");
             let has_update = !i.read_only
                 && !i.missing
-                && latest.is_some_and(|l| version::newer(&l.version, &i.version) || (is_beta && l.version != i.version));
+                && latest.is_some_and(|l| sources::update_offered(&l.version, &i.version, is_beta));
             let status = if i.missing {
                 AppStatus::Missing
             } else if let Some(j) = job {
@@ -302,7 +741,7 @@ impl Core {
         let s = self.settings.read().clone();
         let cat = self.adobe.read().clone();
         let of = self.other.read().clone();
-        let installed = tokio::task::spawn_blocking(move || {
+        let installed = tauri::async_runtime::spawn_blocking(move || {
             let un = winutil::uninstall_entries();
             let mut v = Vec::new();
             if s.sources.adobe {
@@ -331,7 +770,38 @@ impl Core {
         self.recompute_latest(installed);
         self.emit_apps();
         let me = self.clone();
-        tokio::spawn(async move { me.refresh_icons_and_sizes().await });
+        tauri::async_runtime::spawn(async move { me.refresh_icons_and_sizes().await });
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move { me.fill_download_sizes().await });
+    }
+
+    /// Download sizes of Other apps updates (the catalog does not list them): asked from the
+    /// download server once per version, so "Update all" shows the real total.
+    async fn fill_download_sizes(self: Arc<Self>) {
+        let Some(feed) = self.other.read().clone() else { return };
+        let wanted: Vec<(String, String)> = {
+            let st = self.st.lock();
+            other::update_urls(&st.installed, &feed).into_iter().filter(|(key, _)| !st.dl_sizes.contains_key(key)).collect()
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        use futures_util::StreamExt;
+        let got: Vec<(String, Option<u64>)> = futures_util::stream::iter(wanted)
+            .map(|(key, url)| async move { (key, other::download_size(&url).await) })
+            .buffer_unordered(8)
+            .collect()
+            .await;
+        let installed = {
+            let mut st = self.st.lock();
+            for (key, size) in got {
+                // 0 marks "the server did not say", so it is not asked again this run.
+                st.dl_sizes.insert(key, size.unwrap_or(0));
+            }
+            st.installed.clone()
+        };
+        self.recompute_latest(installed);
+        self.emit_apps();
     }
 
     fn recompute_latest(&self, installed: Vec<Installed>) {
@@ -340,18 +810,19 @@ impl Core {
         let bf = self.blender.read().clone();
         let tf = self.tools.read().clone();
         let of = self.other.read().clone();
+        let keep_patch = self.settings.read().blender_keep_patch_versions;
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
         for i in &installed {
             let l = match i.source {
                 Source::Adobe => cat.as_ref().and_then(|c| adobe::latest(i, &installed, c)),
                 Source::Craft => cf.as_ref().and_then(|f| craft::latest(i, f)),
-                Source::Blender => bf.as_ref().and_then(|f| blender::latest(i, &installed, f)),
+                Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
                 Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
             };
             if let Some(l) = l {
-                latest.insert(i.id.clone(), l);
+                latest.insert(i.id.clone(), with_download_size(l, &i.id, &st.dl_sizes));
             }
         }
         // Forget failures for apps that are now current or gone.
@@ -381,7 +852,7 @@ impl Core {
                     let out = paths::icons().join(name);
                     let ok = out.exists() || {
                         let (e, o) = (exe.clone(), out.clone());
-                        tokio::task::spawn_blocking(move || winutil::extract_icon_png(&e, &o)).await.unwrap_or(false)
+                        tauri::async_runtime::spawn_blocking(move || winutil::extract_icon_png(&e, &o)).await.unwrap_or(false)
                     };
                     if ok {
                         url = Some(paths::asset_url(&out));
@@ -415,7 +886,7 @@ impl Core {
                 continue;
             }
             let Some(dir) = i.install_dir.clone() else { continue };
-            let size = tokio::task::spawn_blocking(move || winutil::dir_size(&dir)).await.unwrap_or(0);
+            let size = tauri::async_runtime::spawn_blocking(move || winutil::dir_size(&dir)).await.unwrap_or(0);
             if size > 0 {
                 self.st.lock().sizes.insert(i.id.clone(), size);
                 self.persisted.lock().sizes.insert(format!("{}@{}", i.id, i.version), size);
@@ -571,12 +1042,13 @@ impl Core {
         self.rescan().await;
         {
             let me = self.clone();
-            tokio::spawn(async move { me.fill_adobe_sizes().await });
+            tauri::async_runtime::spawn(async move { me.fill_adobe_sizes().await });
             let me = self.clone();
-            tokio::spawn(async move { me.cache_catalog_icons().await });
+            tauri::async_runtime::spawn(async move { me.cache_catalog_icons().await });
+            self.spawn_other_followups();
         }
         let me = self.clone();
-        tokio::task::spawn_blocking(move || me.update_disk_status()).await.ok();
+        tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
 
         let apps = self.apps();
         let updates: Vec<&AppEntry> = apps.iter().filter(|a| a.status == AppStatus::Update).collect();
@@ -621,9 +1093,9 @@ impl Core {
             updates.iter().filter(|a| p.notified.get(&a.id) != a.latest.as_ref()).collect()
         };
         if !fresh.is_empty() && settings.notify_updates && !manual {
-            let names: Vec<String> = fresh.iter().take(3).map(|a| a.name.clone()).collect();
-            let body = if fresh.len() > 3 { format!("{} and {} more", names.join(", "), fresh.len() - 3) } else { names.join(", ") };
-            self.notify(&format!("{} update{} ready", fresh.len(), if fresh.len() == 1 { "" } else { "s" }), &body);
+            let fresh_names: Vec<String> = fresh.iter().map(|a| a.name.clone()).collect();
+            let (title, body) = update_notice(updates.len(), &fresh_names);
+            self.notify(&title, &body);
         }
         {
             let mut p = self.persisted.lock();
@@ -682,6 +1154,8 @@ impl Core {
     /// Background loop: periodic checks and the auto-install window.
     pub async fn scheduler(self: Arc<Self>) {
         self.preload().await;
+        // The installed apps are known again: jobs from before a restart continue.
+        self.release_restored();
         let _ = self.check_now(false).await;
         let mut tick = tokio::time::interval(Duration::from_secs(TICK_SECS));
         let mut n: u64 = 0;
@@ -698,7 +1172,7 @@ impl Core {
             let cc_down = self.st.lock().status.as_ref().is_some_and(|s| s.cc_installed && !s.cc_running);
             if status_refresh_due(n, cc_down) {
                 let me = self.clone();
-                tokio::task::spawn_blocking(move || me.update_disk_status()).await.ok();
+                tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
                 self.emit_status();
             }
             if n % (60 / TICK_SECS) != 0 {
@@ -803,7 +1277,127 @@ impl Core {
         }
         self.rescan().await;
         let me = self.clone();
-        tokio::spawn(async move { me.cache_catalog_icons().await });
+        tauri::async_runtime::spawn(async move { me.cache_catalog_icons().await });
+        self.spawn_other_followups();
+    }
+
+    /// After the Other apps feed was read: look for the real icons, and finish reading the starter
+    /// list when the first start could not read all of it in time.
+    fn spawn_other_followups(self: &Arc<Self>) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            me.clone().cache_other_icons(None).await;
+            me.finish_other().await;
+        });
+    }
+
+    async fn finish_other(self: Arc<Self>) {
+        for _ in 0..4 {
+            if !self.other.read().as_ref().is_some_and(|f| f.unfinished) || !self.settings.read().sources.other {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let installed = self.st.lock().installed.clone();
+            if let Ok(f) = other::fetch(&installed).await {
+                *self.other.write() = Some(Arc::new(f));
+                self.emit("catalog_changed", ());
+                self.clone().cache_other_icons(None).await;
+            }
+        }
+    }
+
+    /// Real icons for Other apps entries: the ones in the starter list and the installed ones the
+    /// computer has no icon for (`wanted` None), or the given package ids (search results). Found
+    /// icons are kept in the icon cache; apps without one are remembered for a week.
+    async fn cache_other_icons(self: Arc<Self>, wanted: Option<Vec<String>>) {
+        use futures_util::StreamExt;
+        let feed = self.other.read().clone();
+        let ids: Vec<String> = match wanted {
+            Some(w) => w,
+            None => match feed.as_deref() {
+                Some(f) => f.popular.iter().map(|(p, _)| p.pkg.id.clone()).chain(f.pkgs.values().map(|p| p.pkg.id.clone())).collect(),
+                None => return,
+            },
+        };
+        let today = chrono::Local::now().date_naive();
+        let misses = self.persisted.lock().icon_misses.clone();
+        let recent_miss = |id: &str| misses.get(id).and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS);
+        let mut todo: Vec<String> = Vec::new();
+        let mut from_disk = false;
+        {
+            let mut st = self.st.lock();
+            for id in ids {
+                let key = format!("other:{id}");
+                if st.catalog_icons.contains_key(&key) || st.icons.contains_key(&key) || st.icon_busy.contains(&key) {
+                    continue;
+                }
+                if let Some(p) = other_icon_on_disk(&id) {
+                    st.catalog_icons.insert(key, paths::asset_url(&p));
+                    from_disk = true;
+                } else if !recent_miss(&id) {
+                    st.icon_busy.insert(key);
+                    todo.push(id);
+                }
+            }
+        }
+        if from_disk {
+            self.emit_apps();
+            self.emit("catalog_changed", ());
+        }
+        if todo.is_empty() {
+            return;
+        }
+        let mut results = futures_util::stream::iter(todo.into_iter().map(|id| {
+            let feed = feed.clone();
+            async move {
+                let got = tokio::time::timeout(Duration::from_secs(60), async {
+                    let src = other::icon_source_of(feed.as_deref(), &id).await?;
+                    let got = crate::sources::icons::find(&id, src.icon.as_deref(), &src.pages).await?;
+                    let path = paths::icons().join(format!("{}.{}", crate::sources::icons::file_stem(&id), got.ext));
+                    std::fs::write(&path, got.bytes).ok()?;
+                    Some(path)
+                })
+                .await
+                .ok()
+                .flatten();
+                (id, got)
+            }
+        }))
+        .buffer_unordered(6);
+        let (mut hits, mut unseen, mut missed): (usize, usize, Vec<String>) = (0, 0, vec![]);
+        let mut last_emit = std::time::Instant::now();
+        while let Some((id, got)) = results.next().await {
+            let key = format!("other:{id}");
+            let mut st = self.st.lock();
+            st.icon_busy.remove(&key);
+            match got {
+                Some(p) => {
+                    st.catalog_icons.insert(key, paths::asset_url(&p));
+                    hits += 1;
+                    unseen += 1;
+                }
+                None => missed.push(id),
+            }
+            drop(st);
+            if unseen >= 12 || (unseen > 0 && last_emit.elapsed() > Duration::from_secs(3)) {
+                self.emit_apps();
+                self.emit("catalog_changed", ());
+                unseen = 0;
+                last_emit = std::time::Instant::now();
+            }
+        }
+        if unseen > 0 {
+            self.emit_apps();
+            self.emit("catalog_changed", ());
+        }
+        // With no connection every search fails; that is no reason to skip these apps for a week.
+        if !missed.is_empty() && (hits > 0 || crate::http::online().await) {
+            let mut p = self.persisted.lock();
+            for id in missed {
+                p.icon_misses.insert(id, today.format("%Y-%m-%d").to_string());
+            }
+            store::save_state(&p);
+        }
     }
 
     /// Exact download sizes for Adobe updates and the Get apps list, from product manifests.
@@ -868,7 +1462,7 @@ impl Core {
     /// then switches the setting off with a note, so it is not asked again every start.
     pub fn set_up_silent_task(self: &Arc<Self>, enable: bool, automatic: bool) {
         let me = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let r: Result<()> = async {
                 for step in crate::elevate::task_steps(enable)? {
                     let res = me.elevator.run(step, false).await?;
@@ -908,9 +1502,11 @@ impl Core {
             return;
         }
         let me = self.clone();
-        tokio::spawn(async move {
-            let missing = !tokio::task::spawn_blocking(crate::elevate::task_exists).await.unwrap_or(true);
-            if missing {
+        tauri::async_runtime::spawn(async move {
+            // Also when the task starts another copy of the app (an older one cannot run the
+            // steps this version sends): register it again for this exe.
+            let current = tauri::async_runtime::spawn_blocking(crate::elevate::task_is_current).await.unwrap_or(true);
+            if !current {
                 me.set_up_silent_task(true, true);
             }
         });
@@ -976,15 +1572,125 @@ impl Core {
     }
 
     /// Packages of the winget catalog for a search in Get apps (Other apps on only).
-    pub async fn search_other(&self, q: String) -> Vec<CatalogEntry> {
+    pub async fn search_other(self: &Arc<Self>, q: String) -> Vec<CatalogEntry> {
         if !self.settings.read().sources.other {
             return vec![];
         }
         let installed = self.st.lock().installed.clone();
         let show_installed = self.settings.read().show_installed_in_get_apps;
-        let found = tokio::task::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default();
+        let found = tauri::async_runtime::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default();
         // Like the rest of Get apps: installed apps only when the setting asks for them.
-        found.into_iter().filter(|e| show_installed || !e.installed).collect()
+        let mut found: Vec<CatalogEntry> = found.into_iter().filter(|e| show_installed || !e.installed).collect();
+        let missing: Vec<String> = {
+            let st = self.st.lock();
+            for e in &mut found {
+                e.icon_url = st.catalog_icons.get(&e.id).or_else(|| st.icons.get(&e.id)).cloned();
+            }
+            found.iter().filter(|e| e.icon_url.is_none()).filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect()
+        };
+        if !missing.is_empty() {
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move { me.cache_other_icons(Some(missing)).await });
+        }
+        for e in &mut found {
+            sources::browse::apply(e);
+        }
+        let ids: Vec<String> = found.iter().filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect();
+        self.fetch_other_details(ids);
+        found
+    }
+
+    /// One page of the whole winget catalog for Get apps, by category ("Browsers", ...) and first
+    /// letter ("A" to "Z", "#"). Descriptions and icons the page lacks are looked for in the
+    /// background; `other_details` and `catalog_changed` bring them.
+    pub async fn browse_other(self: &Arc<Self>, category: Option<String>, letter: Option<String>, offset: usize, limit: usize) -> Result<sources::browse::BrowsePage> {
+        use sources::browse;
+        if !self.settings.read().sources.other {
+            return Ok(browse::BrowsePage { total: 0, entries: vec![], packages: 0, categories: vec![] });
+        }
+        if !sources::winget::index_path().is_file() {
+            sources::winget::refresh_index(Duration::from_secs(6 * 3600)).await?;
+        }
+        let installed = self.st.lock().installed.clone();
+        let show_installed = self.settings.read().show_installed_in_get_apps;
+        let (page, pkgs) = tauri::async_runtime::spawn_blocking(move || -> Result<(browse::BrowsePage, Vec<sources::winget::Pkg>)> {
+            let list = browse::list()?;
+            let here: HashSet<String> = installed.iter().filter(|i| i.source == Source::Other).map(|i| other::pkg_of(i).to_ascii_lowercase()).collect();
+            let keep = |i: &browse::Item| show_installed || !here.contains(&i.pkg.id.to_ascii_lowercase());
+            let cat = category.as_deref().and_then(browse::category_index);
+            let letter = letter.and_then(|l| l.chars().next()).map(|c| c.to_ascii_uppercase());
+            let (total, items) = browse::page(&list, cat, letter, offset, limit.clamp(1, 200), keep);
+            let counts = browse::counts(&list, keep);
+            let pkgs: Vec<sources::winget::Pkg> = items.iter().map(|i| i.pkg.clone()).collect();
+            let entries = items
+                .iter()
+                .map(|i| {
+                    let mut e = other::entry(&i.pkg, i.pkg.latest.clone(), Some(i.pkg.id.clone()), here.contains(&i.pkg.id.to_ascii_lowercase()));
+                    browse::apply(&mut e);
+                    e
+                })
+                .collect();
+            let categories = browse::CATEGORIES.iter().zip(counts).map(|(name, count)| browse::CategoryCount { name, count }).collect();
+            Ok((browse::BrowsePage { total, entries, packages: list.packages, categories }, pkgs))
+        })
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+        let mut page = page;
+        let missing: Vec<String> = {
+            let st = self.st.lock();
+            for e in &mut page.entries {
+                e.icon_url = st.catalog_icons.get(&e.id).or_else(|| st.icons.get(&e.id)).cloned();
+            }
+            page.entries.iter().filter(|e| e.icon_url.is_none()).filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect()
+        };
+        if !missing.is_empty() {
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move { me.cache_other_icons(Some(missing)).await });
+        }
+        let stale = browse::stale(&pkgs);
+        if !stale.is_empty() {
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move { browse::fetch(stale, |p| me.emit("other_details", p)).await });
+        }
+        Ok(page)
+    }
+
+    /// A winget package's Get apps entry that is not in the starter list (a search result or a
+    /// browsed one, opened on its own page).
+    pub fn other_entry(self: &Arc<Self>, id: &str) -> Option<CatalogEntry> {
+        let pkg_id = id.strip_prefix("other:")?;
+        if !self.settings.read().sources.other {
+            return None;
+        }
+        let pkg = sources::browse::pkgs_by_id(&[pkg_id.to_string()]).into_iter().next()?;
+        let have = self.st.lock().installed.iter().any(|i| i.source == Source::Other && other::pkg_of(i).eq_ignore_ascii_case(pkg_id));
+        let mut e = other::entry(&pkg, pkg.latest.clone(), Some(pkg.id.clone()), have);
+        sources::browse::apply(&mut e);
+        {
+            let st = self.st.lock();
+            e.icon_url = st.catalog_icons.get(&e.id).or_else(|| st.icons.get(&e.id)).cloned();
+        }
+        self.fetch_other_details(vec![pkg.id.clone()]);
+        if e.icon_url.is_none() {
+            let me = self.clone();
+            let ids = vec![pkg.id.clone()];
+            tauri::async_runtime::spawn(async move { me.cache_other_icons(Some(ids)).await });
+        }
+        Some(e)
+    }
+
+    /// Read the descriptions of these winget packages in the background, unless they are known.
+    fn fetch_other_details(self: &Arc<Self>, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let pkgs = tauri::async_runtime::spawn_blocking(move || sources::browse::stale(&sources::browse::pkgs_by_id(&ids))).await.unwrap_or_default();
+            if !pkgs.is_empty() {
+                sources::browse::fetch(pkgs, |p| me.emit("other_details", p)).await;
+            }
+        });
     }
 
     /// Get apps version list: the saved copy at once when there is one (refreshed in the
@@ -1024,7 +1730,7 @@ impl Core {
             return;
         }
         let me = self.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let fresh = if installed { me.fetch_versions(&id).await } else { me.fetch_catalog_versions(&id).await };
             if let Ok(list) = fresh {
                 let changed = notes_cache::read(&key).is_none_or(|(old, _)| old != list);
@@ -1165,6 +1871,7 @@ impl Core {
                 eta: None,
                 progress: 0.0,
                 step: "Waiting".into(),
+                detail: String::new(),
                 blocked_by: vec![],
                 error: None,
                 started_at: None,
@@ -1174,6 +1881,12 @@ impl Core {
             req,
             ctl: tx,
             active: false,
+            block: Default::default(),
+            seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
+            phase: Phase::Queued,
+            held: false,
+            dests: vec![],
+            verify: None,
         });
         drop(jobs);
         self.mark_jobs_dirty();
@@ -1257,6 +1970,12 @@ impl Core {
             let at = (insert_at + k).min(jobs.len());
             jobs.insert(at, j);
         }
+        // Installs waiting for their turn follow the new order too.
+        let mut seqs: Vec<u64> = jobs.iter().map(|j| j.seq).collect();
+        seqs.sort_unstable();
+        for (j, s) in jobs.iter_mut().zip(seqs) {
+            j.seq = s;
+        }
         drop(jobs);
         self.mark_jobs_dirty();
     }
@@ -1287,16 +2006,12 @@ impl Core {
         }
         let me = self.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let dirs_names = me.with_job(&id, |j| j.job.app_id.clone());
-            let Some(app_id) = dirs_names else { return };
-            let dir = me.installed(&app_id).and_then(|i| i.install_dir);
-            let list = procs::list();
-            let pids: Vec<u32> = list
-                .iter()
-                .filter(|p| blockers.iter().any(|b| procs::friendly(&p.name).eq_ignore_ascii_case(b)) || p.exe.as_ref().zip(dir.as_ref()).is_some_and(|(e, d)| e.starts_with(d)))
-                .map(|p| p.pid)
-                .collect();
+        tauri::async_runtime::spawn_blocking(move || {
+            let Some((dirs, names)) = me.with_job(&id, |j| j.block.clone()) else { return };
+            if dirs.is_empty() && names.is_empty() {
+                return;
+            }
+            let pids = close_targets(&procs::list_fresh(), &dirs, &names);
             procs::close(&pids, Duration::from_secs(12));
         });
     }
@@ -1307,24 +2022,25 @@ impl Core {
             let limit = self.settings.read().parallel_downloads.clamp(1, 4) as usize;
             let to_start: Vec<String> = {
                 let mut jobs = self.jobs.lock();
-                let active = jobs.iter().filter(|j| j.active).count();
-                let mut picked = Vec::new();
-                for j in jobs.iter_mut() {
-                    if active + picked.len() >= limit {
-                        break;
-                    }
-                    if !j.active && j.job.state == JobState::Waiting {
+                let view: Vec<(bool, Phase, JobState, bool)> = jobs.iter().map(|j| (j.active, j.phase, j.job.state, j.held)).collect();
+                pick_to_start(&view, limit)
+                    .into_iter()
+                    .map(|k| {
+                        let j = &mut jobs[k];
                         j.active = true;
-                        picked.push(j.job.id.clone());
-                    }
-                }
-                picked
+                        j.phase = Phase::Download;
+                        j.job.id.clone()
+                    })
+                    .collect()
             };
             for id in to_start {
                 let me = self.clone();
-                tokio::spawn(async move {
+                tauri::async_runtime::spawn(async move {
                     me.run_job(&id).await;
-                    me.with_job(&id, |j| j.active = false);
+                    me.with_job(&id, |j| {
+                        j.active = false;
+                        j.phase = Phase::Queued;
+                    });
                     me.wake.notify_one();
                 });
             }
@@ -1505,6 +2221,7 @@ impl Core {
         self.set_job(id, |j| {
             j.state = JobState::Failed;
             j.step = err.message.clone();
+            j.detail.clear();
             j.error = Some(err.clone());
             j.speed = 0.0;
             j.eta = None;
@@ -1515,7 +2232,7 @@ impl Core {
         self.st.lock().failed.insert(app_id.clone(), err.clone());
         self.activity(ActivityKind::Failure, title.clone(), Some(err.code.clone()), Some(app_id.clone()), Some(err.clone()));
         if self.settings.read().notify_failed {
-            self.notify(&title, &err.message);
+            self.notify_with(&title, &err.message, FAILED_SOUND);
         }
         self.emit_apps();
     }
@@ -1537,6 +2254,12 @@ impl Core {
                 return;
             }
         };
+        let dests: Vec<PathBuf> = plan.downloads.iter().chain(plan.fallback.iter().flat_map(|f| f.downloads.iter())).map(|d| d.dest.clone()).collect();
+        let verify = saved_verify(&plan);
+        self.with_job(id, |j| {
+            j.dests = dests;
+            j.verify = verify;
+        });
         self.set_job(id, |j| {
             j.to_version = plan.to_version.clone();
             // Other apps pick a package version, which can read differently from the version in the
@@ -1571,7 +2294,8 @@ impl Core {
                         if c.is_dir() {
                             let _ = std::fs::remove_dir_all(c);
                         } else {
-                            let _ = std::fs::remove_file(c);
+                            // The installer and what is noted about its download.
+                            download::remove(c);
                         }
                     }
                 }
@@ -1585,6 +2309,7 @@ impl Core {
                     j.speed = 0.0;
                     j.eta = None;
                     j.step = "Done".into();
+                    j.detail.clear();
                     j.blocked_by.clear();
                     j.finished_at = Some(now());
                     name = j.name.clone();
@@ -1614,13 +2339,14 @@ impl Core {
                 self.toast("ok", title, Some(app_id));
                 self.emit_apps();
                 let me = self.clone();
-                tokio::task::spawn_blocking(move || me.update_disk_status()).await.ok();
+                tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
                 self.emit_status();
             }
             Ok(Outcome::Paused) => {
                 self.set_job(id, |j| {
                     j.state = JobState::Paused;
                     j.step = "Paused".into();
+                    j.detail = if j.downloaded > 0 { format!("{} kept, continues where it stopped", fmt_bytes(j.downloaded)) } else { String::new() };
                     j.speed = 0.0;
                     j.eta = None;
                 });
@@ -1630,6 +2356,7 @@ impl Core {
                 self.set_job(id, |j| {
                     j.state = JobState::Canceled;
                     j.step = "Canceled".into();
+                    j.detail.clear();
                     j.speed = 0.0;
                     j.eta = None;
                     j.finished_at = Some(now());
@@ -1648,10 +2375,12 @@ impl Core {
     async fn execute(self: &Arc<Self>, id: &str, plan: &Plan) -> Result<Outcome> {
         let ctl = self.with_job(id, |j| j.ctl.subscribe()).ok_or_else(|| anyhow!("job vanished"))?;
         let total: u64 = plan.downloads.iter().filter_map(|d| d.size).sum();
+        self.with_job(id, |j| j.phase = Phase::Download);
         self.set_job(id, |j| {
             j.total = total;
             j.state = JobState::Downloading;
             j.step = if plan.downloads.is_empty() { "Preparing".into() } else { "Downloading".into() };
+            j.detail = if plan.downloads.is_empty() { String::new() } else { format!("Connecting to {}", crate::http::host(&plan.downloads[0].url)) };
         });
 
         // Split the bar by expected time: a Blender MSI downloads in seconds but installs for
@@ -1685,7 +2414,7 @@ impl Core {
             let jid = id.to_string();
             let base = completed;
             let share = dl_share;
-            let ticker = tokio::spawn(async move {
+            let ticker = tauri::async_runtime::spawn(async move {
                 let mut last = (Instant::now(), p2.done.load(Ordering::Relaxed));
                 let mut ema = 0.0f64;
                 loop {
@@ -1696,8 +2425,12 @@ impl Core {
                     ema = if ema == 0.0 { inst } else { ema * 0.8 + inst * 0.2 };
                     last = (Instant::now(), d);
                     let note = p2.note.lock().clone();
+                    let detail = p2.detail.lock().clone();
                     me.set_job(&jid, |j| {
                         j.step = note.unwrap_or_else(|| "Downloading".into());
+                        if let Some(dt) = detail {
+                            j.detail = dt;
+                        }
                         j.downloaded = base + d;
                         j.speed = ema;
                         let remaining = j.total.saturating_sub(j.downloaded) as f64;
@@ -1708,6 +2441,9 @@ impl Core {
             });
             let r = download::fetch(d, progress.clone(), self.throttle.clone(), ctl.clone()).await;
             ticker.abort();
+            if let Some(dt) = progress.detail.lock().clone() {
+                self.set_job(id, |j| j.detail = dt);
+            }
             let got = progress.done.load(Ordering::Relaxed);
             match r? {
                 Outcome::Done => completed += d.size.unwrap_or(got).max(got),
@@ -1716,6 +2452,10 @@ impl Core {
             speed = speed.max(0.0);
         }
         let _ = speed;
+        // Downloaded: the slot goes to the next download now.
+        self.with_job(id, |j| j.phase = Phase::Ready);
+        self.wake.notify_one();
+        let installer = plan.runs_installer();
         self.set_job(id, |j| {
             j.downloaded = j.total.max(completed);
             j.total = j.total.max(completed);
@@ -1723,23 +2463,53 @@ impl Core {
             j.eta = None;
             j.progress = dl_share;
             j.state = JobState::Installing;
-            j.step = "Waiting for another install to finish".into();
+            j.step = if installer { "Waiting for another install to finish".into() } else { "Getting ready to unpack".into() };
+            j.detail.clear();
             j.cancelable = true;
         });
 
-        // ---- one installer at a time; nothing has run yet, so Cancel still works while waiting
-        let Some(_lock) = take_turn(&self.install_lock, ctl.clone()).await else {
+        // ---- one installer at a time, in queue order; nothing has run yet, so Cancel still
+        // works while waiting. Plans that only unpack and copy files do not wait for installers.
+        let mut turn: Option<Turn<'_>> = None;
+        if installer {
+            let seq = self.with_job(id, |j| j.seq).unwrap_or(0);
+            let wait = self.install_gate.take(id, &plan.name, seq, ctl.clone());
+            tokio::pin!(wait);
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            let got = loop {
+                tokio::select! {
+                    t = &mut wait => break t,
+                    _ = tick.tick() => {
+                        let line = self.install_gate.holder().map(|h| format!("{h} is installing now")).unwrap_or_default();
+                        self.set_job(id, |j| j.detail = line);
+                    }
+                }
+            };
+            match got {
+                Some(t) => turn = Some(t),
+                None => return Ok(Outcome::Canceled),
+            }
+        }
+        // Never two jobs on the same app or folder at once.
+        let keys = plan.write_keys();
+        let Some(_writing) = self.write_locks.take(&keys, ctl.clone()).await else {
             return Ok(Outcome::Canceled);
         };
-        self.set_job(id, |j| j.cancelable = false);
+        self.set_job(id, |j| {
+            j.cancelable = false;
+            j.detail.clear();
+        });
 
         // ---- the app must be closed
+        let block = (plan.block_dirs.clone(), plan.block_names.clone());
+        self.with_job(id, |j| j.block = block.clone());
         loop {
             if *ctl.borrow() == Control::Cancel {
                 return Ok(Outcome::Canceled);
             }
-            let list = procs::list();
-            let b = procs::blocking(&list, &plan.block_dirs, &plan.block_names);
+            // Listing processes is slow, blocking work: keep it off the async threads.
+            let (dirs, bnames) = block.clone();
+            let b = tauri::async_runtime::spawn_blocking(move || procs::blocking(&procs::list(), &dirs, &bnames)).await.unwrap_or_default();
             if b.is_empty() {
                 break;
             }
@@ -1751,18 +2521,29 @@ impl Core {
                 j.job.state = JobState::Blocked;
                 j.job.blocked_by = names.clone();
                 j.job.step = format!("Waiting for {} to close", names.join(", "));
+                j.job.detail = "Downloaded and checked. It installs once that is closed".into();
                 was
             });
             if changed == Some(true) {
-                self.emit_apps();
+                let me = self.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || me.emit_apps()).await;
             }
             tokio::time::sleep(Duration::from_millis(1200)).await;
         }
         self.set_job(id, |j| {
             j.state = JobState::Installing;
             j.blocked_by.clear();
+            j.detail.clear();
         });
-        self.emit_apps();
+        self.with_job(id, |j| {
+            j.block = Default::default();
+            j.phase = Phase::Running;
+        });
+        // Saved before anything runs: after a crash from here on, the installer is not run
+        // again by itself.
+        self.save_queue();
+        let me = self.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || me.emit_apps()).await;
 
         // ---- install steps
         let silent = self.settings.read().silent_elevation;
@@ -1774,7 +2555,18 @@ impl Core {
         let weight_sum: f64 = weights.iter().sum::<f64>().max(f64::EPSILON);
         for (k, step) in plan.steps.iter().enumerate() {
             let label = if n > 1 { format!("{}, step {} of {}", step.label(), k + 1, n) } else { step.label().to_string() };
-            self.set_job(id, |j| j.step = label.clone());
+            let files = match step {
+                sources::Step::ExtractZip { zip, .. } => {
+                    let z = zip.clone();
+                    tauri::async_runtime::spawn_blocking(move || zip_files(&z)).await.ok().flatten()
+                }
+                _ => None,
+            };
+            let detail = step_detail(step, files);
+            self.set_job(id, |j| {
+                j.step = label.clone();
+                j.detail = detail;
+            });
             let step_t0 = Instant::now();
             let step_est = (inst_est * weights[k] / weight_sum).max(2.0);
             let weights = weights.clone();
@@ -1785,7 +2577,7 @@ impl Core {
                 let me = self.clone();
                 let jid = id.to_string();
                 let label = label.clone();
-                tokio::spawn(async move {
+                tauri::async_runtime::spawn(async move {
                     // Remote Update Manager downloads by itself; its folder shows how far it is.
                     let mut last = (Instant::now(), 0u64);
                     let mut ema = 0.0f64;
@@ -1829,7 +2621,10 @@ impl Core {
                     }
                 })
             };
-            let res = self.elevator.run(step.clone(), silent).await;
+            // Downloaded files this step runs are checked again by the helper right before it
+            // runs them, so a file swapped after the download check is not run with admin rights.
+            let checks = crate::elevate::file_checks(step, &plan.downloads);
+            let res = self.elevator.run_checked(step.clone(), silent, checks).await;
             ticker.abort();
             let res = res?;
             if !res.ok {
@@ -1837,14 +2632,7 @@ impl Core {
                     sources::Step::Run { log, .. } => log.clone(),
                     _ => None,
                 };
-                return Err(anyhow!(
-                    "STEP|{}|{}|{}|{}|{}",
-                    res.code.map(|c| c.to_string()).unwrap_or_default(),
-                    step.label(),
-                    res.message,
-                    res.output,
-                    log.map(|l| l.display().to_string()).unwrap_or_default()
-                ));
+                return Err(anyhow!("{}", step_failure(&res, step.label(), log.as_deref())));
             }
         }
 
@@ -1857,16 +2645,23 @@ impl Core {
         }
 
         // ---- verify
+        self.with_job(id, |j| j.phase = Phase::Verifying);
         self.set_job(id, |j| {
             j.state = JobState::Verifying;
             j.step = "Checking the result".into();
+            j.detail = match &plan.verify {
+                Verify::Removed { .. } => "Checking that it is gone".into(),
+                Verify::Wait { .. } => "Creative Cloud is installing it".into(),
+                Verify::None => String::new(),
+                Verify::Version { version, .. } => format!("Checking that {version} is installed"),
+            };
             j.progress = 0.98;
         });
         // Handed to another program: wait for it to finish, showing the wait.
         if let Verify::Wait { app_id, version: v, minutes } = &plan.verify {
             // Creative Cloud queues its own installs: let the next job hand off now, and let this
             // one be canceled (Creative Cloud may still finish what it started).
-            drop(_lock);
+            drop(turn);
             self.set_job(id, |j| j.cancelable = true);
             let mut ctl = ctl.clone();
             let t0 = Instant::now();
@@ -1947,12 +2742,13 @@ impl Core {
             || new.sources.other != old.sources.other
             || new.godot_install_dir != old.godot_install_dir
             || new.blender_channel != old.blender_channel
+            || new.blender_keep_patch_versions != old.blender_keep_patch_versions
             || new.craft_prereleases != old.craft_prereleases
             || new.blender_install_dir != old.blender_install_dir
             || new.language != old.language;
         if rescan {
             let me = self.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let _ = me.check_now(true).await;
             });
         }
@@ -2121,24 +2917,6 @@ fn status_refresh_due(n: u64, cc_down: bool) -> bool {
     cc_down || n % (60 / TICK_SECS) == 0
 }
 
-/// Wait for the one-installer-at-a-time slot, giving up when the job is canceled meanwhile.
-async fn take_turn(lock: &tokio::sync::Mutex<()>, mut ctl: watch::Receiver<Control>) -> Option<tokio::sync::MutexGuard<'_, ()>> {
-    let canceled = async {
-        loop {
-            if *ctl.borrow_and_update() == Control::Cancel {
-                return;
-            }
-            if ctl.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    tokio::select! {
-        g = lock.lock() => Some(g),
-        _ = canceled => None,
-    }
-}
-
 /// Tell a job to run, pause or cancel. `send_replace` stores the value even when no download is
 /// listening right now: a paused job has ended its download, and a plain `send` would drop the
 /// "run" from Resume, so the job read the old "pause" again and paused itself.
@@ -2249,6 +3027,27 @@ fn sanitize(s: &str) -> String {
     hex::encode(&h.finalize()[..10])
 }
 
+/// A failed install step, carried in the job's error text after "STEP|".
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct StepFailure {
+    code: String,
+    label: String,
+    message: String,
+    output: String,
+    log: Option<String>,
+}
+
+fn step_failure(res: &crate::elevate::StepResult, label: &str, log: Option<&std::path::Path>) -> String {
+    let f = StepFailure {
+        code: res.code.map(|c| c.to_string()).unwrap_or_default(),
+        label: label.to_string(),
+        message: res.message.clone(),
+        output: res.output.clone(),
+        log: log.map(|l| l.display().to_string()),
+    };
+    format!("STEP|{}", serde_json::to_string(&f).unwrap_or_default())
+}
+
 /// Turn an internal error string into the UI's code / message / detail.
 fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) {
     if let Some(rest) = text.strip_prefix("LOWDISK|") {
@@ -2259,12 +3058,17 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
         return ("Not updated".into(), msg, rest.to_string(), None);
     }
     if let Some(rest) = text.strip_prefix("STEP|") {
-        let parts: Vec<&str> = rest.splitn(5, '|').collect();
-        let code = parts.first().copied().unwrap_or("");
-        let label = parts.get(1).copied().unwrap_or("");
-        let message = parts.get(2).copied().unwrap_or("");
-        let output = parts.get(3).copied().unwrap_or("");
-        let log = parts.get(4).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        // One JSON object (installer output can hold any character), maybe followed by more
+        // text such as "First attempt: ..." from a fallback.
+        let mut it = serde_json::Deserializer::from_str(rest).into_iter::<StepFailure>();
+        let f = it.next().and_then(|r| r.ok()).unwrap_or_default();
+        let more = rest[it.byte_offset()..].trim();
+        let code = f.code.as_str();
+        let label = f.label.as_str();
+        let message = f.message.as_str();
+        let output = if more.is_empty() { f.output.clone() } else { format!("{}\n\n{more}", f.output) };
+        let output = output.as_str();
+        let log = f.log.clone().filter(|s| !s.trim().is_empty());
         let friendly = match code {
             "1618" => "Another installation is already running. Try again when it is done.".to_string(),
             "1603" => "Windows Installer hit a fatal error. The log has the details.".to_string(),
@@ -2291,17 +3095,92 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
     (code.into(), first, text.to_string(), None)
 }
 
+/// Windows notification sounds: the usual one, and a chime that stands out for failures.
+const NOTIFY_SOUND: &str = "Default";
+const FAILED_SOUND: &str = "Reminder";
+
+/// The "updates ready" notification: the title counts every update waiting, the text names the
+/// ones the user has not heard about yet.
+fn update_notice(total: usize, fresh: &[String]) -> (String, String) {
+    let title = format!("{total} update{} ready", if total == 1 { "" } else { "s" });
+    let names: Vec<&str> = fresh.iter().take(3).map(String::as_str).collect();
+    let list = if fresh.len() > 3 { format!("{} and {} more", names.join(", "), fresh.len() - 3) } else { names.join(", ") };
+    let body = if fresh.len() < total { format!("New: {list}") } else { list };
+    (title, body)
+}
+
+/// An update's size from the download server when its source did not give one.
+fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u64>) -> Latest {
+    if l.size.is_none() {
+        l.size = dl_sizes.get(&format!("{app_id}@{}", l.version)).copied().filter(|n| *n > 0);
+    }
+    l
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{folder_bytes, install_curve, leftover_dir, rum_watch, set_control, status_refresh_due, take_turn, under_program_files, with_version, TICK_SECS};
+    use super::{update_notice, with_download_size};
+    use super::{folder_bytes, install_curve, leftover_dir, rum_watch, set_control, status_refresh_due, under_program_files, with_version, TICK_SECS};
     use crate::download::Control;
+
+    /// Sync commands run on the main thread, where there is no Tokio runtime: a raw Tokio spawn
+    /// there aborts the app at start (1.1.2 crashed so). Tauri's spawn works from any thread.
+    #[test]
+    fn background_work_is_started_on_tauris_runtime() {
+        let raw = [concat!("tokio::", "spawn("), concat!("tokio::task::", "spawn_blocking(")];
+        for (name, src) in [("core.rs", include_str!("core.rs")), ("commands.rs", include_str!("commands.rs"))] {
+            for r in raw {
+                assert!(!src.contains(r), "{name} uses {r}");
+            }
+        }
+    }
+
+    /// Windows plays no sound for a toast without a sound name, and only knows a few names.
+    #[test]
+    fn every_notification_plays_a_known_windows_sound() {
+        let known = ["Default", "IM", "Mail", "Reminder", "SMS"];
+        assert!(known.contains(&super::NOTIFY_SOUND) && known.contains(&super::FAILED_SOUND));
+        for (name, src) in [("core.rs", include_str!("core.rs")), ("commands.rs", include_str!("commands.rs"))] {
+            for (i, line) in src.lines().enumerate() {
+                if line.contains(concat!(".builder()", ".title(")) {
+                    assert!(line.contains(".sound("), "{name}:{} sends a silent notification", i + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_update_notice_counts_every_waiting_update() {
+        let fresh: Vec<String> = ["Blender 5.2", "Blender 4.5", "MEGAsync"].iter().map(|s| s.to_string()).collect();
+        let (title, body) = update_notice(38, &fresh);
+        assert_eq!(title, "38 updates ready");
+        assert_eq!(body, "New: Blender 5.2, Blender 4.5, MEGAsync");
+        let (title, body) = update_notice(3, &fresh);
+        assert_eq!(title, "3 updates ready");
+        assert_eq!(body, "Blender 5.2, Blender 4.5, MEGAsync");
+        assert_eq!(update_notice(1, &fresh[..1]).0, "1 update ready");
+    }
+
+    #[test]
+    fn an_update_without_a_size_gets_the_size_from_the_server() {
+        let mut cache = std::collections::HashMap::new();
+        cache.insert("other:7zip.7zip@26.01".to_string(), 1_600_000u64);
+        cache.insert("other:Gone@2".to_string(), 0u64);
+        let l = |v: &str, size| crate::sources::Latest { version: v.into(), size, note: None };
+        assert_eq!(with_download_size(l("26.01", None), "other:7zip.7zip", &cache).size, Some(1_600_000));
+        // A size the source gave wins, an unknown size stays unknown.
+        assert_eq!(with_download_size(l("26.01", Some(5)), "other:7zip.7zip", &cache).size, Some(5));
+        assert_eq!(with_download_size(l("2", None), "other:Gone", &cache).size, None);
+    }
 
     #[tokio::test]
     async fn cancel_works_while_waiting_for_the_install_slot() {
-        let lock = tokio::sync::Mutex::new(());
-        let busy = lock.lock().await; // another job is installing
+        let gate = super::TurnGate::new();
+        let (_t0, r0) = tokio::sync::watch::channel(Control::Run);
+        let busy = gate.take("a", "Docker Desktop", 0, r0).await.unwrap(); // another job is installing
+        assert_eq!(gate.holder().as_deref(), Some("Docker Desktop"));
         let (tx, rx) = tokio::sync::watch::channel(Control::Run);
-        let wait = take_turn(&lock, rx);
+        let wait = gate.take("b", "B", 1, rx);
         tokio::pin!(wait);
         // Still waiting while the other install runs.
         assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut wait).await.is_err());
@@ -2311,7 +3190,51 @@ mod tests {
         drop(busy);
         // With nothing else installing, the slot is taken right away.
         let (_tx2, rx2) = tokio::sync::watch::channel(Control::Run);
-        assert!(take_turn(&lock, rx2).await.is_some());
+        assert!(gate.take("c", "C", 2, rx2).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn installs_take_their_turn_in_queue_order() {
+        use std::sync::Arc;
+        let gate = Arc::new(super::TurnGate::new());
+        let (_t0, r0) = tokio::sync::watch::channel(Control::Run);
+        let busy = gate.take("a", "A", 0, r0).await.unwrap();
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        // The 5th job finished downloading first, then the 2nd.
+        let mut hs = Vec::new();
+        for (id, seq) in [("fifth", 5u64), ("second", 2)] {
+            let (g, o) = (gate.clone(), order.clone());
+            hs.push(tauri::async_runtime::spawn(async move {
+                let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
+                let t = g.take(id, id, seq, rx).await.unwrap();
+                o.lock().push(id);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                drop(t);
+            }));
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drop(busy);
+        for h in hs {
+            h.await.unwrap();
+        }
+        assert_eq!(*order.lock(), vec!["second", "fifth"]);
+    }
+
+    #[test]
+    fn jobs_waiting_to_install_do_not_hold_a_download_slot() {
+        use super::{pick_to_start, Phase};
+        use crate::model::JobState;
+        // 3 downloads at once. Two jobs finished downloading and wait to install, one downloads,
+        // 23 wait: two more downloads start (it started none and showed 0 MB/s before).
+        let mut jobs = vec![(true, Phase::Ready, JobState::Installing, false), (true, Phase::Ready, JobState::Installing, false), (true, Phase::Download, JobState::Downloading, false)];
+        jobs.extend(std::iter::repeat_n((false, Phase::Queued, JobState::Waiting, false), 23));
+        assert_eq!(pick_to_start(&jobs, 3), vec![3, 4]);
+        // Running installers do not count either; paused and restored (held) jobs are skipped.
+        let jobs = vec![(true, Phase::Running, JobState::Installing, false), (false, Phase::Queued, JobState::Paused, false), (false, Phase::Queued, JobState::Waiting, true), (false, Phase::Queued, JobState::Waiting, false)];
+        assert_eq!(pick_to_start(&jobs, 1), vec![3]);
+        // Three downloading: nothing more starts.
+        let jobs = vec![(true, Phase::Download, JobState::Downloading, false); 3].into_iter().chain([(false, Phase::Queued, JobState::Waiting, false)]).collect::<Vec<_>>();
+        assert!(pick_to_start(&jobs, 3).is_empty());
     }
 
     #[test]
@@ -2356,7 +3279,7 @@ mod tests {
         // A check is running (waiting on `gate`)...
         let first = {
             let (lock, again, runs, gate) = (lock.clone(), again.clone(), runs.clone(), gate.clone());
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 super::coalesced(&lock, &again, || {
                     let (runs, gate) = (runs.clone(), gate.clone());
                     async move {
@@ -2469,5 +3392,194 @@ mod tests {
             assert!(v > last && v < 1.0, "at {k}: {v}");
             last = v;
         }
+    }
+}
+
+#[cfg(test)]
+mod job_fix_tests {
+    use super::{close_targets, explain, step_failure};
+    use crate::elevate::StepResult;
+    use crate::model::JobKind;
+    use crate::procs::Proc;
+    use crate::sources::{Plan, Verify};
+    use std::path::PathBuf;
+
+    fn proc(pid: u32, exe: &str) -> Proc {
+        Proc { pid, name: "blender.exe".into(), exe: Some(PathBuf::from(exe)), cpu: 0.0, memory: 0 }
+    }
+
+    #[test]
+    fn close_and_continue_leaves_the_other_copy_open() {
+        // Blender 4.2 and 5.0 both open; only 4.2 is being updated.
+        let list = vec![proc(100, r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe"), proc(200, r"C:\Program Files\Blender Foundation\Blender 5.0\blender.exe")];
+        let dirs = vec![PathBuf::from(r"C:\Program Files\Blender Foundation\Blender 4.2")];
+        assert_eq!(close_targets(&list, &dirs, &[]), vec![100]);
+    }
+
+    #[test]
+    fn step_error_output_with_a_bar_keeps_the_log_path() {
+        let plan = Plan { app_id: "x".into(), kind: JobKind::Update, name: "Zipper".into(), to_version: "1".into(), downloads: vec![], steps: vec![], block_dirs: vec![], block_names: vec![], verify: Verify::None, fallback: None, cleanup: vec![] };
+        let res = StepResult { ok: false, code: Some(1603), message: "Exit code 1603".into(), output: "a|b".into() };
+        let text = step_failure(&res, "Installing Zipper", Some(std::path::Path::new(r"C:\logs\zipper.log")));
+        let (code, _msg, detail, log) = explain(&text, &plan);
+        assert_eq!(code, "Error 1603");
+        assert_eq!(log.as_deref(), Some(r"C:\logs\zipper.log"));
+        assert!(detail.contains("a|b"), "{detail}");
+        // Text added after the step error (a fallback's first attempt) is kept in the details.
+        let (_, _, detail, log) = explain(&format!("{text}\n\nFirst attempt: boom"), &plan);
+        assert_eq!(log.as_deref(), Some(r"C:\logs\zipper.log"));
+        assert!(detail.contains("First attempt: boom"), "{detail}");
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    fn job(id: &str, state: JobState) -> Job {
+        Job {
+            id: id.into(),
+            app_id: format!("other:{id}"),
+            name: id.into(),
+            code: "X".into(),
+            fg: "#fff".into(),
+            bg: "#000".into(),
+            icon_url: None,
+            kind: JobKind::Update,
+            from_version: Some("1.0".into()),
+            to_version: "2.0".into(),
+            state,
+            downloaded: 5_000_000,
+            total: 9_000_000,
+            speed: 1.0,
+            eta: Some(3.0),
+            progress: 0.4,
+            step: "Downloading".into(),
+            detail: String::new(),
+            blocked_by: vec![],
+            error: None,
+            started_at: None,
+            finished_at: None,
+            cancelable: false,
+        }
+    }
+
+    fn installed(id: &str, version: &str) -> Installed {
+        Installed {
+            id: id.into(),
+            source: Source::Other,
+            name: id.into(),
+            code: String::new(),
+            fg: String::new(),
+            bg: String::new(),
+            version: version.into(),
+            install_dir: None,
+            exe: None,
+            uninstall: None,
+            updated_at: None,
+            size_hint: None,
+            tagline: None,
+            channel: None,
+            missing: false,
+            read_only: false,
+            icon_remote: None,
+            data: SourceData::Tools { key: String::new(), series: String::new() },
+        }
+    }
+
+    #[test]
+    fn the_queue_file_keeps_unfinished_jobs() {
+        let dir = std::env::temp_dir().join(format!("u3d-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("queue.json");
+        let jobs = vec![
+            SavedJob { job: job("a", JobState::Downloading), req: JobRequest::Update { app_id: "other:a".into(), version: None }, phase: Phase::Download, dests: vec!["C:/dl/a.exe".into()], verify: None },
+            SavedJob {
+                job: job("b", JobState::Installing),
+                req: JobRequest::Uninstall { app_id: "other:b".into(), remove_prefs: true },
+                phase: Phase::Running,
+                dests: vec![],
+                verify: Some(SavedVerify::Removed { app_id: "other:b".into() }),
+            },
+        ];
+        save_queue_to(&file, &jobs);
+        let back = load_queue_from(&file);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].job.id, "a");
+        assert_eq!(back[0].dests, vec![PathBuf::from("C:/dl/a.exe")]);
+        assert!(matches!(&back[1].req, JobRequest::Uninstall { remove_prefs: true, .. }));
+        assert_eq!(back[1].phase, Phase::Running);
+        assert_eq!(back[1].verify, Some(SavedVerify::Removed { app_id: "other:b".into() }));
+        assert!(!file.with_extension("json.tmp").exists());
+        // A damaged or missing file is an empty queue, not a crash.
+        std::fs::write(&file, b"[{").unwrap();
+        assert!(load_queue_from(&file).is_empty());
+        assert!(load_queue_from(&dir.join("none.json")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restart_continues_downloads_and_never_reruns_a_cut_off_installer() {
+        // Waiting, downloading, downloaded and waiting for a turn or for the app to close:
+        // queued again (the files on disk are reused or continued).
+        assert_eq!(restore_kind(JobState::Waiting, Phase::Queued), Restore::Queue(JobState::Waiting));
+        assert_eq!(restore_kind(JobState::Downloading, Phase::Download), Restore::Queue(JobState::Waiting));
+        assert_eq!(restore_kind(JobState::Installing, Phase::Ready), Restore::Queue(JobState::Waiting));
+        assert_eq!(restore_kind(JobState::Blocked, Phase::Ready), Restore::Queue(JobState::Waiting));
+        assert_eq!(restore_kind(JobState::Paused, Phase::Download), Restore::Queue(JobState::Paused));
+        // The installer was running, or its result was being checked: look first.
+        assert_eq!(restore_kind(JobState::Installing, Phase::Running), Restore::Check);
+        assert_eq!(restore_kind(JobState::Verifying, Phase::Verifying), Restore::Check);
+    }
+
+    #[test]
+    fn a_cut_off_install_counts_as_done_only_when_the_new_version_is_there() {
+        let want = SavedVerify::Version { app_id: "other:a".into(), version: "2.0".into() };
+        assert!(finished_anyway(Some(&want), &[installed("other:a", "2.0")]));
+        assert!(finished_anyway(Some(&want), &[installed("other:a", "2.1")]));
+        assert!(!finished_anyway(Some(&want), &[installed("other:a", "1.0")]));
+        assert!(!finished_anyway(Some(&want), &[]));
+        let gone = SavedVerify::Removed { app_id: "other:a".into() };
+        assert!(finished_anyway(Some(&gone), &[installed("other:b", "1")]));
+        assert!(!finished_anyway(Some(&gone), &[installed("other:a", "1")]));
+        assert!(!finished_anyway(None, &[installed("other:a", "2.0")]), "nothing to tell by: shown as interrupted");
+        // A repair keeps the version, so it can not tell.
+        let plan = Plan { app_id: "other:a".into(), kind: JobKind::Repair, name: "A".into(), to_version: "2.0".into(), downloads: vec![], steps: vec![], block_dirs: vec![], block_names: vec![], verify: Verify::Version { app_id: "other:a".into(), version: "2.0".into() }, fallback: None, cleanup: vec![] };
+        assert_eq!(saved_verify(&plan), None);
+    }
+
+    #[test]
+    fn each_step_says_what_it_does() {
+        use crate::sources::Step;
+        let run = |exe: &str, label: &str, args: Vec<String>| Step::Run { exe: exe.into(), args, cwd: None, ok_codes: vec![0], elevated: false, label: label.into(), log: None };
+        assert_eq!(step_detail(&run("C:/dl/Docker Desktop Installer.exe", "Installing Docker Desktop", vec![]), None), "Running the installer silently");
+        assert_eq!(step_detail(&run("C:/Windows/System32/msiexec.exe", "Installing", vec!["/i".into()]), None), "Windows Installer is running silently");
+        assert_eq!(step_detail(&run("C:/Windows/System32/msiexec.exe", "Uninstalling X", vec!["/x".into()]), None), "Windows Installer is removing it silently");
+        assert_eq!(step_detail(&run("C:/Program Files/X/unins000.exe", "Removing the old X", vec![]), None), "Running the uninstaller silently");
+        let unzip = Step::ExtractZip { zip: "a.zip".into(), dest: "D:/B".into(), strip_root: true, elevated: false, label: String::new() };
+        assert_eq!(step_detail(&unzip, Some(1234)), "Unpacking 1,234 files");
+        assert_eq!(step_detail(&unzip, Some(1)), "Unpacking 1 file");
+        assert_eq!(step_detail(&Step::RemoveDir { path: "D:/Blender/5.1".into(), elevated: false, label: String::new() }, None), "Deleting the folder 5.1");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+        assert_eq!(thousands(999), "999");
+    }
+
+    #[test]
+    fn a_zip_counts_its_files() {
+        let dir = std::env::temp_dir().join(format!("u3d-zipcount-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.zip");
+        {
+            let mut w = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+            let o = zip::write::SimpleFileOptions::default();
+            w.add_directory("top/", o).unwrap();
+            for k in 0..3 {
+                w.start_file(format!("top/{k}.txt"), o).unwrap();
+                std::io::Write::write_all(&mut w, b"x").unwrap();
+            }
+            w.finish().unwrap();
+        }
+        assert_eq!(zip_files(&p), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

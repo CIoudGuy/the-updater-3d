@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 fn rel(v: &str, pre: bool) -> Rel {
-    Rel { version: v.into(), prerelease: pre, size: Some(10), file: format!("{v}.exe"), url: format!("https://x/{v}.exe"), ..Default::default() }
+    Rel { version: v.into(), prerelease: pre, size: Some(10), file: format!("{v}.exe"), url: format!("https://x/{v}.exe"), sha256: Some("ab".repeat(32)), ..Default::default() }
 }
 
 fn inst(key: &str, id: &str, ver: &str, series: &str) -> Installed {
@@ -499,4 +499,200 @@ fn unity_hub_notes_page_lists_every_version() {
     assert!(v[0].2.iter().any(|l| l.starts_with("Fixed an issue where Add project from disk")), "{:?}", v[0].2);
     assert!(v[0].2.iter().any(|l| l == "Fixed the sign-in window on high DPI screens"), "{:?}", v[0].2);
     assert_eq!(v[1].2, vec!["Faster editor downloads for large modules"]);
+}
+
+#[test]
+fn epic_version_comes_from_the_download_address() {
+    assert_eq!(epic_version("https://content-download-egs.distro.on.epicgames.com/Builds/EGLv2/0.100.0%2Bg9dfc3c3/Windows/EpicGamesLauncherSetup.exe?launcherfilename=EpicGamesLauncherSetup.exe").as_deref(), Some("0.100.0"));
+    assert_eq!(epic_version("https://x/Builds/EGLv2/0.97.1+gabc/Windows/a.exe").as_deref(), Some("0.97.1"));
+    assert_eq!(epic_version("https://x/Builds/EGLv2/1.2/Windows/a.exe").as_deref(), Some("1.2"));
+    assert_eq!(epic_version("https://x/Builds/Launcher/Windows/a.exe"), None);
+    assert_eq!(epic_version("https://x/Builds/EGLv2/latest/Windows/a.exe"), None);
+    assert_eq!(cmp_ver("0.100.0", "0.97.0"), Ordering::Greater);
+}
+
+fn epic_entry(name: &str, ver: &str, uninstall: &str, quiet: &str, msi: bool) -> winutil::UninstallEntry {
+    winutil::UninstallEntry {
+        key: "{D0769F44-D459-450F-B084-CAE38062C75B}".into(),
+        display_name: name.into(),
+        display_version: ver.into(),
+        publisher: "Epic Games, Inc.".into(),
+        install_location: r"%LOCALAPPDATA%\Epic Games\Launcher".replace("%LOCALAPPDATA%", &paths::local_app_data().to_string_lossy()),
+        uninstall_string: uninstall.into(),
+        quiet_uninstall_string: quiet.into(),
+        windows_installer: msi,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_epic_preview_is_told_apart_from_the_old_launcher() {
+    let dir = paths::local_app_data().join("Epic Games").join("Launcher");
+    let setup = dir.join("EpicGamesLauncherSetup.exe").display().to_string();
+    let preview = epic_entry("Epic Games Launcher", "0.97.0", &format!("\"{setup}\" --uninstall"), &format!("\"{setup}\" --silent --uninstall"), false);
+    let old = epic_entry("Epic Games Launcher", "1.3.150.0", "MsiExec.exe /X{A1B2C3D4-0000-0000-0000-000000000000}", "", true);
+    assert!(is_epic_preview(&preview));
+    assert!(!is_epic_preview(&old));
+
+    let mut out = Vec::new();
+    scan_epic(&[old.clone(), preview.clone()], &mut out);
+    assert_eq!(out.len(), 1);
+    let i = &out[0];
+    assert_eq!((i.id.as_str(), i.name.as_str(), i.version.as_str()), ("tools:epic", "Epic Games Launcher (Preview)", "0.97.0"));
+    assert_eq!(i.install_dir.as_deref(), Some(dir.as_path()));
+    assert_eq!(i.exe.as_deref(), Some(dir.join("EpicGamesLauncher.exe").as_path()));
+    let mut none = Vec::new();
+    scan_epic(&[old], &mut none);
+    assert!(none.is_empty());
+}
+
+#[test]
+fn epic_update_install_and_uninstall_plans() {
+    let dir = paths::local_app_data().join("Epic Games").join("Launcher");
+    let setup = dir.join("EpicGamesLauncherSetup.exe").display().to_string();
+    let e = epic_entry("Epic Games Launcher", "0.97.0", &format!("\"{setup}\" --uninstall"), &format!("\"{setup}\" --silent --uninstall"), false);
+    let mut out = Vec::new();
+    scan_epic(&[e], &mut out);
+    let mut cur = out.remove(0);
+    cur.missing = false;
+
+    let r = Rel { version: "0.100.0".into(), size: Some(217226744), url: "https://x/EGLv2/0.100.0%2Bg1/Windows/EpicGamesLauncherSetup.exe".into(), file: "EpicGamesLauncherSetup.exe".into(), ..Default::default() };
+    let feed = feed_with("epic", vec![r.clone()]);
+    let l = latest(&cur, &[cur.clone()], &feed).unwrap();
+    assert_eq!(l.version, "0.100.0");
+
+    let ctx = Ctx { godot_root: Path::new("godot") };
+    let p = build_plan("epic", &r, JobKind::Update, Some(&cur), &ctx).unwrap();
+    assert_eq!(p.downloads[0].signer.as_deref(), Some("Epic Games Inc."));
+    assert_eq!(p.downloads[0].size, Some(217226744));
+    assert!(p.downloads[0].sha256.is_none());
+    match &p.steps[0] {
+        Step::Run { args, elevated, .. } => assert_eq!((args.as_slice(), *elevated), (&["--silent".to_string()][..], false)),
+        _ => panic!("expected a run step"),
+    }
+    assert_eq!(p.block_dirs, vec![dir.clone()]);
+    assert!(p.block_names.iter().any(|n| n == "EpicGamesLauncher.exe"));
+
+    let u = plan_uninstall(&cur).unwrap();
+    assert_eq!(u.steps.len(), 1);
+    match &u.steps[0] {
+        Step::Run { exe, args, elevated, .. } => {
+            assert_eq!(exe, &dir.join("EpicGamesLauncherSetup.exe"));
+            assert_eq!(args.as_slice(), ["--silent".to_string(), "--uninstall".to_string()]);
+            assert!(!*elevated);
+        }
+        _ => panic!("expected a run step"),
+    }
+    // Only the plain uninstall string: the silent switch is added, and NSIS switches are not.
+    cur.uninstall = Some(vec![setup.clone(), "--uninstall".into(), "/S".into()]);
+    match &plan_uninstall(&cur).unwrap().steps[0] {
+        Step::Run { args, .. } => assert_eq!(args.as_slice(), ["--uninstall".to_string(), "--silent".to_string()]),
+        _ => panic!("expected a run step"),
+    }
+}
+
+#[test]
+fn unity_supported_stream_is_not_a_pre_release() {
+    let dl = |v: &str| json!([{ "url": format!("https://x/UnitySetup64-{v}.exe"), "downloadSize": { "value": 1 } }]);
+    let api = json!({ "results": [
+        { "version": "6000.4.12f1", "stream": "SUPPORTED", "downloads": dl("6000.4.12f1") },
+        { "version": "6000.4.11f1", "stream": "SUPPORTED", "downloads": dl("6000.4.11f1") },
+        { "version": "6000.4.0b11", "stream": "BETA", "downloads": dl("6000.4.0b11") },
+        { "version": "6000.4.0a5", "stream": "ALPHA", "downloads": dl("6000.4.0a5") },
+        { "version": "6000.4.0b1", "stream": "", "downloads": dl("6000.4.0b1") }
+    ]});
+    let v = parse_unity(&api);
+    assert_eq!(v.iter().map(|r| r.prerelease).collect::<Vec<_>>(), vec![false, false, true, true, true]);
+    let mut feed = Feed::default();
+    feed.unity_series.insert("6000.4".into(), v);
+    let a = inst("unity", "tools:unity:6000.4.11f1", "6000.4.11f1", "6000.4.11f1");
+    assert_eq!(latest(&a, std::slice::from_ref(&a), &feed).unwrap().version, "6000.4.12f1");
+}
+
+#[test]
+fn unity_hub_versions_without_a_download_are_not_offered() {
+    let mut newer = rel("3.23.0", false);
+    newer.url = String::new();
+    let mut cur = rel("3.22.3", false);
+    cur.sha512 = Some("ab".into());
+    let feed = feed_with("unityhub", vec![newer, cur]);
+    let i = inst("unityhub", "tools:unityhub", "3.22.3", "");
+    assert_eq!(latest(&i, std::slice::from_ref(&i), &feed).unwrap().version, "3.22.3");
+    let c = catalog_entries(&feed, &[]);
+    assert_eq!(c.iter().find(|e| e.id == "tools:unityhub").unwrap().version, "3.22.3");
+}
+
+#[test]
+fn an_installer_without_a_checksum_is_never_planned() {
+    let mut k = rel("6.0.4.1", false);
+    k.sha256 = None;
+    let e = build_plan("krita", &k, JobKind::Install, None, &ctx()).unwrap_err().to_string();
+    assert_eq!(e, "Could not get the checksum for Krita 6.0.4.1. Try again later.");
+    for key in ["obs", "freecad", "godot", "unity"] {
+        assert!(build_plan(key, &k, JobKind::Install, None, &ctx()).is_err(), "{key}");
+    }
+    // Any one check is enough: MD5 (Unity), SHA-512 (Unity Hub, old Godot) or the signer (Epic).
+    k.md5 = Some("7b94".into());
+    assert!(build_plan("unity", &k, JobKind::Install, None, &ctx()).is_ok());
+    k.md5 = None;
+    k.sha512 = Some("cd".into());
+    assert!(build_plan("godot", &k, JobKind::Install, None, &ctx()).is_ok());
+}
+
+#[test]
+fn old_godot_releases_are_checked_with_their_sha512_sums() {
+    let gh = json!([{ "tag_name": "4.3-stable", "html_url": "https://x", "assets": [
+        gh_asset("Godot_v4.3-stable_win64.exe.zip", 10, None),
+        gh_asset("SHA512-SUMS.txt", 1, None)
+    ]}]);
+    let v = parse_godot(&gh, false);
+    assert_eq!(v[0].sums_url.as_deref(), Some("https://github.com/dl/SHA512-SUMS.txt"));
+    let h = "ad".repeat(64);
+    let text = format!("{}  Godot_v4.3-stable_linux.x86_64.zip
+{h}  Godot_v4.3-stable_win64.exe.zip
+", "ff".repeat(64));
+    assert_eq!(sha512_from(&text, "Godot_v4.3-stable_win64.exe.zip"), Some(h));
+    assert_eq!(sha512_from(&text, "other.zip"), None);
+}
+
+#[test]
+fn arm64_pcs_get_native_godot_unity_and_hub_builds_when_there_are_some() {
+    let gh = json!([
+        { "tag_name": "4.7.2-stable", "assets": [gh_asset("Godot_v4.7.2-stable_win64.exe.zip", 1, Some("aa")), gh_asset("Godot_v4.7.2-stable_windows_arm64.exe.zip", 2, Some("bb"))] },
+        { "tag_name": "3.6-stable", "assets": [gh_asset("Godot_v3.6-stable_win64.exe.zip", 3, Some("cc"))] }
+    ]);
+    let arm = parse_godot_for(&gh, false, "arm64");
+    assert_eq!(arm[0].file, "Godot_v4.7.2-stable_windows_arm64.exe.zip");
+    // No ARM64 build: the x64 one, which runs emulated.
+    assert_eq!(arm[1].file, "Godot_v3.6-stable_win64.exe.zip");
+    assert_eq!(parse_godot_for(&gh, false, "x64")[0].file, "Godot_v4.7.2-stable_win64.exe.zip");
+    assert_eq!(unity_archs("arm64"), &["ARM64", "X86_64"]);
+    assert_eq!(unity_archs("x64"), &["X86_64"]);
+    let yml = "version: 3.22.3\nfiles:\n  - url: 3.22.3/UnityHubSetup-3.22.3-x64.exe\n    sha512: AAAA\n    size: 1\n  - url: 3.22.3/UnityHubSetup-3.22.3-arm64.exe\n    sha512: BBBB\n    size: 2\n";
+    assert!(parse_hub_feed_for(yml, "arm64").unwrap().file.ends_with("-arm64.exe"));
+    assert!(parse_hub_feed_for(yml, "x64").unwrap().file.ends_with("-x64.exe"));
+}
+
+#[test]
+fn unity_editors_in_the_hubs_own_folder_and_added_by_hand_are_found() {
+    let root = std::env::temp_dir().join(format!("tu3d-unity-test-{}", std::process::id()));
+    let editor = |dir: &Path| {
+        std::fs::create_dir_all(dir.join("Editor")).unwrap();
+        std::fs::write(dir.join("Editor").join("Unity.exe"), b"x").unwrap();
+    };
+    let custom = root.join("Editors");
+    editor(&custom.join("6000.3.1f1"));
+    std::fs::create_dir_all(custom.join("notaversion")).unwrap();
+    let by_hand = root.join("Other").join("My Unity");
+    editor(&by_hand);
+    let hub = root.join("appdata").join("UnityHub");
+    std::fs::create_dir_all(&hub).unwrap();
+    std::fs::write(hub.join("secondaryInstallPath.json"), serde_json::to_string(&custom.display().to_string()).unwrap()).unwrap();
+    let list = json!({ "schema_version": "v2", "data": [{ "version": "2022.3.62f1", "location": [by_hand.join("Editor").join("Unity.exe").display().to_string()], "manual": true }] });
+    std::fs::write(hub.join("editors-v2.json"), list.to_string()).unwrap();
+    let found = hub_editors(&root.join("appdata"));
+    assert!(found.contains(&("6000.3.1f1".to_string(), custom.join("6000.3.1f1"))));
+    assert!(found.contains(&("2022.3.62f1".to_string(), by_hand.clone())));
+    assert!(!found.iter().any(|(v, _)| v == "notaversion"));
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -13,3 +13,12 @@ installer/
 .vscode/
 design/
 *.log
+
+# Secrets never belong in the repo
+.env*
+*.pem
+*.pfx
+
+# Official release feed and key: kept on the build PC only
+src-tauri/.update-key
+src-tauri/.update-feed

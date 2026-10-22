@@ -32,7 +32,7 @@ pub const APPS: &[AppDef] = &[
     AppDef { key: "photocraft", repo: "storytold/photocraft", name: "PhotoCraft", tagline: "Image editor", code: "Ph", fg: "#7C93D6", bg: "#141C33", tag_prefix: "v" },
     AppDef { key: "vectorcraft", repo: "storytold/vectorcraft", name: "VectorCraft", tagline: "Vector illustration", code: "Vc", fg: "#D9B26A", bg: "#2B2110", tag_prefix: "v" },
     AppDef { key: "filmcraft", repo: "storytold/filmcraft", name: "FilmCraft", tagline: "Video editor", code: "Fm", fg: "#A98BD8", bg: "#1E1530", tag_prefix: "v" },
-    AppDef { key: "lightcraft", repo: "storytold/lightcraft", name: "LightCraft", tagline: "Photo library and raw developer", code: "Lc", fg: "#8FC1E8", bg: "#0F2230", tag_prefix: "v" },
+    AppDef { key: "lightcraft", repo: "storytold/lightcraft", name: "LightCraft", tagline: "Non-destructive photo editor", code: "Lc", fg: "#8FC1E8", bg: "#0F2230", tag_prefix: "v" },
     AppDef { key: "pdfcraft", repo: "storytold/pdfcraft", name: "PdfCraft", tagline: "PDF workbench", code: "Pd", fg: "#D9706A", bg: "#2E1311", tag_prefix: "v" },
     AppDef { key: "effectcraft", repo: "storytold/effectcraft", name: "EffectCraft", tagline: "Motion graphics and VFX", code: "Ef", fg: "#C08BFF", bg: "#22093D", tag_prefix: "v" },
     AppDef { key: "designcraft", repo: "storytold/designcraft", name: "DesignCraft", tagline: "Page layout and publishing", code: "Dc", fg: "#D98BA6", bg: "#2E1320", tag_prefix: "v" },
@@ -357,6 +357,8 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             version: r.version.clone(),
             size: r.installer().and_then(|x| x.size),
             tagline: Some(a.tagline.into()),
+            description: super::about::craft(a.key).map(String::from),
+            blocked: None,
             group: Source::Craft.group().into(),
             prerelease: r.prerelease,
             installed: is_installed,
@@ -421,6 +423,8 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
     let asset = r.installer().cloned().ok_or_else(|| anyhow!("{} {} has no Windows installer", a.name, r.version))?;
     let sha = sha_for(&r, &asset).await;
     let dest = paths::downloads().join("craft").join(&asset.name);
+    let dl = Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] };
+    super::require_checked(&dl, &format!("{} {}", a.name, r.version))?;
     let log = paths::logs().join(format!("{}-{}.log", a.key, r.version));
     let mut steps = Vec::new();
     // MSI will not downgrade over a newer copy, so a roll back removes the current one first.
@@ -467,7 +471,7 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
         kind,
         name: a.name.to_string(),
         to_version: r.version.clone(),
-        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, signer: None, sha512: None, headers: vec![] }],
+        downloads: vec![dl],
         steps,
         block_dirs: current.and_then(|c| c.install_dir.clone()).into_iter().collect(),
         block_names: vec![format!("{}.exe", a.key)],

@@ -19,6 +19,20 @@ pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("http client")
 });
 
+/// For downloads: no automatic decompression, so byte ranges are ranges of the file itself, and
+/// enough idle connections kept per server for downloads over several connections.
+pub static DL_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .user_agent(concat!("TheUpdater3D/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(60))
+        .gzip(false)
+        .brotli(false)
+        .pool_max_idle_per_host(8)
+        .build()
+        .expect("http client")
+});
+
 #[derive(Serialize, Deserialize, Default)]
 struct Meta {
     url: String,

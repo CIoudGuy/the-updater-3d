@@ -1,11 +1,13 @@
 // User-level actions: check disk space first, then call the backend.
 import { call, send } from "./api";
-import { driveOf, nameList } from "./format";
+import { driveOf } from "./format";
 import { router, appHref } from "./router.svelte";
 import { store } from "./store.svelte";
 import type { AppEntry, CatalogEntry, Source } from "./types";
 import { ui } from "./ui.svelte";
 import { cmpVersion } from "./format";
+import { lowDiskWords } from "./view";
+import { modalOpen as modalOpenFor } from "./keys";
 
 interface SpaceItem {
   name: string;
@@ -22,7 +24,13 @@ function dirFor(source: Source): string | null {
   return null;
 }
 
-function guard(items: SpaceItem[], go: () => void) {
+/** True while a dialog or the blocked prompt is on screen. */
+export function modalOpen(): boolean {
+  return modalOpenFor({ dialog: !!ui.dialog, blockedIds: store.blockedJobs.map((j) => j.id), dismissed: ui.dismissedBlocked });
+}
+
+/** The drive that is shortest of space for these items, or null when everything fits. */
+function worstDrive(items: SpaceItem[]) {
   const need = new Map<string, SpaceItem[]>();
   for (const it of items) {
     const drive = driveOf(it.dir ?? dirFor(it.source)) ?? driveOf(store.status.disks[0]?.path);
@@ -36,6 +44,11 @@ function guard(items: SpaceItem[], go: () => void) {
     const needed = list.reduce((n, i) => n + i.bytes, 0);
     if (free < needed && (!worst || needed - free > worst.needed - worst.free)) worst = { drive, needed, free, list };
   }
+  return worst;
+}
+
+function guard(items: SpaceItem[], go: () => void, action: "install" | "update" = "install") {
+  const worst = worstDrive(items);
   if (!worst) return go();
   const w = worst;
   const names = w.list.map((i) => i.name);
@@ -49,7 +62,7 @@ function guard(items: SpaceItem[], go: () => void) {
     : null;
   ui.openDialog({
     type: "lowdisk",
-    name: names.length > 2 ? `${names.length} updates` : nameList(names),
+    ...lowDiskWords(names, action),
     drive: w.drive,
     needed: w.needed,
     free: w.free,
@@ -95,14 +108,20 @@ export async function updateSelf() {
 export function updateApps(ids: string[]) {
   const list = ids.map((id) => store.app(id)).filter((a): a is AppEntry => !!a && (a.status === "update"));
   if (!list.length) return;
-  guard(list.map(upd), () => void send("update_apps", { appIds: list.map((a) => a.id) }));
+  guard(list.map(upd), () => void send("update_apps", { appIds: list.map((a) => a.id) }), "update");
 }
 export function updateOne(id: string) {
   updateApps([id]);
 }
 export function updateAll() {
   if (!store.updates.length) return;
-  guard(store.updates.map(upd), () => void send("update_all", {}));
+  guard(store.updates.map(upd), () => void send("update_all", {}), "update");
+}
+/** Tray popup: it has no dialogs, so a low disk is handled in the main window, which opens its own dialog. */
+export function updateAllFromTray() {
+  if (!store.updates.length) return;
+  if (worstDrive(store.updates.map(upd))) void send("show_main", { route: "update-all" });
+  else void send("update_all", {});
 }
 export function installApp(entry: CatalogEntry, version: string | null = null, size: number | null = null) {
   guard(

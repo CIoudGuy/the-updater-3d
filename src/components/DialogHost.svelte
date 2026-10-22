@@ -122,10 +122,10 @@
     </div>
   </Dialog>
 {:else if d?.type === "lowdisk"}
-  <Dialog width={540} labelledby="disk-title" onclose={() => ui.closeDialog()}>
-    <span class="eyebrow"><Dab color="#D9B26A" />Before installing {d.name}</span>
+  <Dialog width={540} labelledby="disk-title" onclose={() => ui.closeDialog()} onenter={d.relocate ? d.onRelocate : undefined}>
+    <span class="eyebrow"><Dab color="#D9B26A" />{d.eyebrow}</span>
     <h2 id="disk-title" class="tight">Not enough space on {d.drive}</h2>
-    <p class="lead tightp">{d.name} needs {bytes(d.needed)} on {d.drive}. It has {bytes(d.free)} free.</p>
+    <p class="lead tightp">{d.name} {d.needs} {bytes(d.needed)} on {d.drive}. It has {bytes(d.free)} free.</p>
     <div class="stats">
       <div><span class="k">Needed</span><span class="v">{needN} <span class="u">{needU}</span></span></div>
       <div><span class="k">Free on {d.drive}</span><span class="v">{bytesParts(d.free, unitFor(d.needed))[0]} <span class="u">{needU}</span></span></div>

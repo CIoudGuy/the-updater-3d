@@ -57,6 +57,12 @@ pub fn install_version(core: C<'_>, app_id: String, version: String) -> Res<()> 
     core.inner().enqueue(JobRequest::Update { app_id, version: Some(version) }).map(|_| ()).map_err(err)
 }
 
+/// The screen the tray asked for, once (the window asks on start and on each "navigate").
+#[tauri::command]
+pub fn take_route(core: C<'_>) -> Option<String> {
+    core.inner().pending_route.lock().take()
+}
+
 /// The window opened: set up "Fewer admin prompts" if it is on but not ready yet.
 #[tauri::command]
 pub fn window_ready(core: C<'_>) {
@@ -66,7 +72,7 @@ pub fn window_ready(core: C<'_>) {
 #[tauri::command]
 pub async fn prefs_preview(core: C<'_>, app_id: String) -> Res<Vec<crate::model::PrefsItem>> {
     let c = core.inner().clone();
-    tokio::task::spawn_blocking(move || c.prefs_preview(&app_id)).await.map_err(err)?.map_err(err)
+    tauri::async_runtime::spawn_blocking(move || c.prefs_preview(&app_id)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -108,8 +114,10 @@ pub fn get_catalog(core: C<'_>) -> Vec<CatalogEntry> {
 }
 
 #[tauri::command]
-pub fn get_catalog_entry(core: C<'_>, id: String) -> Option<CatalogEntry> {
-    core.catalog_entry(&id)
+pub async fn get_catalog_entry(core: C<'_>, id: String) -> Result<Option<CatalogEntry>, String> {
+    // Off the window's thread: an Other apps entry may read the catalog index from disk.
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.catalog_entry(&id).or_else(|| core.other_entry(&id))).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -166,7 +174,7 @@ pub fn get_activity() -> Vec<ActivityEntry> {
 pub async fn export_activity(app: AppHandle) -> Res<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
     let name = format!("The Updater 3D activity {}.txt", chrono::Local::now().format("%Y-%m-%d"));
-    let picked = tokio::task::spawn_blocking(move || app.dialog().file().set_file_name(&name).add_filter("Text", &["txt"]).blocking_save_file())
+    let picked = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(&name).add_filter("Text", &["txt"]).blocking_save_file())
         .await
         .map_err(err)?;
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
@@ -197,15 +205,21 @@ pub fn open_log(path: String) -> Res<()> {
     winutil::shell_open(&path).map_err(err)
 }
 
+/// Opens the folder with app.log, for bug reports.
+#[tauri::command]
+pub fn open_logs_folder() -> Res<()> {
+    winutil::shell_open(&crate::paths::logs().to_string_lossy()).map_err(err)
+}
+
 #[tauri::command]
 pub async fn get_services() -> Vec<ServiceInfo> {
-    tokio::task::spawn_blocking(services::list).await.unwrap_or_default()
+    tauri::async_runtime::spawn_blocking(services::list).await.unwrap_or_default()
 }
 
 async fn run_action(core: &Arc<Core>, a: Action) -> Res<()> {
     match a {
         Action::Close(pids) => {
-            tokio::task::spawn_blocking(move || crate::procs::close(&pids, std::time::Duration::from_secs(6))).await.map_err(err)?;
+            tauri::async_runtime::spawn_blocking(move || crate::procs::close(&pids, std::time::Duration::from_secs(6))).await.map_err(err)?;
             Ok(())
         }
         Action::Elevated(step) => {
@@ -238,7 +252,7 @@ pub async fn start_service(core: C<'_>, name: String) -> Res<()> {
 #[tauri::command]
 pub async fn stop_safe_services(core: C<'_>) -> Res<()> {
     let c = core.inner().clone();
-    let names = tokio::task::spawn_blocking(services::safe_names).await.map_err(err)?;
+    let names = tauri::async_runtime::spawn_blocking(services::safe_names).await.map_err(err)?;
     let mut failed = Vec::new();
     for n in &names {
         match services::stop(n) {
@@ -268,7 +282,7 @@ pub async fn set_settings(core: C<'_>, patch: serde_json::Value) -> Res<Settings
 #[tauri::command]
 pub async fn pick_folder(app: AppHandle, current: String) -> Res<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
-    let picked = tokio::task::spawn_blocking(move || {
+    let picked = tauri::async_runtime::spawn_blocking(move || {
         let mut d = app.dialog().file();
         if std::path::Path::new(&current).exists() {
             d = d.set_directory(&current);
@@ -286,7 +300,7 @@ pub async fn clear_cache(core: C<'_>) -> Res<u64> {
     if c.jobs().iter().any(|j| !j.state.is_finished()) {
         return Err("Wait until the queue is empty".into());
     }
-    let freed = tokio::task::spawn_blocking(|| {
+    let freed = tauri::async_runtime::spawn_blocking(|| {
         let dir = paths::downloads();
         let size = winutil::dir_size(&dir);
         if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -300,16 +314,21 @@ pub async fn clear_cache(core: C<'_>) -> Res<u64> {
     .await
     .map_err(err)?;
     let me = c.clone();
-    tokio::task::spawn_blocking(move || me.update_disk_status()).await.ok();
+    tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
     c.emit_status();
     Ok(freed)
 }
 
 #[tauri::command]
-pub fn show_main(app: AppHandle, route: Option<String>) {
-    crate::tray::show_main(&app);
+pub fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) {
+    // Kept until the window reads it: a window built just now has not subscribed to events
+    // yet, and "Update all" from the tray must not get lost then.
     if let Some(r) = route {
+        *core.inner().pending_route.lock() = Some(r.clone());
+        crate::tray::show_main(&app);
         let _ = app.emit("navigate", r);
+    } else {
+        crate::tray::show_main(&app);
     }
     if let Some(w) = app.get_webview_window("tray") {
         let _ = w.hide();
@@ -345,7 +364,7 @@ pub async fn install_self_update(app: AppHandle, core: C<'_>) -> Res<()> {
 #[tauri::command]
 pub fn test_notification(app: AppHandle) -> Res<()> {
     use tauri_plugin_notification::NotificationExt;
-    app.notification().builder().title("The Updater 3D").body("Notifications are working. You will get one when an update is ready.").show().map_err(err)
+    app.notification().builder().title("The Updater 3D").body("Notifications are working. You will get one when an update is ready.").sound("Default").show().map_err(err)
 }
 
 #[tauri::command]
@@ -358,6 +377,13 @@ pub async fn catalog_versions(core: C<'_>, id: String) -> Res<Vec<VersionInfo>> 
 pub async fn search_other_apps(core: C<'_>, query: String) -> Res<Vec<CatalogEntry>> {
     let c = core.inner().clone();
     Ok(c.search_other(query).await)
+}
+
+/// One page of the whole winget catalog (Get apps, Other apps, Browse all).
+#[tauri::command]
+pub async fn browse_other_apps(core: C<'_>, category: Option<String>, letter: Option<String>, offset: usize, limit: usize) -> Res<crate::sources::browse::BrowsePage> {
+    let c = core.inner().clone();
+    c.browse_other(category, letter, offset, limit).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]

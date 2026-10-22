@@ -457,3 +457,59 @@ fn file_names_and_marks() {
     assert!(fg.starts_with('#') && bg.starts_with('#'));
     assert_eq!(mark_for("7-Zip", "7zip.7zip").0, "7z");
 }
+
+#[test]
+fn the_epic_preview_is_not_claimed_as_the_old_launcher() {
+    let dir = crate::paths::local_app_data().join("Epic Games").join("Launcher");
+    let setup = dir.join("EpicGamesLauncherSetup.exe").display().to_string();
+    let mut e = entry("{D0769F44-D459-450F-B084-CAE38062C75B}", "HKCU", "Epic Games Launcher", "0.97.0", "Epic Games, Inc.");
+    e.install_location = dir.display().to_string();
+    e.uninstall_string = format!("\"{setup}\" --uninstall");
+    e.quiet_uninstall_string = format!("\"{setup}\" --silent --uninstall");
+    let mut un = Vec::new();
+    un.extend(crate::sources::tools::scan(&[e.clone()], std::path::Path::new("godot")));
+    assert_eq!(un.len(), 1);
+    assert!(handled_entry(&e, &un));
+    // The old launcher lives in Program Files and stays an Other apps entry.
+    let mut old = entry("{A1B2C3D4-0000-0000-0000-000000000000}", "HKLM32", "Epic Games Launcher", "1.3.150.0", "Epic Games, Inc.");
+    old.install_location = r"C:\Program Files (x86)\Epic Games\Launcher".into();
+    old.windows_installer = true;
+    assert!(!handled_entry(&old, &un));
+}
+
+/// Firefox, Slack, PowerToys and Notion are also in the Store, so the catalog gives them a
+/// package family name; they were dropped for that although they have normal installers.
+#[test]
+fn starter_apps_that_are_also_in_the_store_stay() {
+    let idx = test_index();
+    let fx = idx.add_test_package("Mozilla.Firefox", "Mozilla Firefox", "150.0", &[], &[], &["Mozilla Firefox (x64 en-US)"], "Mozilla");
+    idx.add_test_package("Microsoft.PowerToys", "PowerToys", "0.101", &[], &[], &["PowerToys (Preview) x64"], "Microsoft Corporation");
+    idx.add_test_pfn(fx, "Mozilla.Firefox_n80bbvh6b1yt2");
+    assert!(idx.is_msix(fx));
+    let got: Vec<String> = popular_candidates(&idx).into_iter().map(|(p, _)| p.id).collect();
+    assert!(got.contains(&"Mozilla.Firefox".to_string()), "{got:?}");
+    assert!(got.contains(&"Microsoft.PowerToys".to_string()), "{got:?}");
+    // The manifest decides: a normal installer next to the MSIX is used, an MSIX alone is not.
+    let m = manifest(vec![inst("x64", "msix", None), inst("x64", "nsis", None)]);
+    assert_eq!(kind_of(choose(&m, &Want::fresh()).unwrap()), "nsis");
+    let store_only = manifest(vec![inst("x64", "msix", None)]);
+    assert!(choose(&store_only, &Want::fresh()).is_err());
+}
+
+#[test]
+fn the_starter_list_is_clean() {
+    let mut seen = std::collections::HashSet::new();
+    for (id, line) in POPULAR {
+        assert!(seen.insert(id.to_ascii_lowercase()), "{id} is listed twice");
+        assert!(!handled_package(id), "{id} has a source of its own");
+        assert!(excluded_package(id).is_none(), "{id} is excluded");
+        assert!(!line.is_empty() && line.chars().count() <= 40, "{id}: description");
+        assert!(!line.contains('\u{2013}') && !line.contains('\u{2014}'), "{id}: dash in the description");
+    }
+    assert!(POPULAR.len() >= 250);
+}
+
+#[test]
+fn package_icon_files_are_named_by_id() {
+    assert_eq!(super::super::icons::file_stem("Mozilla.Firefox"), "other-mozilla.firefox");
+}

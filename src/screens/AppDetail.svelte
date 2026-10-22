@@ -18,7 +18,8 @@
   import { OTHER_NOTE, store, statusColor } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router } from "../lib/router.svelte";
-  import { askUninstall, installVersion, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
+  import { askUninstall, installVersion, modalOpen, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
+  import { tryLoad } from "../lib/load";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -34,15 +35,26 @@
   const sideBySide = $derived(isBlender || (app?.source === "tools" && app.id.split(":").length > 2));
 
   let versions = $state<VersionInfo[] | null>(null);
+  /** the version list could not be loaded (offline); shown with a Retry button */
+  let versionsError = $state<string | null>(null);
   let reqSeq = 0;
+  function loadVersions(aid: string) {
+    const seq = ++reqSeq;
+    versionsError = null;
+    tryLoad(() => call("get_versions", { appId: aid })).then((r) => {
+      if (seq !== reqSeq) return;
+      if (r.ok) versions = r.value;
+      else {
+        versions = [];
+        versionsError = r.error;
+      }
+    });
+  }
   $effect(() => {
     const aid = app?.id;
     app?.version;
     if (!aid) return;
-    const seq = ++reqSeq;
-    call("get_versions", { appId: aid }).then((r) => {
-      if (seq === reqSeq) versions = r;
-    });
+    loadVersions(aid);
   });
   /** The backend refreshed the cached history in the background: swap the list in without a spinner, and only when it differs. */
   function reloadQuiet() {
@@ -51,7 +63,10 @@
     const seq = ++reqSeq;
     call("get_versions", { appId: aid })
       .then((r) => {
-        if (seq === reqSeq && JSON.stringify(r) !== JSON.stringify(versions)) versions = r;
+        if (seq === reqSeq && (versionsError || JSON.stringify(r) !== JSON.stringify(versions))) {
+          versionsError = null;
+          versions = r;
+        }
       })
       .catch(() => {});
   }
@@ -81,7 +96,7 @@
       setTimeout(() => picker?.focus(), 250);
     }
     const k = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === "Enter") {
+      if (e.ctrlKey && e.key === "Enter" && !modalOpen()) {
         e.preventDefault();
         doInstallPick();
       }
@@ -154,10 +169,10 @@
         </span>
         <div class="btns">
           {#if job}
-            <Btn variant="ghost" disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })} title={pauseTip(job, "  Space")}>
+            <Btn variant="ghost" disabled={!canPause(job)} onclick={() => send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })} title={pauseTip(job)}>
               <Icon d={job.state === "paused" ? I.play : I.pause} />{job.state === "paused" ? "Resume" : "Pause"}
             </Btn>
-            <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job, "Cancel", "  Esc")}>Cancel</Btn>
+            <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job)}>Cancel</Btn>
           {:else}
             {#if app.status !== "missing"}
               <Btn variant="ghost" title="Open {app.name}  O" onclick={() => openApp(app.id)}>Open</Btn>
@@ -185,12 +200,15 @@
       <section aria-label="Version history">
         <div class="sec-h">
           <span>Version history</span>
-          <span class="aside">{versions ? `${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
+          <span class="aside">{versions && !versionsError ? `${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
         </div>
         {#if !versions}
           {#each [0, 1, 2, 3] as i (i)}
             <div class="vrow skel" aria-hidden="true" style="animation-delay:{i * 100}ms"><span class="sk w1"></span><span class="sk w2"></span></div>
           {/each}
+        {:else if versionsError}
+          <p class="gone">Could not load the versions. Check the connection.</p>
+          <div class="retry"><Btn variant="raised" size="md" onclick={() => app && loadVersions(app.id)}>Retry</Btn></div>
         {:else}
           {#each versions as v, i (v.version)}
             {@const act = rowAction(v)}
@@ -300,6 +318,9 @@
   .gone {
     margin-top: 32px;
     color: var(--text-3);
+  }
+  .retry {
+    margin-top: 12px;
   }
   .hd {
     position: relative;

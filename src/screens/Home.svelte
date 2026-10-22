@@ -15,13 +15,14 @@
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router, appHref } from "../lib/router.svelte";
   import { checkNow, repairApp, togglePauseAll, updateAll, updateOne, isPaused, updateSelf } from "../lib/actions";
-  import { bytes, checkedLine, clock, countOf, duration, inUnit, nameList, splitVersion, unitFor } from "../lib/format";
-  import { NO_STOP_TIP, canPause, jobStatus, pauseTip, pct } from "../lib/jobs";
+  import { bytes, checkedLine, clock, countOf, duration, inUnit, nameList, speedParts, splitVersion, unitFor } from "../lib/format";
+  import { allSourcesOff, failedCount, failedSentence, isEmptyLibrary } from "../lib/view";
+  import { NO_STOP_TIP, canPause, jobDetail, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import type { ServiceInfo } from "../lib/types";
   import { jobHref } from "../lib/links";
 
-  type HState = "first" | "ccdown" | "signedout" | "offline" | "updating" | "failed" | "ready" | "repair" | "current";
+  type HState = "first" | "ccdown" | "signedout" | "offline" | "updating" | "failed" | "ready" | "repair" | "empty" | "current";
   const hs = $derived.by((): HState => {
     const s = store.status;
     if (s.firstScan) return "first";
@@ -32,10 +33,12 @@
     if (store.openJobs.length === 0 && store.failedJobs.length > 0) return "failed";
     if (store.updates.length > 0) return "ready";
     if (store.missing.length > 0) return "repair";
+    if (isEmptyLibrary(store.apps.length)) return "empty";
     return "current";
   });
 
   const updates = $derived(store.updates);
+  const sourcesOff = $derived(allSourcesOff(store.settings.sources));
   const colors = $derived.by(() => {
     const src = hs === "updating" ? store.openJobs.map((j) => j.fg) : hs === "ready" || hs === "offline" ? updates.map((a) => a.fg) : hs === "repair" || hs === "failed" ? [...store.failedJobs.map((j) => j.fg), ...store.missing.map((a) => a.fg)] : [];
     return src.slice(0, 3);
@@ -74,13 +77,14 @@
       case "offline":
         return { pre: "You are ", word: "offline", post: "", color: "#D9706A", op: 0.42 };
       case "failed": {
-        const f = store.failedJobs.length;
-        return { pre: `${f} ${f === 1 ? "update" : "updates"} `, word: "failed", post: "", color: "#D9706A", op: 0.45 };
+        return { pre: `${failedCount(store.failedJobs)} `, word: "failed", post: "", color: "#D9706A", op: 0.45 };
       }
       case "repair": {
         const m = store.missing.length;
         return { pre: "", word: countOf(m, "app"), post: m === 1 ? " needs repair" : " need repair", color: "#D9706A", op: 0.45 };
       }
+      case "empty":
+        return { pre: "", word: "No apps", post: " found yet", color: "#A0A0A0", op: 0.3 };
       case "ccdown":
         return { pre: "Creative Cloud services are ", word: "not running", post: "", color: "#D9706A", op: 0.42 };
       case "signedout":
@@ -110,12 +114,14 @@
         const j = store.failedJobs[0];
         const others = store.jobs.filter((x) => x.state === "done").length;
         const why = j.error ? `${j.error.message} ` : "";
-        return `${j.name} ${j.toVersion} could not install. ${why}${j.fromVersion ? `Nothing changed, ${j.fromVersion} still works.` : ""}${others ? ` The other ${others === 1 ? "update" : `${others} updates`} finished.` : ""}`;
+        return `${failedSentence(j)} ${why}${j.fromVersion ? `Nothing changed, ${j.fromVersion} still works.` : ""}${others ? ` The other ${others === 1 ? "update" : `${others} updates`} finished.` : ""}`;
       }
       case "repair": {
         const m = store.missing;
         return m.length === 1 ? `${m[0].name} ${m[0].version} is registered as installed but its files are gone. Repair reinstalls it.` : `${nameList(m.map((a) => a.name))} are registered as installed but their files are gone. Repair reinstalls them.`;
       }
+      case "empty":
+        return sourcesOff ? "Every source is switched off, so there is nothing to check. Turn some on in Settings." : "No supported apps were found on this PC. Get apps lists what you can install, and anything you install shows up here.";
       case "ccdown":
         return "Sign-in, licensing and installs go through them. Your apps are still installed. Start the services to check for updates again.";
       case "signedout":
@@ -233,7 +239,7 @@
         </div>
         <div class="stat">
           <span class="k">Speed</span>
-          <span class="v"><Num value={store.speed / 1e6} fmt={(n) => String(Math.round(n))} /> <span class="u">MB/s</span></span>
+          <span class="v"><Num value={store.speed} fmt={(n) => speedParts(n)[0]} /> <span class="u">{speedParts(store.speed)[1]}</span></span>
         </div>
         <div class="stat">
           <span class="k">Time left</span>
@@ -255,16 +261,22 @@
         <Btn variant="secondary" hint="F5" title="Try again  F5" onclick={checkNow}>Try again</Btn>
       {:else if hs === "failed"}
         <Btn variant="primary" hint="R" title="Retry  R" onclick={retryFailed}>Retry</Btn>
-        <Btn variant="secondary" href="#/activity" title="View log  L">View log</Btn>
+        <Btn variant="secondary" href="#/activity" title="View log">View log</Btn>
         <Btn variant="ghost" onclick={() => send("clear_finished_jobs", {})}>Dismiss</Btn>
       {:else if hs === "repair"}
         <Btn variant="primary" onclick={() => store.missing.filter(canRepair).forEach((a) => repairApp(a.id))}>{store.missing.length === 1 ? "Repair" : "Repair all"}</Btn>
         <Btn variant="ghost" href={appHref(store.missing[0].id)}>Open details</Btn>
+      {:else if hs === "empty"}
+        {#if sourcesOff}
+          <Btn variant="primary" href="#/settings/sources">Turn on sources</Btn>
+        {:else}
+          <Btn variant="primary" href="#/get">Get apps</Btn>
+        {/if}
       {:else if hs === "ccdown"}
-        <Btn variant="primary" hint="Enter" title="Start services  Enter" onclick={() => send("open_creative_cloud", {})}>Start services</Btn>
+        <Btn variant="primary" title="Start services" onclick={() => send("open_creative_cloud", {})}>Start services</Btn>
         <Btn variant="ghost" href="#/services" title="View services  Ctrl 6">View services</Btn>
       {:else if hs === "signedout"}
-        <Btn variant="primary" title="Open Creative Cloud to sign in  Enter" onclick={() => send("open_creative_cloud", {})}>
+        <Btn variant="primary" title="Open Creative Cloud to sign in" onclick={() => send("open_creative_cloud", {})}>
           Open Creative Cloud to sign in <Icon d={I.external} size={14} width={2.5} />
         </Btn>
       {/if}
@@ -312,6 +324,7 @@
                     <div class="rcol">
                       <span class="rname ellipsis">{j.name}</span>
                       <span class="rsub ellipsis">{jobStatus(j, false)}</span>
+                      {#if jobDetail(j)}<span class="rdet ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
                     </div>
                   </svelte:element>
                   <span class="jp"><Num value={pct(j)} />%</span>
@@ -334,9 +347,12 @@
                 <span class="rsub ellipsis">{j.fromVersion ? `${j.fromVersion}  →  ${j.toVersion}` : j.toVersion}</span>
               </div>
             </svelte:element>
-            <span class="jstat ellipsis" style:color={j.state === "paused" ? "var(--warn)" : "var(--text-2)"}>{jobStatus(j)}</span>
+            <span class="jstat">
+              <span class="ellipsis" style:color={j.state === "paused" ? "var(--warn)" : "var(--text-2)"}>{jobStatus(j)}</span>
+              {#if jobDetail(j)}<span class="rdet ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
+            </span>
             <span class="jpct"><Num value={pct(j)} />%</span>
-            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j, "  Space")} onclick={() => pauseJob(j.id, j.state)} disabled={!canPause(j)}>
+            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j)} onclick={() => pauseJob(j.id, j.state)} disabled={!canPause(j)}>
               <Icon d={j.state === "paused" ? I.play : I.pause} />
             </button>
             <span class="jbar2"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
@@ -604,7 +620,15 @@
   }
   .jstat {
     flex: 1;
+    min-width: 0;
     font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .rdet {
+    font-size: 11px;
+    color: var(--text-3);
   }
   .jpct {
     width: 64px;

@@ -14,12 +14,14 @@
   import Services from "./screens/Services.svelte";
   import Settings from "./screens/Settings.svelte";
   import Skeleton from "./components/Skeleton.svelte";
+  import Btn from "./components/Btn.svelte";
   import { router, type Route } from "./lib/router.svelte";
   import { store } from "./lib/store.svelte";
-  import { ui } from "./lib/ui.svelte";
+  import { canRepair, ui } from "./lib/ui.svelte";
   import { send, windowApi } from "./lib/api";
   import { reduced } from "./lib/motion";
-  import { checkNow, isPaused, togglePauseAll, updateAll, updateOne } from "./lib/actions";
+  import { checkNow, modalOpen, openApp, repairApp, togglePauseAll, updateAll, updateOne } from "./lib/actions";
+  import { appShortcut } from "./lib/keys";
   import { tick } from "svelte";
   import { applyZoom, clampZoom, cssScale, currentZoom, stepZoom, zoomPercent } from "./lib/zoom";
 
@@ -88,7 +90,20 @@
 
   onMount(() => {
     let off = () => {};
-    store.init((route) => router.go(route.replace(/^#?\/?/, ""))).then((u) => (off = u));
+    const go = (route: string) => {
+      // the tray popup has no dialogs: it asks the main window to run "Update all", which opens the low disk dialog here
+      if (route === "update-all") {
+        router.go("home");
+        updateAll();
+      } else router.go(route.replace(/^#?\/?/, ""));
+    };
+    // The backend keeps the route until it is read once, so a window that is still being built
+    // when the tray asks (its events are not subscribed yet) still gets it.
+    const takeRoute = () => send("take_route", {}).then((r) => r && go(r));
+    store.init(() => void takeRoute()).then((u) => {
+      off = u;
+      void takeRoute();
+    });
     // "Fewer admin prompts" on but not set up yet: its one admin prompt comes now, not mid-update.
     send("window_ready", {});
     windowApi.isMaximized().then((m) => (ui.maximized = m));
@@ -141,6 +156,13 @@
     if (want !== currentZoom()) void applyZoom(want).then(measure);
   });
 
+  // the app under the pointer belongs to the screen it was on
+  $effect(() => {
+    router.key;
+    router.route;
+    ui.focusedApp = null;
+  });
+
   // ----- keyboard -----
   const ROUTES = ["home", "installed", "get", "queue", "activity", "services"];
   function focusSearch() {
@@ -153,7 +175,7 @@
       tick().then(() => setTimeout(() => ui.searchEl?.focus(), 140));
     }
   }
-  const blockedOpen = () => store.blockedJobs.some((j) => !ui.dismissedBlocked.includes(j.id));
+  const blockedOpen = () => modalOpen() && !ui.dialog;
 
   function onkeydown(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
@@ -241,8 +263,22 @@
       ui.setView("grid");
     } else if (name === "installed" && k === "l") {
       ui.setView("list");
-    } else if (k === " " && name === "queue") {
-      /* space is handled by the focused button */
+    } else if (k === "r" || k === "o") {
+      const id = name === "detail" ? router.route.param : name === "installed" ? ui.focusedApp : null;
+      const app = id ? store.app(id) : undefined;
+      const act = appShortcut(k, {
+        route: name,
+        app: app && { id: app.id, status: app.status, canRepair: canRepair(app) },
+        hasJob: !!app && store.jobByApp.has(app.id),
+        failedJobIds: app ? store.failedJobs.filter((j) => j.appId === app.id).map((j) => j.id) : [],
+        allFailedJobIds: store.failedJobs.map((j) => j.id),
+      });
+      if (act) {
+        e.preventDefault();
+        if (act.do === "retry") for (const jobId of act.jobIds) void send("retry_job", { jobId });
+        else if (act.do === "repair") repairApp(act.appId);
+        else openApp(act.appId);
+      }
     }
   }
 </script>
@@ -252,7 +288,13 @@
 <div class="app">
   <TopBar />
   <main class="page {phase}" bind:this={page}>
-    {#if !store.ready}
+    {#if store.loadError}
+      <div class="loaderr" role="alert">
+        <h1>Could not read your apps</h1>
+        <p>{store.loadError}</p>
+        <Btn variant="primary" onclick={() => store.loadSnapshot()}>Retry</Btn>
+      </div>
+    {:else if !store.ready}
       <Skeleton name={shown.name} />
     {:else}
       {#if shown.name === "home"}
@@ -289,6 +331,24 @@
     flex-direction: column;
     background: var(--bg);
     overflow: hidden;
+  }
+  .loaderr {
+    padding: 72px 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .loaderr h1 {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+  .loaderr p {
+    margin: 0 0 8px;
+    color: var(--text-2);
+    font-size: 13px;
   }
   .page {
     position: relative;

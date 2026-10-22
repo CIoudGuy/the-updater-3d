@@ -274,6 +274,25 @@ impl Index {
         self.conn.query_row("SELECT count(*) FROM pfns2 WHERE package = ?1", [row], |r| r.get::<_, i64>(0)).unwrap_or(0) > 0
     }
 
+    /// Every package, for browsing the whole catalog.
+    pub fn all(&self) -> Vec<Pkg> {
+        let Ok(mut st) = self.conn.prepare(&format!("SELECT {PKG_COLS} FROM packages")) else { return vec![] };
+        st.query_map([], pkg_row).map(|m| m.flatten().collect()).unwrap_or_default()
+    }
+
+    /// The tags of every package (row -> tags), as the manifests give them. Indexes without tags
+    /// give none.
+    pub fn all_tags(&self) -> std::collections::HashMap<i64, Vec<String>> {
+        let mut out: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+        let Ok(mut st) = self.conn.prepare("SELECT m.package, t.tag FROM tags2_map m JOIN tags2 t ON t.rowid = m.tag") else { return out };
+        if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+            for (row, tag) in rows.flatten() {
+                out.entry(row).or_default().push(tag);
+            }
+        }
+        out
+    }
+
     /// Packages whose id, name or moniker contains every word of `q`, best first.
     pub fn search(&self, q: &str, limit: usize) -> Vec<Pkg> {
         let words: Vec<String> = q.split_whitespace().map(|w| w.to_lowercase().replace(['%', '_'], "")).filter(|w| !w.is_empty()).take(4).collect();
@@ -317,7 +336,9 @@ pub fn test_index() -> Index {
          CREATE TABLE upgradecodes2(upgradecode TEXT NOT NULL, package INT64 NOT NULL, PRIMARY KEY(upgradecode, package));
          CREATE TABLE norm_names2(norm_name TEXT NOT NULL, package INT64 NOT NULL, PRIMARY KEY(norm_name, package));
          CREATE TABLE norm_publishers2(norm_publisher TEXT NOT NULL, package INT64 NOT NULL, PRIMARY KEY(norm_publisher, package));
-         CREATE TABLE pfns2(pfn TEXT NOT NULL, package INT64 NOT NULL, PRIMARY KEY(pfn, package));",
+         CREATE TABLE pfns2(pfn TEXT NOT NULL, package INT64 NOT NULL, PRIMARY KEY(pfn, package));
+         CREATE TABLE tags2(rowid INTEGER PRIMARY KEY, tag TEXT NOT NULL);
+         CREATE TABLE tags2_map(tag INT64 NOT NULL, package INT64 NOT NULL, PRIMARY KEY(tag, package));",
     )
     .unwrap();
     Index { conn: c }
@@ -353,6 +374,25 @@ impl Index {
         }
         self.conn.execute("INSERT OR IGNORE INTO norm_publishers2 VALUES(?1, ?2)", rusqlite::params![normalize_publisher(publisher), row]).unwrap();
         row
+    }
+
+    /// Give a package of a test index a Store package family name.
+    pub fn add_test_pfn(&self, row: i64, pfn: &str) {
+        self.conn.execute("INSERT OR IGNORE INTO pfns2 VALUES(?1, ?2)", rusqlite::params![pfn, row]).unwrap();
+    }
+
+    /// Give a package of a test index these tags.
+    pub fn add_test_tags(&self, row: i64, tags: &[&str]) {
+        for t in tags {
+            let tid: i64 = match self.conn.query_row("SELECT rowid FROM tags2 WHERE tag = ?1", [t], |r| r.get(0)) {
+                Ok(id) => id,
+                Err(_) => {
+                    self.conn.execute("INSERT INTO tags2(tag) VALUES(?1)", [t]).unwrap();
+                    self.conn.last_insert_rowid()
+                }
+            };
+            self.conn.execute("INSERT OR IGNORE INTO tags2_map VALUES(?1, ?2)", rusqlite::params![tid, row]).unwrap();
+        }
     }
 }
 
@@ -550,7 +590,10 @@ pub struct Manifest {
     pub publisher: String,
     pub publisher_url: Option<String>,
     pub package_url: Option<String>,
+    /// ShortDescription: one line about the app
     pub description: Option<String>,
+    /// Description: a longer text about the app, when the manifest has one
+    pub long_description: Option<String>,
     pub release_notes: Option<String>,
     pub release_notes_url: Option<String>,
     pub release_date: Option<String>,
@@ -613,6 +656,7 @@ pub fn parse_manifest(yaml: &str) -> Result<Manifest> {
         publisher_url: text(&root["PublisherUrl"]),
         package_url: text(&root["PackageUrl"]),
         description: text(&root["ShortDescription"]),
+        long_description: text(&root["Description"]),
         release_notes: text(&root["ReleaseNotes"]),
         release_notes_url: text(&root["ReleaseNotesUrl"]),
         release_date: text(&root["ReleaseDate"]),
@@ -999,6 +1043,10 @@ vD:
 PackageVersion: 2.10
 PackageName: Example Tool
 Publisher: Example Ltd
+ShortDescription: Packs and unpacks files
+Description: |-
+  Example Tool packs files into archives.
+  It also unpacks them.
 ReleaseNotes: '- Fixed a crash.
 
   - Faster start.'
@@ -1035,6 +1083,8 @@ ManifestType: merged
         let m = parse_manifest(y).unwrap();
         assert_eq!((m.id.as_str(), m.version.as_str(), m.publisher.as_str()), ("Example.Tool", "2.10", "Example Ltd"));
         assert_eq!(m.release_notes.as_deref(), Some("- Fixed a crash.\n- Faster start."));
+        assert_eq!(m.description.as_deref(), Some("Packs and unpacks files"));
+        assert_eq!(m.long_description.as_deref(), Some("Example Tool packs files into archives.\nIt also unpacks them."));
         assert_eq!(m.installers.len(), 2);
         let a = &m.installers[0];
         assert_eq!((a.kind.as_str(), a.scope.as_deref(), a.silent.as_deref(), a.custom.as_deref()), ("nsis", Some("machine"), Some("/S"), Some("/NOICONS")));

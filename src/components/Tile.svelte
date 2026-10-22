@@ -60,8 +60,9 @@
     if (menuBtn) openMenuFor(app, menuBtn, { x: e.clientX, y: e.clientY });
   }}
   onpointerenter={() => (ui.focusedApp = app.id)}
-  onpointerleave={() => ui.focusedApp === app.id && (ui.focusedApp = null)}
+  onpointerleave={() => ui.leaveApp(app.id)}
   onfocusin={() => (ui.focusedApp = app.id)}
+  onfocusout={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && ui.leaveApp(app.id)}
 >
   <Paint kind="blob" fill="var(--tile)" lines="M16 14c50-1.4 120-1.6 170-.4M20 186c60 1 110 .8 160-.6" lineStroke="#2A2A2A" />
   <div class="wash" aria-hidden="true">
@@ -99,10 +100,10 @@
         {:else if failedJob}
           <Btn variant="raised" size="sm" title="Retry  R" onclick={() => retryFor(app)}>Retry</Btn>
         {:else if hasJob}
-          <button class="ib" aria-label={job?.state === "paused" ? "Resume" : "Pause"} title={job ? pauseTip(job, "  Space") : ""} disabled={!job || !canPause(job)} onclick={() => job && send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}>
+          <button class="ib" aria-label={job?.state === "paused" ? "Resume" : "Pause"} title={job ? pauseTip(job) : ""} disabled={!job || !canPause(job)} onclick={() => job && send(job.state === "paused" ? "resume_job" : "pause_job", { jobId: job.id })}>
             <Icon d={job?.state === "paused" ? I.play : I.pause} />
           </button>
-          <button class="ib" aria-label="Cancel" title={job ? cancelTip(job, "Cancel", "  Esc") : ""} disabled={!job || !canCancel(job)} onclick={() => job && send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
+          <button class="ib" aria-label="Cancel" title={job ? cancelTip(job) : ""} disabled={!job || !canCancel(job)} onclick={() => job && send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
         {:else}
           <span class="hov"><Btn variant="raised" size="sm" title="Open  O" onclick={() => openApp(app.id)}>Open</Btn></span>
         {/if}

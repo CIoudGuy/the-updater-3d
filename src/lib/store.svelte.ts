@@ -3,6 +3,7 @@ import { call, on, send, setErrorHandler } from "./api";
 import type { ActivityEntry, AppEntry, AppStatus, Job, Settings, Status } from "./types";
 import { driveOf } from "./format";
 import { currentBatch } from "./batch";
+import { tryLoad } from "./load";
 
 const defaultSettings: Settings = {
   checkInterval: 4,
@@ -91,6 +92,8 @@ export function isRunningState(s: Job["state"]) {
 
 class Store {
   ready = $state(false);
+  /** the first snapshot could not be read; the page shows this with a Retry button */
+  loadError = $state<string | null>(null);
   apps = $state<AppEntry[]>([]);
   jobs = $state<Job[]>([]);
   settings = $state<Settings>(defaultSettings);
@@ -181,7 +184,22 @@ class Store {
       on("toast", (t) => this.toast(t.kind, t.text, t.appId)),
       on("navigate", (r) => onNavigate?.(r)),
     ]).then((u) => unsub.push(...u));
-    const snap = await call("get_snapshot", {});
+    await this.loadSnapshot();
+    await subs;
+    const t = setInterval(() => (this.now = Date.now()), 20000);
+    unsub.push(() => clearInterval(t));
+    return () => unsub.forEach((u) => u());
+  }
+
+  /** First read of the backend state. On failure `loadError` is set instead of staying on the skeleton forever. */
+  async loadSnapshot() {
+    this.loadError = null;
+    const r = await tryLoad(() => call("get_snapshot", {}));
+    if (!r.ok) {
+      this.loadError = r.error;
+      return;
+    }
+    const snap = r.value;
     this.apps = snap.apps;
     this.jobs = snap.jobs;
     this.settings = snap.settings;
@@ -189,10 +207,6 @@ class Store {
     this.ready = true;
     // the activity log is only needed on one screen, so it must not delay the first paint
     call("get_activity", {}).then((a) => (this.activity = [...this.activity.filter((x) => !a.some((y) => y.id === x.id)), ...a]));
-    await subs;
-    const t = setInterval(() => (this.now = Date.now()), 20000);
-    unsub.push(() => clearInterval(t));
-    return () => unsub.forEach((u) => u());
   }
 
   patchSettings(patch: Partial<Settings>) {

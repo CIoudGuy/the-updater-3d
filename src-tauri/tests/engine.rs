@@ -224,3 +224,133 @@ async fn downloader_is_not_the_bottleneck() {
     println!("downloader: {mbps:.0} MB/s");
     assert!(mbps > 250.0, "only {mbps:.0} MB/s");
 }
+
+/// A helper that gets a step kind it does not know (an older copy started by the scheduled
+/// task) answers with a failure instead of leaving the app waiting forever.
+#[tokio::test]
+async fn helper_answers_a_step_it_does_not_know() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let exe = env!("CARGO_BIN_EXE_the-updater-3d");
+    let pipe = format!(r"{}{}", updater_lib::elevate::PIPE_PREFIX, uuid_like());
+    let server = tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&pipe).unwrap();
+    let mut child = std::process::Command::new(exe).args(["--worker", &pipe, "tok"]).spawn().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server.connect()).await.unwrap().unwrap();
+    let (r, mut w) = tokio::io::split(server);
+    let mut r = BufReader::new(r);
+    let mut line = String::new();
+    r.read_line(&mut line).await.unwrap();
+    assert_eq!(line.trim(), "tok");
+    w.write_all(b"{\"id\":9,\"step\":{\"t\":\"SomeFutureStep\",\"path\":\"x\"}}\n").await.unwrap();
+    let mut reply = String::new();
+    tokio::time::timeout(Duration::from_secs(10), r.read_line(&mut reply)).await.expect("the helper must answer").unwrap();
+    let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(v["id"], 9);
+    assert_eq!(v["result"]["ok"], false);
+    drop(w);
+    drop(r);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn uuid_like() -> String {
+    format!("{:x}{:x}", std::process::id(), Instant::now().elapsed().as_nanos() ^ 0x5eed_1234_abcd)
+}
+
+/// The scheduled-task helper (admin rights, no prompt) only trusts a pipe served by its own
+/// exe: another program that writes worker.json gets nothing (not even the token).
+#[tokio::test]
+async fn task_helper_refuses_a_pipe_served_by_another_program() {
+    use tokio::io::AsyncReadExt;
+    let exe = env!("CARGO_BIN_EXE_the-updater-3d");
+    let root = tmp("task-helper");
+    let data = root.join("app.theupdater3d").join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let pipe = format!(r"{}{}", updater_lib::elevate::PIPE_PREFIX, uuid_like());
+    let mut server = tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&pipe).unwrap();
+    let wf = serde_json::json!({ "pipe": pipe, "token": "secret-token", "created": chrono::Utc::now().timestamp() });
+    std::fs::write(data.join("worker.json"), wf.to_string()).unwrap();
+    // This test process (not the app) serves the pipe, like a program trying to get admin rights.
+    let mut child = std::process::Command::new(exe).arg("--worker-task").env("LOCALAPPDATA", &root).spawn().unwrap();
+    let mut got = Vec::new();
+    if let Ok(Ok(())) = tokio::time::timeout(Duration::from_secs(10), server.connect()).await {
+        let _ = tokio::time::timeout(Duration::from_secs(5), server.read_to_end(&mut got)).await;
+    }
+    let code = child.wait().unwrap().code();
+    assert!(!String::from_utf8_lossy(&got).contains("secret-token"), "the helper must not answer another program");
+    assert_ne!(code, Some(0));
+    assert!(!data.join("worker.json").exists(), "worker.json is used once");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A step that never ends (a hung installer) fails after its time limit, so the queue moves on.
+#[tokio::test]
+async fn a_hung_step_fails_after_its_time_limit() {
+    let exe = env!("CARGO_BIN_EXE_the-updater-3d");
+    std::env::set_var("UPDATER3D_TEST_NO_UAC", "1");
+    std::env::set_var("UPDATER3D_TEST_EXE", exe);
+    std::env::set_var("UPDATER3D_TEST_STEP_TIMEOUT_MS", "3000");
+    let el = Elevator::new();
+    let t0 = Instant::now();
+    let r = el.run(Step::Run { exe: "cmd.exe".into(), args: vec!["/c".into(), "ping -n 12 127.0.0.1 >nul".into()], cwd: None, ok_codes: vec![0], elevated: true, label: "Installing Test".into(), log: None }, false).await;
+    std::env::remove_var("UPDATER3D_TEST_STEP_TIMEOUT_MS");
+    let e = r.expect_err("the step must be given up").to_string();
+    assert!(e.contains("did not finish"), "{e}");
+    assert!(t0.elapsed() < Duration::from_secs(9), "took {:?}", t0.elapsed());
+    el.disconnect().await;
+}
+
+async fn serve_once(listener: tokio::net::TcpListener, body: Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut s, _) = listener.accept().await.unwrap();
+    let mut req = [0u8; 4096];
+    let _ = s.read(&mut req).await;
+    s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+    s.write_all(&body).await.unwrap();
+    let _ = s.shutdown().await;
+}
+
+/// No network for longer than the old 20 s of retries (sleep, Wi-Fi switch): the download waits
+/// and then finishes instead of failing.
+#[tokio::test]
+async fn download_waits_for_the_network_to_come_back() {
+    let port = { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() };
+    let dir = tmp("netwait");
+    let body = vec![5u8; 200_000];
+    let d = Download { url: format!("http://127.0.0.1:{port}/f.bin"), dest: dir.join("f.bin"), size: Some(body.len() as u64), sha256: None, md5: None, signer: None, sha512: None, headers: vec![] };
+    let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
+    let p = Arc::new(Progress::new());
+    let h = tokio::spawn({
+        let (d, p) = (d.clone(), p.clone());
+        async move { download::fetch(&d, p, Arc::new(Throttle::new()), rx).await }
+    });
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let note = p.note.lock().clone().unwrap_or_default();
+    assert!(note.contains("Waiting for the network"), "{note}");
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert!(!h.is_finished(), "still waiting after 25 s");
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    tokio::spawn(serve_once(listener, body.clone()));
+    let out = tokio::time::timeout(Duration::from_secs(60), h).await.unwrap().unwrap().unwrap();
+    assert!(matches!(out, Outcome::Done));
+    assert_eq!(std::fs::read(&d.dest).unwrap(), body);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Pause still works while a download waits for the network.
+#[tokio::test]
+async fn pause_works_while_waiting_for_the_network() {
+    let port = { std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port() };
+    let dir = tmp("netpause");
+    let d = Download { url: format!("http://127.0.0.1:{port}/f.bin"), dest: dir.join("f.bin"), size: Some(10), sha256: None, md5: None, signer: None, sha512: None, headers: vec![] };
+    let (tx, rx) = tokio::sync::watch::channel(Control::Run);
+    let h = tokio::spawn({
+        let d = d.clone();
+        async move { download::fetch(&d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await }
+    });
+    tokio::time::sleep(Duration::from_secs(25)).await;
+    assert!(!h.is_finished(), "still waiting after 25 s");
+    tx.send(Control::Pause).unwrap();
+    let out = tokio::time::timeout(Duration::from_secs(5), h).await.expect("pause ends the wait at once").unwrap().unwrap();
+    assert!(matches!(out, Outcome::Paused));
+    let _ = std::fs::remove_dir_all(dir);
+}

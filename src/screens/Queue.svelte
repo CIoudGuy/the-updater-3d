@@ -13,8 +13,9 @@
   import { send } from "../lib/api";
   import { store } from "../lib/store.svelte";
   import { isPaused, togglePauseAll } from "../lib/actions";
-  import { approx, bytes, clock, countOf, inUnit, unitFor } from "../lib/format";
-  import { NO_STOP_TIP, canCancel, canPause, cancelTip, jobStatus, jobWhat, pauseTip, pct } from "../lib/jobs";
+  import { approx, bytes, clock, countOf, inUnit, speed, speedParts, unitFor } from "../lib/format";
+  import { NO_STOP_TIP, canCancel, canPause, cancelTip, failedLine, jobDetail, jobStatus, jobWhat, pauseTip, pct } from "../lib/jobs";
+  import { timeLeft } from "../lib/view";
   import { enter, reduced } from "../lib/motion";
   import type { Job } from "../lib/types";
   import { jobHref } from "../lib/links";
@@ -112,7 +113,7 @@
     </div>
     <div class="ctl">
       <label for="bw" class="lbl">Bandwidth limit</label>
-      <Select id="bw" options={bwOpts} value={String(limitMb)} onchange={setLimit} width={130} label="Bandwidth limit" title="Bandwidth limit  Ctrl Shift L" />
+      <Select id="bw" options={bwOpts} value={String(limitMb)} onchange={setLimit} width={130} label="Bandwidth limit" title="Bandwidth limit" />
       <Btn variant="secondary" size="md" hint="Ctrl P" title={!store.openJobs.some(canPause) && store.openJobs.length > 0 ? NO_STOP_TIP : `${paused ? "Resume all" : "Pause all"}  Ctrl P`} onclick={togglePauseAll} disabled={!store.openJobs.some(canPause)}>{paused ? "Resume all" : "Pause all"}</Btn>
     </div>
   </div>
@@ -121,7 +122,7 @@
   <div class="stats">
     <div class="stat">
       <span class="k">Speed</span>
-      <span class="v"><Num value={store.speed / 1e6} fmt={(n) => String(Math.round(n))} /> <span class="u">{limitMb ? `of ${limitMb} ` : ""}MB/s</span></span>
+      <span class="v"><Num value={store.speed} fmt={(n) => speedParts(n)[0]} /> <span class="u">{limitMb ? `of ${limitMb} MB/s` : speedParts(store.speed)[1]}</span></span>
     </div>
     <div class="stat">
       <span class="k">Downloaded</span>
@@ -129,7 +130,7 @@
     </div>
     <div class="stat">
       <span class="k">Time left</span>
-      <span class="v">{store.eta == null ? "None" : approx(store.eta)}</span>
+      <span class="v">{timeLeft(store.eta, store.openJobs.some((j) => j.state === "downloading"), approx)}</span>
     </div>
   </div>
   {/if}
@@ -148,13 +149,16 @@
             <Mark app={j} size={32} />
             <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
           </svelte:element>
-          <span class="st ellipsis" style:color={statusColor(j)}>{jobStatus(j, false)}</span>
-          <span class="sp">{j.state === "downloading" && j.speed > 0 ? `${Math.round(j.speed / 1e6)} MB/s` : ""}</span>
+          <span class="st two">
+            <span class="ellipsis" style:color={statusColor(j)}>{jobStatus(j, false)}</span>
+            {#if jobDetail(j)}<span class="dt ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
+          </span>
+          <span class="sp">{j.state === "downloading" && j.speed > 0 ? speed(j.speed) : ""}</span>
           <span class="et">{j.eta != null && j.state !== "paused" && j.state !== "blocked" ? approx(j.eta).replace("About ", "") : ""}</span>
           <span class="pc" style:color={j.state === "paused" ? "var(--text-3)" : "var(--text)"}><Num value={pct(j)} />%</span>
           <span class="bt">
-            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j, "  Space")} disabled={!canPause(j)} onclick={() => send(j.state === "paused" ? "resume_job" : "pause_job", { jobId: j.id })}><Icon d={j.state === "paused" ? I.play : I.pause} /></button>
-            <button class="ib" aria-label="Cancel {j.name}" title={cancelTip(j, "Cancel", "  Del")} disabled={!canCancel(j)} onclick={() => send("cancel_job", { jobId: j.id })}><Icon d={I.close} /></button>
+            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j)} disabled={!canPause(j)} onclick={() => send(j.state === "paused" ? "resume_job" : "pause_job", { jobId: j.id })}><Icon d={j.state === "paused" ? I.play : I.pause} /></button>
+            <button class="ib" aria-label="Cancel {j.name}" title={cancelTip(j)} disabled={!canCancel(j)} onclick={() => send("cancel_job", { jobId: j.id })}><Icon d={I.close} /></button>
           </span>
           <span class="bar"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
         </div>
@@ -197,7 +201,7 @@
               <div class="nm"><span class="n">{w.name}</span><span class="w">{jobWhat(w)}</span></div>
             </svelte:element>
             <span class="st mut ellipsis">{dragging ? `Moving to ${ord((drag?.to ?? 0) + 1)}` : `Waiting${i === 0 ? ", next" : ""}`}</span>
-            <button class="ib" aria-label="Cancel {w.name}" title="Cancel  Del" onclick={() => send("cancel_job", { jobId: w.id })}><Icon d={I.close} /></button>
+            <button class="ib" aria-label="Cancel {w.name}" title="Cancel" onclick={() => send("cancel_job", { jobId: w.id })}><Icon d={I.close} /></button>
           </div>
         {/each}
       </div>
@@ -216,13 +220,13 @@
             <Mark app={j} size={28} />
             <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
           </svelte:element>
-          <span class="st fin ellipsis" style:color={j.state === "failed" ? "var(--err)" : j.state === "done" ? "var(--ok)" : "var(--text-3)"}>
+          <span class="st fin ellipsis" title={j.error ? `${j.error.code}. ${j.error.message}` : undefined} style:color={j.state === "failed" ? "var(--err)" : j.state === "done" ? "var(--ok)" : "var(--text-3)"}>
             <Dab color={j.state === "failed" ? "#D9706A" : j.state === "done" ? "#7FB77E" : "#6E6E6E"} />
-            {j.state === "done" ? "Finished" : j.state === "failed" ? (j.error ? `Failed, ${j.error.code}` : "Failed") : "Canceled"}
+            {j.state === "done" ? "Finished" : j.state === "failed" ? failedLine(j) : "Canceled"}
           </span>
           <span class="tm">{j.finishedAt ? clock(j.finishedAt) : ""}</span>
           {#if j.state === "failed"}
-            <Btn variant="raised" size="sm" title="Retry  R" onclick={() => send("retry_job", { jobId: j.id })}>Retry</Btn>
+            <Btn variant="raised" size="sm" title="Retry" onclick={() => send("retry_job", { jobId: j.id })}>Retry</Btn>
           {/if}
         </div>
       {/each}
@@ -321,6 +325,15 @@
     font-size: 12px;
   }
   .st.mut {
+    color: var(--text-3);
+  }
+  .st.two {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .dt {
+    font-size: 11px;
     color: var(--text-3);
   }
   .st.fin {

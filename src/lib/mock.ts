@@ -178,8 +178,20 @@ function c(
   id: string, source: CatalogEntry["source"], name: string, code: string, fg: string, bg: string, version: string, size: number | null,
   tagline: string, group: string, extra: Partial<CatalogEntry> = {},
 ): CatalogEntry {
-  return { id, source, name, code, fg, bg, iconUrl: null, version, size, tagline, group, prerelease: false, installed: false, pickVersion: false, ...extra };
+  return { id, source, name, code, fg, bg, iconUrl: null, version, size, tagline, description: ABOUT[id] ?? null, blocked: null, group, prerelease: false, installed: false, pickVersion: false, ...extra };
 }
+/** The longer text an app's Get apps page shows, as the backend sends it for some entries. */
+const ABOUT: Record<string, string> = {
+  "adobe:PHSP": "Adobe's image editor for retouching photos, compositing images and digital painting, with layers and masks.",
+  "adobe:ILST": "Adobe's vector graphics editor for logos, icons, illustrations and print artwork. Vector shapes stay sharp at any size.",
+  "adobe:SBSTP": "Paints textures and materials directly onto 3D models, with smart materials and masks. Exports texture sets for game engines and renderers.",
+  "craft:photocraft": "An image editor for photos and raster images, from ArtCraft's family of Craft apps, developed in the open on GitHub.",
+  "tools:obs": "Free and open source app for recording video and streaming live to Twitch, YouTube and other services. Mixes cameras, screen and window capture, images and audio into scenes.",
+  "tools:krita": "Free and open source painting app made by the KDE community, for concept art, illustration, comics and textures. Has many brush engines, layers and frame by frame animation.",
+  "blender:5.2": "Free and open source 3D suite for modeling, sculpting, animation, simulation, rendering, compositing and video editing. Each release series installs next to the others.",
+  "other:7zip.7zip": "7-Zip is a free and open source file archiver with a high compression ratio. It packs and unpacks 7z, ZIP, RAR, TAR and many other formats.",
+  "other:VideoLAN.VLC": "VLC is a free and open source cross-platform multimedia player that plays most multimedia files, DVDs, audio CDs and streaming protocols.",
+};
 // Adobe and Blender entries offer a version picker; Craft apps only ship the newest build.
 const AD = { pickVersion: true };
 const CATALOG: CatalogEntry[] = [
@@ -222,12 +234,95 @@ const CATALOG: CatalogEntry[] = [
   c("blender:3.6", "blender", "Blender 3.6 LTS", "Bl", "#EA7600", "#2A1500", "3.6.23", 318 * MB, "Long-term support release", "Blender"),
   c("blender:older", "blender", "Older Blender versions", "Bl", "#EA7600", "#2A1500", "Choose a version", null, "Any release back to 2.93", "Blender", { pickVersion: true }),
 ];
+// A long starter list, like the real one (a real one has a few hundred apps), some with the real icon already found.
+{
+  const names = "Chrome Brave Opera Vivaldi Thunderbird Signal Telegram Zoom Steam Spotify Inkscape Darktable Audacity ShareX Obsidian Figma Bitwarden Dropbox Malwarebytes Etcher WinSCP PuTTY Docker Postman Neovim Cursor GitKraken Anki Calibre Joplin Logseq Meld Nmap Plex Kodi Jellyfin Reaper LMMS Greenshot Flameshot Tailscale WireGuard AnyDesk TeamViewer Mega Syncthing Transmission Deluge Rainmeter Everything Ditto CopyQ VeraCrypt HxD Wireshark Cyberduck DBeaver Insomnia Bruno Warp Alacritty".split(" ");
+  const tints = [["#E4E4EC", "#24242C"], ["#E38BC4", "#2A1222"], ["#6FB1E3", "#0F2131"], ["#9FD69B", "#14261A"], ["#E3C26F", "#2B2311"], ["#B49BE8", "#1E1530"]];
+  const svg = (t: string) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect width="48" height="48" rx="11" fill="${t}"/><circle cx="24" cy="24" r="9" fill="white" fill-opacity=".85"/></svg>`)}`;
+  names.forEach((n, i) => {
+    const [fg, bg] = tints[i % tints.length];
+    CATALOG.push(c(`other:Mock.${n}`, "other", n, n.slice(0, 2), fg, bg, `${1 + (i % 7)}.${i % 10}.0`, null, ["Web browser", "Messaging", "Developer tool", "Utility", "Media player"][i % 5], "Other apps", { pickVersion: true, iconUrl: i % 3 === 0 ? svg(fg) : null }));
+  });
+}
+/** What the search results' manifests say, once read. */
+const SEARCH_LINES: Record<string, string> = {
+  "other:Notepad++.Notepad++": "Free source code editor and Notepad replacement that supports several languages.",
+  "other:Mozilla.Firefox": "Mozilla Firefox is free and open source software, built by a community of thousands from all over the world.",
+  "other:7zip.7zip": "Free and open source file archiver with a high compression ratio.",
+};
 /** Winget catalog packages a Get apps search finds (Other apps). */
 const OTHER_SEARCH: CatalogEntry[] = [
   c("other:Notepad++.Notepad++", "other", "Notepad++", "No", "#9FD69B", "#14261A", "8.9.8.1", null, "Notepad++.Notepad++", "Other apps", AD),
   c("other:Mozilla.Firefox", "other", "Mozilla Firefox (en-US)", "Mf", "#E8736A", "#2C1311", "157.0.1", null, "Mozilla.Firefox", "Other apps", AD),
   c("other:7zip.7zip", "other", "7-Zip", "7z", "#E4E4EC", "#24242C", "26.05", null, "7zip.7zip", "Other apps", AD),
 ];
+/** The whole winget catalog for Browse all: a few real apps and many made up ones, by name. */
+const BROWSE_CATS = ["Browsers", "Communication", "Media", "Graphics and 3D", "Development", "Games", "Utilities", "Office", "Security", "Networking", "System", "Other"];
+type Browsed = CatalogEntry & { category: string };
+const BROWSE: Browsed[] = (() => {
+  const real: [string, string, string, string, string][] = [
+    ["Mozilla.Firefox", "Mozilla Firefox", "Browsers", "Mozilla Firefox is free and open source software, built by a community of thousands from all over the world.", ""],
+    ["Notepad++.Notepad++", "Notepad++", "Development", "Free source code editor and Notepad replacement that supports several languages.", ""],
+    ["Discord.Discord", "Discord", "Communication", "Voice, video and text chat for communities and friends.", ""],
+    ["Audacity.Audacity", "Audacity", "Media", "Free, open source, cross-platform audio software for recording and editing.", ""],
+    ["Inkscape.Inkscape", "Inkscape", "Graphics and 3D", "Free and open source vector graphics editor.", ""],
+    ["Valve.Steam", "Steam", "Games", "The ultimate destination for playing, discussing and creating games.", ""],
+    ["Bitwarden.Bitwarden", "Bitwarden", "Security", "Open source password manager for individuals and teams.", ""],
+    ["WireGuard.WireGuard", "WireGuard", "Networking", "Fast, modern and secure VPN tunnel.", ""],
+    ["Microsoft.AppInstaller", "App Installer", "System", "Installs app packages on Windows.", "only a Store or MSIX package"],
+    ["SumatraPDF.SumatraPDF", "Sumatra PDF", "Office", "Small, fast PDF, eBook and comic book reader.", ""],
+    ["voidtools.Everything", "Everything", "Utilities", "Locates files and folders by name instantly.", ""],
+    ["Rufus.Rufus", "Rufus", "Utilities", "Creates bootable USB flash drives.", "only a portable copy"],
+  ];
+  const a = "Swift Bright Open Quiet Tiny Lucid Prime Nova Echo Pixel Rapid Clear Solid Fluent Atlas Orbit Ember Polar Cedar Zen".split(" ");
+  const b = "Notes Player Browser Studio Sync Shell Vault Chat Paint Board Mail Tunnel Monitor Reader Forge Launcher Capture Writer Grid Proxy".split(" ");
+  const kinds: Record<string, string> = { Notes: "Office", Player: "Media", Browser: "Browsers", Studio: "Graphics and 3D", Sync: "Utilities", Shell: "Development", Vault: "Security", Chat: "Communication", Paint: "Graphics and 3D", Board: "Office", Mail: "Communication", Tunnel: "Networking", Monitor: "System", Reader: "Office", Forge: "Development", Launcher: "Games", Capture: "Media", Writer: "Office", Grid: "Other", Proxy: "Networking" };
+  const tints = [["#E4E4EC", "#24242C"], ["#E38BC4", "#2A1222"], ["#6FB1E3", "#0F2131"], ["#9FD69B", "#14261A"], ["#E3C26F", "#2B2311"], ["#B49BE8", "#1E1530"]];
+  const out: Browsed[] = [];
+  const add = (id: string, name: string, category: string, i: number, short: string, blocked: string) => {
+    const [fg, bg] = tints[i % tints.length];
+    const code = name.replace(/[^A-Za-z0-9]/g, "").slice(0, 2) || "Ap";
+    out.push({ ...c(`other:${id}`, "other", name, code, fg, bg, `${1 + (i % 9)}.${i % 13}.${i % 4}`, null, short, "Other apps", { pickVersion: true }), category, blocked: blocked || null });
+  };
+  real.forEach(([id, name, cat, short, blocked], i) => add(id, name, cat, i, short, blocked));
+  for (let i = 0; out.length < 15724; i++) {
+    const kind = b[Math.floor(i / a.length) % b.length];
+    const n = `${a[i % a.length]} ${kind}${i >= 400 ? ` ${Math.floor(i / 400) + 1}` : ""}`;
+    add(`Mock.${n.replace(/ /g, "")}`, n, i % 7 === 0 ? "Other" : kinds[kind], i, `${kind === "Grid" ? "Spreadsheet" : kind} app made up for the preview`, i % 11 === 0 ? "its installer has no silent mode" : "");
+  }
+  out.sort((x, y) => x.name.toLowerCase().localeCompare(y.name.toLowerCase()));
+  return out;
+})();
+const BROWSE_KNOWN = new Set<string>();
+function browseLetter(name: string): string {
+  const ch = [...name].find((x) => /[\p{L}\p{N}]/u.test(x)) ?? "";
+  return /[A-Za-z]/.test(ch) ? ch.toUpperCase() : "#";
+}
+const longer = (short: string | null) => (short ? `${short.replace(/\.$/, "")}. Longer text from the package's manifest, shown on its page.` : null);
+/** Descriptions arrive a moment after a page, as the backend reads the manifests. */
+function browseDetailsLater(entries: CatalogEntry[]) {
+  const todo = entries.filter((e) => !BROWSE_KNOWN.has(e.id));
+  if (!todo.length) return;
+  setTimeout(() => {
+    for (const e of todo) BROWSE_KNOWN.add(e.id);
+    emit(
+      "other_details",
+      todo.map((e) => {
+        const full = BROWSE.find((x) => x.id === e.id);
+        const line = full?.tagline ?? SEARCH_LINES[e.id] ?? null;
+        return { id: e.id, tagline: line, description: full?.description ?? longer(line), blocked: full?.blocked ?? null };
+      }),
+    );
+  }, 700);
+}
+/** A browsed entry as the backend sends it: the package id as its line until the manifest is read. */
+function browseShown(e: Browsed): CatalogEntry {
+  const { category: _, ...x } = e;
+  const installed = apps.some((a) => a.id === e.id);
+  if (BROWSE_KNOWN.has(e.id)) return { ...x, description: x.description ?? longer(x.tagline), installed };
+  return { ...x, tagline: e.id.slice(6), description: null, blocked: null, installed };
+}
+
 /** Releases of the "More apps" entries (newest first), as the backend lists them. */
 const TOOLS_RELEASES: Record<string, { v: string; pre?: boolean; size: number; notes: string[] }[]> = {
   obs: [
@@ -443,7 +538,7 @@ function makeJob(a: AppEntry, kind: JobKind, toVersion: string, total: number): 
     id, appId: a.id, name: a.name, code: a.code, fg: a.fg, bg: a.bg, iconUrl: a.iconUrl, kind,
     fromVersion: kind === "install" ? null : a.version, toVersion, state: "waiting",
     downloaded: 0, total, speed: 0, eta: null, progress: 0,
-    step: "Waiting", blockedBy: [], error: null, startedAt: null, finishedAt: null,
+    step: "Waiting", detail: "", blockedBy: [], error: null, startedAt: null, finishedAt: null,
   };
 }
 
@@ -554,6 +649,13 @@ function fail(j: Job, err: JobError) {
   emit("toast", { kind: "err", text: `${j.name} update failed. ${err.message}`, appId: j.appId });
 }
 
+/** The detail line of a downloading mock job: resuming at first, then the connections. */
+function mockDetail(j: Job): string {
+  const host = j.appId.startsWith("adobe") ? "ccmdls.adobe.com" : j.appId.startsWith("blender") ? "download.blender.org" : "github.com";
+  if (j.downloaded < j.total * 0.08 && j.appId.endsWith("SBSTD")) return "Resuming from 120 MB";
+  return j.total > 8 * MB ? `Downloading over 6 connections from ${host}` : `Downloading from ${host}`;
+}
+
 function tick(dt: number) {
   let changed = false;
   startMore();
@@ -567,11 +669,13 @@ function tick(dt: number) {
       j.eta = (j.total - j.downloaded) / (j.speed * SIM);
       j.progress = 0.8 * (j.downloaded / j.total);
       j.step = "Downloading";
+      j.detail = mockDetail(j);
       if (j.downloaded >= j.total) {
         j.state = "installing";
         j.speed = 0;
         j.eta = 8;
         j.step = "Installing, step 1 of 4";
+        j.detail = "Checking the SHA-256 checksum";
       }
       changed = true;
     } else if (j.state === "installing" || j.state === "verifying") {
@@ -584,6 +688,7 @@ function tick(dt: number) {
         j.state = "blocked";
         j.blockedBy = [a.id === "adobe:SBSTD" ? "Substance3DDesigner.exe" : "app.exe"];
         j.step = `Waiting for ${j.name} to close`;
+        j.detail = "Downloaded and checked. It installs once that is closed";
         j.eta = null;
       } else if (failOnce && j.appId === "adobe:SBSTP" && j.progress >= 0.9) {
         failOnce = false;
@@ -592,6 +697,7 @@ function tick(dt: number) {
         j.progress = Math.min(1, j.progress + rate * dt);
         const step = Math.min(4, 1 + Math.floor(((j.progress - 0.8) / 0.2) * 4));
         j.step = j.total > 0 ? `Installing, step ${Math.max(1, step)} of 4` : "Removing";
+        j.detail = j.total > 0 ? ["Checking the SHA-256 checksum", "Running the installer silently", "Unpacking 1,234 files", "Removing the old version"][Math.max(1, step) - 1] : "Running the uninstaller silently";
         j.eta = Math.max(1, (1 - j.progress) / rate);
         if (j.progress >= 1) finish(j);
       }
@@ -885,6 +991,8 @@ const handlers: H = {
   },
   get_catalog: () => clone(catalogNow().filter((e) => settings.showInstalledInGetApps || !e.installed)),
   window_ready: () => {},
+  take_route: () => null,
+  open_logs_folder: () => {},
   prefs_preview: ({ appId }) =>
     appId.startsWith("blender")
       ? [{ path: String.raw`AppData\Roaming\Blender Foundation\Blender\4.5`, size: 184 * MB, registry: false }]
@@ -892,10 +1000,31 @@ const handlers: H = {
           { path: String.raw`AppData\Roaming\obs-studio`, size: 42 * MB, registry: false },
           { path: String.raw`C:\ProgramData\obs-studio`, size: 12 * MB, registry: false },
         ],
-  get_catalog_entry: ({ id }) => clone(catalogNow().find((e) => e.id === id) ?? null),
+  get_catalog_entry: ({ id }) => {
+    const hit = catalogNow().find((e) => e.id === id);
+    if (hit) return clone(hit);
+    const b = BROWSE.find((e) => e.id === id);
+    if (!b) return null;
+    const e = browseShown(b);
+    browseDetailsLater([e]);
+    return e;
+  },
+  async browse_other_apps({ category, letter, offset, limit }) {
+    await new Promise((r) => setTimeout(r, 260)); // the first page reads the index
+    const keep = (e: CatalogEntry) => settings.showInstalledInGetApps || !apps.some((a) => a.id === e.id);
+    const all = BROWSE.filter((e) => keep(e) && (!category || e.category === category) && (!letter || browseLetter(e.name) === letter));
+    const entries = all.slice(offset, offset + limit).map(browseShown);
+    browseDetailsLater(entries);
+    const categories = BROWSE_CATS.map((name) => ({ name, count: BROWSE.filter((e) => keep(e) && e.category === name).length }));
+    return { total: all.length, entries, packages: 15724, categories };
+  },
   search_other_apps: ({ query }) =>
     OTHER_SEARCH.filter((e) => e.name.toLowerCase().includes(query.toLowerCase()) || e.id.toLowerCase().includes(query.toLowerCase())).map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id) }))
-      .filter((e) => settings.showInstalledInGetApps || !e.installed),
+      .filter((e) => settings.showInstalledInGetApps || !e.installed)
+      .map((e) => {
+        browseDetailsLater([e]);
+        return BROWSE_KNOWN.has(e.id) ? { ...e, tagline: SEARCH_LINES[e.id] ?? e.tagline } : e;
+      }),
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
     refreshedLater(id);

@@ -9,7 +9,7 @@
   import { I } from "./lib/icons";
   import { send } from "./lib/api";
   import { store } from "./lib/store.svelte";
-  import { updateAll } from "./lib/actions";
+  import { updateAllFromTray } from "./lib/actions";
   import { bytes, clock, countOf } from "./lib/format";
   import { jobStatus, pct } from "./lib/jobs";
   import { reduced } from "./lib/motion";
@@ -20,6 +20,8 @@
     return () => off();
   });
 
+  /** this popup has no toast stack: the newest message (for example a failed command) shows under the buttons */
+  const notice = $derived(store.toasts.at(-1));
   const n = $derived(store.updates.length);
   const jobs = $derived(store.openJobs);
   const mood = $derived(!store.status.online ? "#A0A0A0" : n > 0 ? "#D9B26A" : jobs.length ? "#7C93D6" : "#7FB77E");
@@ -36,7 +38,7 @@
 
   <div class="top">
     <span class="grow"></span>
-    <button class="ib" aria-label="Settings" title="Settings  Ctrl ," onclick={() => send("show_main", { route: "settings" })}><Icon d={I.settings} /></button>
+    <button class="ib" aria-label="Settings" title="Settings" onclick={() => send("show_main", { route: "settings" })}><Icon d={I.settings} /></button>
   </div>
 
   <h1>
@@ -48,7 +50,11 @@
   <span class="sub">{sub}</span>
 
   {#if n > 0 && store.status.online}
-    <div class="act"><Btn variant="primary" hint="Ctrl U" title="Update all  Ctrl U" onclick={updateAll}>Update all</Btn></div>
+    <div class="act"><Btn variant="primary" title="Update all" onclick={updateAllFromTray}>Update all</Btn></div>
+  {/if}
+
+  {#if notice}
+    <div class="notice" class:err={notice.kind === "err"} role="alert">{notice.text}</div>
   {/if}
 
   {#if jobs.length}
@@ -70,11 +76,11 @@
 
   <div class="grow"></div>
   <div class="foot">
-    <Btn variant="ghost" size="md" title="Check now  F5" disabled={store.status.checking} onclick={() => send("check_now", {})}>
+    <Btn variant="ghost" size="md" title="Check now" disabled={store.status.checking} onclick={() => send("check_now", {})}>
       <Icon d={I.refresh} class={store.status.checking ? "spin" : ""} />{store.status.checking ? "Checking" : "Check now"}
     </Btn>
     <span class="grow"></span>
-    <Btn variant="raised" size="md" title="Open app  Enter" onclick={() => send("show_main", { route: null })}>Open app <Icon d={I.external} size={14} width={2.5} /></Btn>
+    <Btn variant="raised" size="md" title="Open app" onclick={() => send("show_main", { route: null })}>Open app <Icon d={I.external} size={14} width={2.5} /></Btn>
     <button class="ib" aria-label="Quit" title="Quit" onclick={() => send("quit_app", {})}><Icon d={I.close} /></button>
   </div>
 </div>
@@ -163,6 +169,16 @@
   }
   .act :global(.btn) {
     flex: 1;
+  }
+  .notice {
+    position: relative;
+    margin-top: 12px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-2);
+  }
+  .notice.err {
+    color: var(--err);
   }
   .lbl {
     position: relative;
