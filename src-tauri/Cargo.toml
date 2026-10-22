@@ -1,6 +1,6 @@
 [package]
 name = "the-updater-3d"
-version = "1.0.9"
+version = "1.0.10"
 description = "Updates Adobe apps, Blender and the Craft apps"
 edition = "2021"
 rust-version = "1.90"

@@ -167,8 +167,11 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
         println!("{:<28} {} versions, installed marked: {}, latest marked: {}", i.id, v.len(), v.iter().any(|x| x.installed), v.iter().any(|x| x.latest));
     }
     // Plans are built, never run.
-    let plan = tools::plan_install("tools:unity", None, updater_lib::model::JobKind::Install, None, &inst, &feed, tools::Ctx { godot_root: &godot_root }).await.expect("unity plan");
-    println!("unity plan: {} {:?} download size {:?} md5 {:?}", plan.app_id, plan.steps.iter().map(|s| s.label().to_string()).collect::<Vec<_>>(), plan.downloads[0].size, plan.downloads[0].md5);
+    match tools::plan_install("tools:unity", None, updater_lib::model::JobKind::Install, None, &inst, &feed, tools::Ctx { godot_root: &godot_root }).await {
+        Ok(plan) => println!("unity plan: {} {:?} download size {:?} md5 {:?}", plan.app_id, plan.steps.iter().map(|s| s.label().to_string()).collect::<Vec<_>>(), plan.downloads.last().and_then(|d| d.size), plan.downloads.last().and_then(|d| d.md5.clone())),
+        // The newest LTS editor is installed on this PC already.
+        Err(e) => assert!(e.to_string().contains("already installed"), "unity plan: {e}"),
+    }
     let plan = tools::plan_install("tools:krita", None, updater_lib::model::JobKind::Install, None, &inst, &feed, tools::Ctx { godot_root: &godot_root }).await.expect("krita plan");
     println!("krita plan: size {:?} sha256 {:?}", plan.downloads[0].size, plan.downloads[0].sha256);
     assert!(plan.downloads[0].size.is_some() && plan.downloads[0].sha256.is_some());
@@ -213,4 +216,74 @@ async fn creative_cloud_updates_with_adobes_offline_installer() {
     assert!(d.size.unwrap_or(0) > 100_000_000 && d.md5.as_deref().is_some_and(|m| m.len() == 32));
     assert!(matches!(&plan.steps[0], Step::ExtractZip { .. }));
     assert!(matches!(&plan.steps[1], Step::Run { exe, args, elevated: true, .. } if exe.ends_with("Set-up.exe") && args == &vec!["--silent".to_string()]));
+    // Get apps lists Creative Cloud, marked installed, newest build only.
+    let entry = adobe::catalog_entries(&cat, &all).into_iter().find(|e| e.id.starts_with("adobe:KCCC")).expect("Creative Cloud in Get apps");
+    assert!(entry.installed && !entry.pick_version && entry.version == latest.version);
+}
+
+/// Shared components (Camera Raw and the rest): found, compared with the catalog, updated through
+/// Remote Update Manager while waiting for the apps Adobe lists as conflicting. Nothing runs.
+#[tokio::test]
+#[ignore]
+async fn adobe_components_are_detected_and_update_with_their_blockers() {
+    use updater_lib::sources::Step;
+    let un = winutil::uninstall_entries();
+    let cat = adobe::fetch_catalog().await.unwrap();
+    let all = adobe::scan(Some(&cat), &un);
+    let comps: Vec<_> = all.iter().filter(|i| adobe::is_component(i.id.split(':').nth(1).unwrap_or(""))).collect();
+    for c in &comps {
+        let l = adobe::latest(c, &all, &cat);
+        println!("{} {} -> {:?} uninstall={}", c.name, c.version, l.as_ref().map(|l| &l.version), c.uninstall.is_some());
+        assert!(c.uninstall.is_none() && !c.missing);
+    }
+    let acr = comps.iter().find(|i| i.id.starts_with("adobe:ACR")).expect("Camera Raw found");
+    let latest = adobe::latest(acr, &all, &cat).expect("catalog has Camera Raw");
+    let plan = adobe::plan_install(
+        adobe::InstallRequest {
+            sap: "ACR",
+            version: &latest.version,
+            platform: "win32",
+            kind: updater_lib::model::JobKind::Update,
+            app_id: acr.id.clone(),
+            name: acr.name.clone(),
+            current: Some(acr),
+            remove_after: None,
+            lang: "en_US",
+            install_root: std::path::PathBuf::new(),
+        },
+        &cat,
+    )
+    .await
+    .unwrap();
+    println!("Camera Raw waits for {:?}", plan.block_names);
+    assert!(plan.block_names.iter().any(|n| n == "photoshop.exe"));
+    assert!(plan.block_dirs.is_empty());
+    assert!(plan.steps.iter().any(|s| matches!(s, Step::Run { args, .. } if args.iter().any(|a| a == "--productVersions=ACR"))));
+}
+
+/// Unity Hub: newest version with its SHA-512, every version's notes from Unity's page, and a
+/// Unity editor install that brings Hub along when Hub is missing. Nothing is downloaded.
+#[tokio::test]
+#[ignore]
+async fn unity_hub_comes_with_unity_and_has_full_notes() {
+    use updater_lib::sources::Step;
+    let un = winutil::uninstall_entries();
+    let godot_root = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Programs").join("Godot");
+    let installed = tools::scan(&un, &godot_root);
+    let feed = tools::fetch(&installed).await.unwrap();
+    let hub = feed.list("unityhub");
+    println!("Unity Hub {} ({} versions, newest has {} notes)", hub[0].version, hub.len(), hub[0].notes.len());
+    assert!(hub[0].sha512.as_deref().is_some_and(|s| s.len() == 128) && hub[0].size.unwrap_or(0) > 50_000_000);
+    assert!(hub.len() > 10 && hub.iter().filter(|r| !r.notes.is_empty()).count() > 10);
+    let has_hub = installed.iter().any(|i| i.id == "tools:unityhub");
+    let plan = tools::plan_install("tools:unity", None, updater_lib::model::JobKind::Install, None, &installed, &feed, tools::Ctx { godot_root: &godot_root }).await;
+    match plan {
+        Ok(p) => {
+            let hub_steps = p.steps.iter().filter(|s| matches!(s, Step::Run { exe, .. } if exe.to_string_lossy().contains("UnityHubSetup"))).count();
+            println!("Unity {} plan: {} downloads, Hub installed here: {has_hub}", p.to_version, p.downloads.len());
+            assert_eq!(hub_steps, if has_hub { 0 } else { 1 });
+        }
+        // The newest LTS editor is installed already on this PC.
+        Err(e) => println!("Unity plan: {e}"),
+    }
 }

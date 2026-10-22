@@ -103,6 +103,9 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
                     dirs.push(r.local.join("Godot"));
                 }
             }
+            "unityhub" => {
+                dirs.push(r.roaming.join("UnityHub"));
+            }
             "unity" => {
                 // Editor preferences and the Asset Store download cache are shared by all editors.
                 if !same_tool("unity") {

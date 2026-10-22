@@ -63,6 +63,17 @@ export function metaLine(app: AppEntry): string {
   const parts = [app.sizeOnDisk ? bytes(app.sizeOnDisk) : "", app.updatedAt ? dateShort(app.updatedAt) : ""].filter(Boolean);
   return parts.join(", ");
 }
+/**
+ * The installed app behind a Get apps entry: the entry's own id, or a side-by-side install such as
+ * "tools:godot:4.7.2" for the entry "tools:godot". Prefers an exact match, then one with an update waiting.
+ */
+export function installedFor(entry: { id: string }): AppEntry | undefined {
+  const exact = store.app(entry.id);
+  if (exact) return exact;
+  const prefix = entry.id + ":";
+  const hits = store.apps.filter((a) => a.id.startsWith(prefix));
+  return hits.find((a) => a.status === "update") ?? hits[0];
+}
 export function go(app: AppEntry) {
   router.go(appHref(app.id));
 }

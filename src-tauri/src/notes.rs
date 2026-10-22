@@ -6,7 +6,8 @@ use crate::{http, version};
 use std::collections::HashMap;
 use std::time::Duration;
 
-const MAX_LINES: usize = 12;
+/// The whole published list; only a runaway page is cut.
+const MAX_LINES: usize = 400;
 
 pub struct Notes {
     pub date: Option<String>,
@@ -38,8 +39,9 @@ fn items(fragment: &str) -> Vec<String> {
     for c in li.captures_iter(fragment) {
         let mut t = strip_tags(&c[1]);
         // Nested lists repeat their children; skip very long merged items.
-        if t.len() > 300 {
-            t.truncate(297);
+        if t.len() > 2000 {
+            let cut = t.char_indices().nth(1997).map(|(i, _)| i).unwrap_or(t.len());
+            t.truncate(cut);
             t.push_str("...");
         }
         let t = refs.replace(&t, "").trim().trim_end_matches('.').to_string();
@@ -144,18 +146,6 @@ fn is_version(text: &str) -> bool {
     !t.is_empty() && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.contains('.')
 }
 
-/// Shorten a long list item to its first sentence so the version list stays readable.
-fn first_sentence(s: &str) -> String {
-    let cut = s.char_indices().find(|(i, c)| *c == '.' && *i > 15 && s[i + 1..].starts_with(' ')).map(|(i, _)| i);
-    let mut t = match cut {
-        Some(i) => s[..i].to_string(),
-        None => s.to_string(),
-    };
-    if t.chars().count() > 160 {
-        t = t.chars().take(157).collect::<String>() + "...";
-    }
-    t
-}
 
 /// Notes for one version from an Adobe version page: the list under the heading for that exact
 /// version ("12.2.0" in the Release Notes section); for a first release (x.y.0) without one, the
@@ -176,7 +166,7 @@ fn adobe_from_version_page(html: &str, ver: &str) -> (Vec<String>, Option<String
             .map(|h| h.2)
             .unwrap_or(body.len());
         let block = &body[heads[k].3..stop];
-        let lines: Vec<String> = items(block).into_iter().map(|l| first_sentence(&l)).collect();
+        let lines: Vec<String> = items(block);
         // "Release date: 2026/09/15"
         let date = regex::Regex::new(r"Release date:\s*(\d{4})/(\d{1,2})/(\d{1,2})")
             .unwrap()
@@ -235,7 +225,7 @@ pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
         let words: Vec<&str> = h.1.split(|c: char| !(c.is_ascii_digit() || c == '.')).collect();
         if words.iter().any(|w| *w == ver || *w == short) {
             let stop = heads.get(k + 1).map(|n| n.2).unwrap_or(html.len());
-            let lines: Vec<String> = items(&html[h.3..stop]).into_iter().map(|l| first_sentence(&l)).collect();
+            let lines: Vec<String> = items(&html[h.3..stop]);
             if !lines.is_empty() {
                 return Some(Notes { date: None, lines });
             }
@@ -246,6 +236,32 @@ pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
 
 /// The change list of a Krita release post: the list items under its "Changelog" heading.
 /// Krita answers unknown posts with a normal page titled "404 Page not found", so that gives none.
+/// Unity Hub's release notes page: every version with its date and full change list.
+/// The page is a list of `<h2>3.22.3</h2>` headings, each followed by "October 13, 2026" and lists.
+pub fn unity_hub(html: &str) -> Vec<(String, Option<String>, Vec<String>)> {
+    static H2: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"<h2[^>]*>\s*(\d+\.\d+\.\d+)\s*</h2>").unwrap());
+    static DATE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"<p>\s*([A-Z][a-z]+ \d{1,2}, \d{4})\s*</p>").unwrap());
+    let heads: Vec<(usize, usize, String)> = H2.captures_iter(html).map(|c| {
+        let m = c.get(0).unwrap();
+        (m.start(), m.end(), c[1].to_string())
+    }).collect();
+    let mut out: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
+    for (i, (_, end, ver)) in heads.iter().enumerate() {
+        if out.iter().any(|(v, _, _)| v == ver) {
+            continue;
+        }
+        let stop = heads.get(i + 1).map(|h| h.0).unwrap_or(html.len());
+        // Section headings ("<li><strong>Projects</strong><ul>...") only hold a nested list: drop
+        // the heading so each nested item is read on its own.
+        static SECTION: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| regex::Regex::new(r"<li[^>]*>\s*<strong>[^<]*</strong>\s*<ul[^>]*>").unwrap());
+        let block = SECTION.replace_all(&html[*end..stop], "<ul>");
+        let date = DATE.captures(&block).and_then(|c| chrono::NaiveDate::parse_from_str(&c[1], "%B %d, %Y").ok()).map(|d| format!("{d}T00:00:00Z"));
+        let lines: Vec<String> = items(&block);
+        out.push((ver.clone(), date, lines));
+    }
+    out
+}
+
 pub fn krita_changelog(html: &str) -> Vec<String> {
     if html.contains("<title>404") {
         return vec![];
@@ -299,7 +315,8 @@ mod tests {
         let html = r#"<main><h1>Version 12.2</h1><h2>Major features</h2><h3>Improved Polygon Fill</h3><p>x</p>
 <h3>New cage painting in Baking mode</h3><h2>Release Notes</h2><h3>12.2.0</h3><ul><li>Fixed a crash when baking. More words here.</li><li>Faster export</li></ul>
 <h3>12.2.1</h3><ul><li>Fixed the viewport</li></ul><h3>Known issues</h3><ul><li>Not a note</li></ul></main>"#;
-        assert_eq!(adobe_from_version_page(html, "12.2.0").0, vec!["Fixed a crash when baking", "Faster export"]);
+        // Whole items, as the page lists them.
+        assert_eq!(adobe_from_version_page(html, "12.2.0").0, vec!["Fixed a crash when baking. More words here", "Faster export"]);
         assert_eq!(adobe_from_version_page(html, "12.2.1").0, vec!["Fixed the viewport"]);
         let dated = r#"<main><h2>Release Notes</h2><h3>12.1.5</h3><p>Release date: 2026/09/15</p><ul><li>Fixed a crash</li></ul></main>"#;
         assert_eq!(adobe_from_version_page(dated, "12.1.5").1.as_deref(), Some("2026-09-15T00:00:00Z"));

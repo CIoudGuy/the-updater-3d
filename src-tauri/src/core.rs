@@ -545,6 +545,7 @@ impl Core {
 
         let apps = self.apps();
         let updates: Vec<&AppEntry> = apps.iter().filter(|a| a.status == AppStatus::Update).collect();
+        self.warm_versions(updates.iter().map(|a| a.id.clone()).collect());
         let n = updates.len();
         let checked = now();
         {
@@ -848,7 +849,68 @@ impl Core {
         out
     }
 
-    pub async fn catalog_versions(&self, id: &str) -> Result<Vec<VersionInfo>> {
+    /// Get apps version list: the saved copy at once when there is one (refreshed in the
+    /// background when it is a few minutes old), else fetched now and saved.
+    pub async fn catalog_versions(self: &Arc<Self>, id: &str) -> Result<Vec<VersionInfo>> {
+        let key = format!("get-{id}");
+        if let Some((list, age)) = notes_cache::read(&key) {
+            if age > notes_cache::FRESH {
+                self.refresh_versions_later(key, id.to_string(), false);
+            }
+            return Ok(list);
+        }
+        let list = self.fetch_catalog_versions(id).await?;
+        notes_cache::write(&key, &list);
+        Ok(list)
+    }
+
+    /// Version history of an installed app, cached like `catalog_versions`.
+    pub async fn versions(self: &Arc<Self>, app_id: &str) -> Result<Vec<VersionInfo>> {
+        let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+        let key = format!("app-{app_id}");
+        // A copy saved before an update marks the old version as installed: not usable.
+        if let Some((list, age)) = notes_cache::read(&key).filter(|(l, _)| notes_cache::matches_installed(l, &inst.version)) {
+            if age > notes_cache::FRESH {
+                self.refresh_versions_later(key, app_id.to_string(), true);
+            }
+            return Ok(list);
+        }
+        let list = self.fetch_versions(app_id).await?;
+        notes_cache::write(&key, &list);
+        Ok(list)
+    }
+
+    /// Fetch a version list again in the background; tell the window when it changed.
+    fn refresh_versions_later(self: &Arc<Self>, key: String, id: String, installed: bool) {
+        if !notes_cache::start(&key) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let fresh = if installed { me.fetch_versions(&id).await } else { me.fetch_catalog_versions(&id).await };
+            if let Ok(list) = fresh {
+                let changed = notes_cache::read(&key).is_none_or(|(old, _)| old != list);
+                notes_cache::write(&key, &list);
+                if changed {
+                    me.emit("versions-changed", serde_json::json!({ "id": id }));
+                }
+            }
+            notes_cache::done(&key);
+        });
+    }
+
+    /// After a check: load the version histories of apps that have an update, so they open at once.
+    fn warm_versions(self: &Arc<Self>, app_ids: Vec<String>) {
+        for id in app_ids {
+            let key = format!("app-{id}");
+            let stale = notes_cache::read(&key).is_none_or(|(_, age)| age > notes_cache::FRESH);
+            if stale {
+                self.refresh_versions_later(key, id, true);
+            }
+        }
+    }
+
+    async fn fetch_catalog_versions(&self, id: &str) -> Result<Vec<VersionInfo>> {
         let s = self.settings.read().clone();
         let mut parts = id.splitn(3, ':');
         match parts.next().unwrap_or("") {
@@ -871,7 +933,7 @@ impl Core {
         }
     }
 
-    pub async fn versions(&self, app_id: &str) -> Result<Vec<VersionInfo>> {
+    async fn fetch_versions(&self, app_id: &str) -> Result<Vec<VersionInfo>> {
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
         let s = self.settings.read().clone();
         match &inst.data {
@@ -1808,6 +1870,62 @@ fn under_program_files(p: &std::path::Path) -> bool {
     [paths::program_files(), paths::program_files_x86()].iter().any(|r| s.starts_with(&format!("{}\\", r.to_string_lossy().to_ascii_lowercase())))
 }
 
+/// Saved version histories and release notes (data folder `notes-cache`), so they open at once.
+mod notes_cache {
+    use crate::model::VersionInfo;
+    use crate::{paths, version};
+    use once_cell::sync::Lazy;
+    use parking_lot::Mutex;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    /// Older than this, a saved list is shown and fetched again in the background.
+    pub const FRESH: Duration = Duration::from_secs(5 * 60);
+
+    static RUNNING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+    fn file(key: &str) -> std::path::PathBuf {
+        let safe: String = key.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+        paths::data_dir().join("notes-cache").join(format!("{safe}.json"))
+    }
+
+    pub fn read(key: &str) -> Option<(Vec<VersionInfo>, Duration)> {
+        let f = file(key);
+        let age = f.metadata().ok()?.modified().ok()?.elapsed().unwrap_or_default();
+        let list: Vec<VersionInfo> = serde_json::from_slice(&std::fs::read(&f).ok()?).ok()?;
+        (!list.is_empty()).then_some((list, age))
+    }
+
+    pub fn write(key: &str, list: &[VersionInfo]) {
+        if list.is_empty() {
+            return;
+        }
+        let f = file(key);
+        if let Some(d) = f.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&f, serde_json::to_vec(list).unwrap_or_default());
+    }
+
+    /// True when no refresh of `key` runs yet (and marks one as running).
+    pub fn start(key: &str) -> bool {
+        RUNNING.lock().insert(key.to_string())
+    }
+
+    pub fn done(key: &str) {
+        RUNNING.lock().remove(key);
+    }
+
+    /// A saved list still fits the installed version: the one it marks installed is that version.
+    pub fn matches_installed(list: &[VersionInfo], installed: &str) -> bool {
+        let same = |v: &str| v == installed || (!v.contains(' ') && !installed.contains(' ') && version::cmp(v, installed).is_eq());
+        match list.iter().find(|v| v.installed) {
+            Some(v) => same(&v.version),
+            None => !list.iter().any(|v| same(&v.version)),
+        }
+    }
+}
+
 /// The scheduler wakes every few seconds; most ticks do nothing.
 const TICK_SECS: u64 = 5;
 
@@ -2014,6 +2132,21 @@ mod tests {
         let parent_of_other = pf.join("Suite");
         assert_eq!(leftover_dir(&parent_of_other, &[parent_of_other.join("App")]), None);
         assert_eq!(leftover_dir(&PathBuf::from("C:\\"), &[]), None);
+    }
+
+    #[test]
+    fn saved_version_lists_are_dropped_after_an_update() {
+        use crate::model::VersionInfo;
+        let v = |ver: &str, installed: bool| VersionInfo { version: ver.into(), date: None, notes: vec![], notes_url: None, size: None, installed, latest: false, prerelease: false };
+        let saved = vec![v("4.5.14", false), v("4.5.5", true)];
+        assert!(super::notes_cache::matches_installed(&saved, "4.5.5"));
+        // Updated to 4.5.14 since: the saved list still marks 4.5.5.
+        assert!(!super::notes_cache::matches_installed(&saved, "4.5.14"));
+        // Lists that mark nothing (Get apps) fit unless they contain the installed version.
+        assert!(super::notes_cache::matches_installed(&[v("5.2.2", false)], "4.5.5"));
+        // Blender pre-release builds differ only by their hash.
+        let b = vec![v("5.4.0 Alpha fbe82a4", true)];
+        assert!(!super::notes_cache::matches_installed(&b, "5.4.0 Alpha 1234567"));
     }
 
     #[test]
