@@ -5,7 +5,7 @@ use crate::elevate::Elevator;
 use crate::model::*;
 use crate::sources::{self, adobe, blender, craft, other, tools, Installed, Latest, Plan, SourceData, Verify};
 use crate::store::{self, Persisted};
-use crate::{paths, procs, version, winutil};
+use crate::{install_detail, paths, procs, version, winutil};
 use anyhow::{anyhow, Result};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
@@ -29,10 +29,106 @@ pub enum JobRequest {
 /// An Other app without an icon is searched for again after this many days.
 const ICON_RETRY_DAYS: i64 = 7;
 
-/// The icon of a package kept in the icon cache from an earlier run.
+/// An installed app's icon: from its program file, else for an Other app the catalog's icon of
+/// its package (cached for Get apps), so an app whose program is not found still shows its icon.
+fn app_icon(i: &Installed, icons: &HashMap<String, String>, catalog: &HashMap<String, String>) -> Option<String> {
+    icons.get(&i.id).or_else(|| (i.source == Source::Other).then(|| catalog.get(&format!("other:{}", other::pkg_of(i)))).flatten()).cloned()
+}
+
+/// The icon of a package kept in the icon cache from an earlier run: a small one first, else one
+/// saved at full size by an earlier version.
 fn other_icon_on_disk(id: &str) -> Option<std::path::PathBuf> {
     let stem = crate::sources::icons::file_stem(id);
-    ["png", "svg", "webp", "jpg", "gif", "ico"].iter().map(|e| paths::icons().join(format!("{stem}.{e}"))).find(|p| p.metadata().is_ok_and(|m| m.len() > 0))
+    ["dark.png", "icon.png", "svg"]
+        .iter()
+        .chain(crate::sources::icons::OLD_EXTS)
+        .map(|e| paths::icons().join(format!("{stem}.{e}")))
+        .find(|p| p.metadata().is_ok_and(|m| m.len() > 0))
+}
+
+/// Made small already (or a vector, which needs no making small).
+fn icon_is_small(p: &std::path::Path) -> bool {
+    let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    n.ends_with(".icon.png") || n.ends_with(".dark.png") || n.ends_with(".svg")
+}
+
+/// Rules a remembered icon miss was made under. Misses saved by earlier versions, which also
+/// remembered searches that only timed out, are searched again once.
+const ICON_MISS_RULES: u32 = 2;
+
+/// The day of a remembered miss ("2026-10-22/2"), None for one made under older rules.
+fn icon_miss_day(v: &str) -> Option<chrono::NaiveDate> {
+    let (d, rules) = v.split_once('/')?;
+    if rules.parse::<u32>().ok()? < ICON_MISS_RULES {
+        return None;
+    }
+    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()
+}
+
+/// A found Other apps icon, for the window.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IconFound {
+    id: String,
+    icon_url: String,
+}
+
+/// Results of the icon search not handed on yet.
+#[derive(Default)]
+struct IconOut {
+    found: Vec<IconFound>,
+    missed: Vec<String>,
+}
+
+impl IconOut {
+    fn is_empty(&self) -> bool {
+        self.found.is_empty() && self.missed.is_empty()
+    }
+}
+
+static ICON_QUEUE: once_cell::sync::Lazy<Mutex<crate::sources::icons::Queue>> = once_cell::sync::Lazy::new(Default::default);
+static ICON_BUSY: once_cell::sync::Lazy<Mutex<HashSet<String>>> = once_cell::sync::Lazy::new(Default::default);
+static ICON_OUT: once_cell::sync::Lazy<Mutex<IconOut>> = once_cell::sync::Lazy::new(Default::default);
+static ICON_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ICON_FLUSHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An app's icon as a small file in the icon cache: an icon saved at full size by an earlier
+/// version made small, or one searched for on the web.
+async fn find_other_icon(feed: Option<Arc<other::Feed>>, id: String) -> std::result::Result<PathBuf, crate::sources::icons::Miss> {
+    use crate::sources::icons::{self, Miss};
+    if let Some(old) = other_icon_on_disk(&id).filter(|p| !icon_is_small(p)) {
+        let key = id.clone();
+        let made = tauri::async_runtime::spawn_blocking(move || -> Option<PathBuf> {
+            let bytes = std::fs::read(&old).ok()?;
+            let ext = icons::sniff(&bytes)?;
+            let got = icons::normalize(icons::Got { bytes, ext, via: "cache", dark: false });
+            if got.ext != "png" {
+                return Some(old);
+            }
+            let p = paths::icons().join(icons::saved_name(&key, &got));
+            std::fs::write(&p, &got.bytes).ok()?;
+            let _ = std::fs::remove_file(&old);
+            Some(p)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(p) = made {
+            return Ok(p);
+        }
+    }
+    let src = other::icon_source_of(feed.as_deref(), &id).await.ok_or(Miss { passing: true })?;
+    let got = icons::find(&id, src.icon.as_deref(), &src.pages).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let got = icons::normalize(got);
+        let p = paths::icons().join(icons::saved_name(&id, &got));
+        std::fs::write(&p, &got.bytes).ok()?;
+        Some(p)
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or(Miss { passing: true })
 }
 
 struct JobRec {
@@ -140,6 +236,19 @@ fn save_queue_to(file: &std::path::Path, jobs: &[SavedJob]) {
     }
 }
 
+/// Write the queue file when it would change. `saved` is what the last write held; it starts
+/// empty, before anything was written. The signature is never empty (it starts with the job
+/// count), so the first save always writes, even an empty queue: jobs restored at start that all
+/// finish (or are canceled) must leave the file, or they come back at every restart.
+fn write_queue_if_changed(file: &std::path::Path, saved: &mut String, list: &[SavedJob]) {
+    let sig: String = std::iter::once(format!("{}#", list.len())).chain(list.iter().map(|s| format!("{}:{:?}:{:?}:{}:{};", s.job.id, s.job.state, s.phase, s.dests.len(), s.job.to_version))).collect();
+    if *saved == sig {
+        return;
+    }
+    save_queue_to(file, list);
+    *saved = sig;
+}
+
 fn load_queue_from(file: &std::path::Path) -> Vec<SavedJob> {
     std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
@@ -195,6 +304,17 @@ impl TurnGate {
     fn holder(&self) -> Option<String> {
         self.st.lock().holder.as_ref().map(|h| h.1.clone())
     }
+    /// The queue was reordered: the jobs waiting take their turns in the new order.
+    fn reorder(&self, seqs: &HashMap<String, u64>) {
+        let mut st = self.st.lock();
+        for w in st.waiting.iter_mut() {
+            if let Some(s) = seqs.get(&w.1) {
+                w.0 = *s;
+            }
+        }
+        drop(st);
+        self.notify.notify_waiters();
+    }
     /// Wait for this job's turn; None when the job is canceled meanwhile.
     async fn take(&self, id: &str, name: &str, seq: u64, mut ctl: watch::Receiver<Control>) -> Option<Turn<'_>> {
         self.st.lock().waiting.push((seq, id.to_string()));
@@ -224,6 +344,19 @@ impl TurnGate {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Put the items `ids` names that pass `movable` in the order of `ids`, in the places those
+/// items have now. Every other item stays where it is.
+fn reorder_in_place<T>(items: &mut [T], ids: &[String], id_of: impl Fn(&T) -> &String, movable: impl Fn(&T) -> bool) {
+    let mut seen = HashSet::new();
+    let order: Vec<&String> = ids.iter().filter(|id| seen.insert(*id) && items.iter().any(|j| id_of(j) == *id && movable(j))).collect();
+    let slots: Vec<usize> = items.iter().enumerate().filter(|(_, j)| movable(j) && order.contains(&id_of(j))).map(|(i, _)| i).collect();
+    for (k, id) in order.iter().enumerate() {
+        if let (Some(p), Some(&to)) = (items.iter().position(|j| id_of(j) == *id), slots.get(k)) {
+            items.swap(p, to);
         }
     }
 }
@@ -264,13 +397,53 @@ impl KeyLocks {
 
 /// What an install step does, for the job's detail line. `files` is the number of files in a
 /// zip being unpacked.
+/// Where an app's own install times are kept: installs and uninstalls take different times.
+fn runs_key(plan: &Plan) -> String {
+    format!("{}:{}", plan.app_id, if plan.kind == JobKind::Uninstall { "uninstall" } else { "install" })
+}
+
+/// Does a Run step remove an app (an uninstaller, `msiexec /x`)?
+fn run_removes(step: &sources::Step) -> bool {
+    let sources::Step::Run { exe, args, label, .. } = step else { return false };
+    let file = exe.file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let low = label.to_ascii_lowercase();
+    low.contains("uninstall") || low.contains("removing") || file.contains("uninst") || args.iter().any(|a| a.eq_ignore_ascii_case("/x"))
+}
+
+/// What to watch while a step runs, for its live detail line: the installer's log, the programs
+/// it starts, and the folder it changes. `before` is the copy as it was.
+fn watch_spec(step: &sources::Step, base: String, files: Option<usize>, before: Option<&sources::Installed>, hint: Option<String>, procs: &crate::elevate::Procs) -> install_detail::WatchSpec {
+    use install_detail::{DirWatch, LogKind};
+    use sources::Step;
+    let app_dir = before.and_then(|b| b.install_dir.clone()).filter(|d| d.is_dir() && sources::other::own_dir(d));
+    let (log, prog, dir) = match step {
+        Step::Run { exe, args, log, .. } => {
+            let name = exe.file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let log = log.as_ref().and_then(|l| {
+                if name == "msiexec.exe" {
+                    Some((l.clone(), LogKind::Msi))
+                } else if args.contains(&format!("/LOG={}", l.display())) {
+                    Some((l.clone(), LogKind::Inno))
+                } else {
+                    None
+                }
+            });
+            let dir = app_dir.map(|d| if run_removes(step) { DirWatch::Remove { dir: d } } else { DirWatch::Copy { dir: d, expected: before.and_then(|b| b.size_hint).filter(|s| *s > 0) } });
+            (log, Some((procs.clone(), name)), dir)
+        }
+        Step::ExtractZip { dest, .. } => (None, None, Some(DirWatch::Unpack { dir: dest.clone(), files })),
+        Step::RemoveDir { path, .. } => (None, None, Some(DirWatch::Remove { dir: path.clone() })),
+        _ => (None, None, None),
+    };
+    install_detail::WatchSpec { base, log, procs: prog, dir, hint, since: std::time::SystemTime::now() }
+}
+
 fn step_detail(step: &sources::Step, files: Option<usize>) -> String {
     use sources::Step;
     match step {
-        Step::Run { exe, args, label, .. } => {
+        Step::Run { exe, .. } => {
             let file = exe.file_name().map(|f| f.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-            let low = label.to_ascii_lowercase();
-            let uninstall = low.contains("uninstall") || low.contains("removing") || file.contains("uninst") || args.iter().any(|a| a.eq_ignore_ascii_case("/x"));
+            let uninstall = run_removes(step);
             if file.contains("remoteupdatemanager") {
                 "Adobe Remote Update Manager is working".into()
             } else if file == "msiexec.exe" {
@@ -344,8 +517,6 @@ struct St {
     dl_sizes: HashMap<String, u64>,
     /// Catalog id -> local icon URL (Adobe CDN and getartcraft.com icons, cached on disk)
     catalog_icons: HashMap<String, String>,
-    /// Other apps ids ("other:<package>") whose icon is being searched for right now
-    icon_busy: HashSet<String>,
     status: Option<Status>,
     /// Sources whose latest-version lookup failed on the last check.
     unknown_sources: HashSet<&'static str>,
@@ -362,6 +533,8 @@ pub struct Core {
     pub other: RwLock<Option<Arc<other::Feed>>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
+    /// Bumped by "Allow admin rights": the jobs waiting for admin rights try again.
+    admin_gen: watch::Sender<u64>,
     pub throttle: Arc<Throttle>,
     wake: Notify,
     install_gate: TurnGate,
@@ -427,6 +600,7 @@ impl Core {
             other: RwLock::new(None),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
+            admin_gen: watch::channel(0).0,
             throttle,
             wake: Notify::new(),
             install_gate: TurnGate::new(),
@@ -494,6 +668,9 @@ impl Core {
             job.eta = None;
             job.blocked_by.clear();
             job.cancelable = false;
+            job.ready = false;
+            // Asked again when its turn comes; the old "needs admin rights" no longer holds.
+            job.needs_admin = false;
             let (tx, _) = watch::channel(if state == JobState::Paused { Control::Pause } else { Control::Run });
             let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
             jobs.push(JobRec { job, req: s.req, ctl: tx, active: false, block: Default::default(), seq, phase, held: true, dests: s.dests, verify: s.verify });
@@ -506,6 +683,19 @@ impl Core {
         let freed = download::sweep(&paths::downloads(), &keep);
         if freed > 0 {
             log::info!("deleted {} of unfinished downloads no job needs", fmt_bytes(freed));
+        }
+        let freed = download::trim_cache(&paths::downloads(), &keep, self.settings.read().keep_previous_versions);
+        if freed > 0 {
+            log::info!("deleted {} of old installers from the download cache", fmt_bytes(freed));
+        }
+    }
+
+    /// Keep the download cache in bounds (see `download::cache_victims`) after a job finished.
+    fn trim_download_cache(&self) {
+        let busy: HashSet<PathBuf> = self.jobs.lock().iter().filter(|j| !j.job.state.is_finished()).flat_map(|j| j.dests.iter().cloned()).collect();
+        let freed = download::trim_cache(&paths::downloads(), &busy, self.settings.read().keep_previous_versions);
+        if freed > 0 {
+            log::info!("deleted {} of old installers from the download cache", fmt_bytes(freed));
         }
     }
 
@@ -561,13 +751,7 @@ impl Core {
             .filter(|j| !j.job.state.is_finished())
             .map(|j| SavedJob { job: j.job.clone(), req: j.req.clone(), phase: j.phase, dests: j.dests.clone(), verify: j.verify.clone() })
             .collect();
-        let sig: String = list.iter().map(|s| format!("{}:{:?}:{:?}:{}:{};", s.job.id, s.job.state, s.phase, s.dests.len(), s.job.to_version)).collect();
-        let mut saved = self.queue_saved.lock();
-        if *saved == sig {
-            return;
-        }
-        save_queue_to(&queue_file(), &list);
-        *saved = sig;
+        write_queue_if_changed(&queue_file(), &mut self.queue_saved.lock(), &list);
     }
 
     /// Saved at exit with the progress of each job.
@@ -661,6 +845,7 @@ impl Core {
     pub fn apps(&self) -> Vec<AppEntry> {
         let running = procs::list();
         let sizes = self.adobe_sizes.lock().clone();
+        let recorded = self.persisted.lock().updated_at.clone();
         let st = self.st.lock();
         let jobs = self.jobs.lock();
         let mut out = Vec::new();
@@ -706,7 +891,7 @@ impl Core {
                 code: i.code.clone(),
                 fg: i.fg.clone(),
                 bg: i.bg.clone(),
-                icon_url: st.icons.get(&i.id).cloned(),
+                icon_url: app_icon(i, &st.icons, &st.catalog_icons),
                 version: i.version.clone(),
                 latest: latest.map(|l| l.version.clone()),
                 status,
@@ -720,12 +905,14 @@ impl Core {
                 },
                 size_on_disk: if i.missing { None } else { st.sizes.get(&i.id).copied().or(i.size_hint) },
                 install_dir: i.install_dir.as_ref().map(|d| d.display().to_string()),
-                updated_at: i.updated_at.clone(),
+                updated_at: newest_update(recorded.get(&i.id).map(String::as_str), i.updated_at.as_deref()),
                 tagline: i.tagline.clone(),
                 group: i.source.group().into(),
                 running: is_running,
                 can_uninstall: !i.read_only && (i.uninstall.is_some() || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
+                read_only: i.read_only,
+                store_url: i.store.as_ref().map(|s| s.page_url()),
                 channel: i.channel.clone(),
                 note,
                 job_id: job.map(|j| j.id.clone()),
@@ -830,6 +1017,22 @@ impl Core {
         st.failed.retain(|k, _| ids.contains(k.as_str()));
         st.latest = latest;
         st.installed = installed;
+    }
+
+    /// After an Other app was installed or updated: make sure the feed has its package (one
+    /// installed from a search result is not in it until the next refresh), so the app shows
+    /// its latest version at once instead of "Latest version unknown".
+    async fn add_to_other_feed(self: Arc<Self>, app_id: &str) {
+        let rest = app_id.strip_prefix("other:").unwrap_or(app_id);
+        let pkg = rest.strip_suffix(":user").unwrap_or(rest).to_string();
+        let Some(feed) = self.other.read().clone() else { return };
+        if feed.get(&pkg).is_none() {
+            let Some(pf) = other::read_package(&pkg).await else { return };
+            *self.other.write() = Some(Arc::new(feed.with_package(pf)));
+        }
+        let installed = self.st.lock().installed.clone();
+        self.recompute_latest(installed);
+        self.emit_apps();
     }
 
     async fn refresh_icons_and_sizes(self: Arc<Self>) {
@@ -1017,6 +1220,9 @@ impl Core {
             *self.adobe.write() = a;
         } else if settings.sources.adobe {
             unknown.insert("adobe");
+        } else {
+            // Adobe is off: no sizes or icons are fetched from it for an old catalog.
+            *self.adobe.write() = None;
         }
         if c.is_some() {
             *self.craft.write() = c;
@@ -1169,7 +1375,7 @@ impl Core {
             }
             // "Running" flags and disk space: every minute, and every tick while Creative Cloud
             // is down so the warning goes away as soon as it starts (whatever the check interval).
-            let cc_down = self.st.lock().status.as_ref().is_some_and(|s| s.cc_installed && !s.cc_running);
+            let cc_down = self.settings.read().sources.adobe && self.st.lock().status.as_ref().is_some_and(|s| s.cc_installed && !s.cc_running);
             if status_refresh_due(n, cc_down) {
                 let me = self.clone();
                 tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
@@ -1180,7 +1386,7 @@ impl Core {
             }
             let minute = n / (60 / TICK_SECS);
             // Pick up installs and updates made outside the app (no network needed).
-            if minute % 5 == 0 && !self.jobs.lock().iter().any(|j| j.active) {
+            if minute % 5 == 0 && !self.jobs.lock().iter().any(rescan_waits_for) {
                 self.rescan().await;
             }
             let hours = self.settings.read().check_interval;
@@ -1260,6 +1466,12 @@ impl Core {
             async { if settings.sources.other { other::fetch(&installed).await.ok() } else { None } },
         );
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
+        if settings.sources.other {
+            // The whole catalog list for Other apps, built now so the first page in Get apps is quick.
+            tauri::async_runtime::spawn_blocking(|| {
+                let _ = sources::browse::list();
+            });
+        }
         if let Some(a) = a {
             *self.adobe.write() = Some(Arc::new(a));
         }
@@ -1307,97 +1519,145 @@ impl Core {
     }
 
     /// Real icons for Other apps entries: the ones in the starter list and the installed ones the
-    /// computer has no icon for (`wanted` None), or the given package ids (search results). Found
-    /// icons are kept in the icon cache; apps without one are remembered for a week.
+    /// computer has no icon for (`wanted` None, searched after everything else), or the given
+    /// package ids (a page of Get apps that is on screen: searched first). Found icons are made
+    /// small and kept in the icon cache; apps that have none are remembered for a week, apps whose
+    /// search failed for a passing reason are searched again a few minutes later. Found icons
+    /// reach the window in `other_icons` batches.
     async fn cache_other_icons(self: Arc<Self>, wanted: Option<Vec<String>>) {
-        use futures_util::StreamExt;
-        let feed = self.other.read().clone();
+        let front = wanted.is_some();
         let ids: Vec<String> = match wanted {
             Some(w) => w,
-            None => match feed.as_deref() {
+            None => match self.other.read().as_deref() {
                 Some(f) => f.popular.iter().map(|(p, _)| p.pkg.id.clone()).chain(f.pkgs.values().map(|p| p.pkg.id.clone())).collect(),
                 None => return,
             },
         };
         let today = chrono::Local::now().date_naive();
         let misses = self.persisted.lock().icon_misses.clone();
-        let recent_miss = |id: &str| misses.get(id).and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS);
+        let recent_miss = |id: &str| misses.get(id).and_then(|d| icon_miss_day(d)).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS);
         let mut todo: Vec<String> = Vec::new();
-        let mut from_disk = false;
         {
             let mut st = self.st.lock();
             for id in ids {
                 let key = format!("other:{id}");
-                if st.catalog_icons.contains_key(&key) || st.icons.contains_key(&key) || st.icon_busy.contains(&key) {
+                if st.catalog_icons.contains_key(&key) || st.icons.contains_key(&key) {
                     continue;
                 }
                 if let Some(p) = other_icon_on_disk(&id) {
-                    st.catalog_icons.insert(key, paths::asset_url(&p));
-                    from_disk = true;
-                } else if !recent_miss(&id) {
-                    st.icon_busy.insert(key);
+                    let url = paths::asset_url(&p);
+                    st.catalog_icons.insert(key.clone(), url.clone());
+                    ICON_OUT.lock().found.push(IconFound { id: key, icon_url: url });
+                    // saved by an earlier version at full size: made small in the background
+                    if !icon_is_small(&p) {
+                        todo.push(id);
+                    }
+                } else if !recent_miss(&id) && sources::icons::may_search(&id) {
                     todo.push(id);
                 }
             }
         }
-        if from_disk {
-            self.emit_apps();
-            self.emit("catalog_changed", ());
+        {
+            let mut q = ICON_QUEUE.lock();
+            if front {
+                q.front(&todo);
+            } else {
+                q.back(&todo);
+            }
         }
-        if todo.is_empty() {
+        self.clone().start_icon_flusher();
+        // workers take the next app from the queue until it is empty
+        let want = ICON_QUEUE.lock().len().min(sources::icons::PARALLEL);
+        loop {
+            let running = ICON_WORKERS.load(Ordering::SeqCst);
+            if running >= want {
+                break;
+            }
+            if ICON_WORKERS.compare_exchange(running, running + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                let me = self.clone();
+                tauri::async_runtime::spawn(async move { me.icon_worker().await });
+            }
+        }
+    }
+
+    async fn icon_worker(self: Arc<Self>) {
+        loop {
+            loop {
+                let next = ICON_QUEUE.lock().pop();
+                let Some(id) = next else { break };
+                let key = format!("other:{id}");
+                if !ICON_BUSY.lock().insert(key.clone()) {
+                    continue;
+                }
+                let feed = self.other.read().clone();
+                let r = tokio::time::timeout(Duration::from_secs(20), find_other_icon(feed, id.clone())).await.unwrap_or(Err(sources::icons::Miss { passing: true }));
+                ICON_BUSY.lock().remove(&key);
+                match r {
+                    Ok(p) => {
+                        let url = paths::asset_url(&p);
+                        let old = self.st.lock().catalog_icons.insert(key.clone(), url.clone());
+                        if old.as_deref() != Some(url.as_str()) {
+                            ICON_OUT.lock().found.push(IconFound { id: key, icon_url: url });
+                        }
+                    }
+                    Err(m) if m.passing => sources::icons::retry_later(&id),
+                    Err(_) => ICON_OUT.lock().missed.push(id),
+                }
+            }
+            ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
+            // more apps were queued while this worker was leaving: take a place again if one is free
+            let running = ICON_WORKERS.load(Ordering::SeqCst);
+            if ICON_QUEUE.lock().is_empty() || running >= sources::icons::PARALLEL || ICON_WORKERS.compare_exchange(running, running + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Sends found icons to the window every 150 ms while the search runs, so a screenful of icons
+    /// arrives in a few small updates instead of one per icon, and saves the apps that have none.
+    fn start_icon_flusher(self: Arc<Self>) {
+        if ICON_FLUSHING.swap(true, Ordering::SeqCst) {
             return;
         }
-        let mut results = futures_util::stream::iter(todo.into_iter().map(|id| {
-            let feed = feed.clone();
-            async move {
-                let got = tokio::time::timeout(Duration::from_secs(60), async {
-                    let src = other::icon_source_of(feed.as_deref(), &id).await?;
-                    let got = crate::sources::icons::find(&id, src.icon.as_deref(), &src.pages).await?;
-                    let path = paths::icons().join(format!("{}.{}", crate::sources::icons::file_stem(&id), got.ext));
-                    std::fs::write(&path, got.bytes).ok()?;
-                    Some(path)
-                })
-                .await
-                .ok()
-                .flatten();
-                (id, got)
-            }
-        }))
-        .buffer_unordered(6);
-        let (mut hits, mut unseen, mut missed): (usize, usize, Vec<String>) = (0, 0, vec![]);
-        let mut last_emit = std::time::Instant::now();
-        while let Some((id, got)) = results.next().await {
-            let key = format!("other:{id}");
-            let mut st = self.st.lock();
-            st.icon_busy.remove(&key);
-            match got {
-                Some(p) => {
-                    st.catalog_icons.insert(key, paths::asset_url(&p));
-                    hits += 1;
-                    unseen += 1;
+        tauri::async_runtime::spawn(async move {
+            let mut apps_at = Instant::now();
+            let mut apps_dirty = false;
+            loop {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let (found, missed) = {
+                    let mut o = ICON_OUT.lock();
+                    (std::mem::take(&mut o.found), std::mem::take(&mut o.missed))
+                };
+                let idle = ICON_WORKERS.load(Ordering::SeqCst) == 0 && ICON_QUEUE.lock().is_empty();
+                if !found.is_empty() {
+                    self.emit("other_icons", found);
+                    apps_dirty = true;
                 }
-                None => missed.push(id),
+                if !missed.is_empty() {
+                    let day = format!("{}/{ICON_MISS_RULES}", chrono::Local::now().date_naive().format("%Y-%m-%d"));
+                    let mut p = self.persisted.lock();
+                    for id in missed {
+                        p.icon_misses.insert(id, day.clone());
+                    }
+                    store::save_state(&p);
+                }
+                // installed apps show these icons too; their list is heavier, so it goes less often
+                if apps_dirty && (idle || apps_at.elapsed() > Duration::from_secs(3)) {
+                    self.emit_apps();
+                    apps_dirty = false;
+                    apps_at = Instant::now();
+                }
+                if idle && ICON_OUT.lock().is_empty() {
+                    ICON_FLUSHING.store(false, Ordering::SeqCst);
+                    // a search queued between the check and here still gets its flusher
+                    let more = !ICON_OUT.lock().is_empty() || !ICON_QUEUE.lock().is_empty() || ICON_WORKERS.load(Ordering::SeqCst) > 0;
+                    if more && !ICON_FLUSHING.swap(true, Ordering::SeqCst) {
+                        continue;
+                    }
+                    break;
+                }
             }
-            drop(st);
-            if unseen >= 12 || (unseen > 0 && last_emit.elapsed() > Duration::from_secs(3)) {
-                self.emit_apps();
-                self.emit("catalog_changed", ());
-                unseen = 0;
-                last_emit = std::time::Instant::now();
-            }
-        }
-        if unseen > 0 {
-            self.emit_apps();
-            self.emit("catalog_changed", ());
-        }
-        // With no connection every search fails; that is no reason to skip these apps for a week.
-        if !missed.is_empty() && (hits > 0 || crate::http::online().await) {
-            let mut p = self.persisted.lock();
-            for id in missed {
-                p.icon_misses.insert(id, today.format("%Y-%m-%d").to_string());
-            }
-            store::save_state(&p);
-        }
+        });
     }
 
     /// Exact download sizes for Adobe updates and the Get apps list, from product manifests.
@@ -1441,11 +1701,10 @@ impl Core {
 
     // ------------------------------------------------------------ catalog and versions
 
-    /// The Get apps list: what is not installed yet, or everything when the setting asks for it.
-    /// `catalog()` stays complete for naming and labelling jobs.
+    /// The Get apps list, installed apps included: the page leaves them out unless the setting
+    /// asks for them or the user searches (a search for an app you have must find it).
     pub fn get_apps(&self) -> Vec<CatalogEntry> {
-        let show_installed = self.settings.read().show_installed_in_get_apps;
-        self.catalog().into_iter().filter(|e| show_installed || !e.installed).collect()
+        self.catalog()
     }
 
     /// What "Also delete settings and add-ons" would remove for this app, with sizes. Reads the
@@ -1496,20 +1755,37 @@ impl Core {
 
     /// When the window first opens: "Fewer admin prompts" is on but its task is not set up yet
     /// (a new install, or the task was removed): ask for the one admin prompt now, once per run.
+    /// Never at sign-in (no window), and not when the task could not be read.
     pub fn ensure_silent_task(self: &Arc<Self>) {
         static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !self.settings.read().silent_elevation || ASKED.swap(true, Ordering::SeqCst) {
+        let on = self.settings.read().silent_elevation;
+        let open = self.window_open();
+        if !on || !open || ASKED.load(Ordering::SeqCst) {
             return;
         }
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             // Also when the task starts another copy of the app (an older one cannot run the
             // steps this version sends): register it again for this exe.
-            let current = tauri::async_runtime::spawn_blocking(crate::elevate::task_is_current).await.unwrap_or(true);
-            if !current {
+            let task = tauri::async_runtime::spawn_blocking(crate::elevate::task_state).await.unwrap_or(crate::elevate::TaskState::Unknown);
+            if crate::elevate::should_set_up_task(on, task, open, ASKED.load(Ordering::SeqCst)) && !ASKED.swap(true, Ordering::SeqCst) {
                 me.set_up_silent_task(true, true);
             }
         });
+    }
+
+    /// Is the main window open? It exists only while it is shown (closing it closes it for
+    /// real); started at sign-in the app has none, and nobody may be there to answer a prompt.
+    pub fn window_open(&self) -> bool {
+        use tauri::Manager;
+        self.app.get_webview_window("main").is_some()
+    }
+
+    /// "Allow admin rights": ask for the admin prompt once more and continue every job that
+    /// waits for it.
+    pub fn allow_admin(&self) {
+        self.elevator.reset_declined();
+        self.admin_gen.send_modify(|g| *g += 1);
     }
 
     /// One Get apps entry, installed or not (its page stays open after the install finishes).
@@ -1571,67 +1847,25 @@ impl Core {
         out
     }
 
-    /// Packages of the winget catalog for a search in Get apps (Other apps on only).
-    pub async fn search_other(self: &Arc<Self>, q: String) -> Vec<CatalogEntry> {
-        if !self.settings.read().sources.other {
-            return vec![];
-        }
-        let installed = self.st.lock().installed.clone();
-        let show_installed = self.settings.read().show_installed_in_get_apps;
-        let found = tauri::async_runtime::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default();
-        // Like the rest of Get apps: installed apps only when the setting asks for them.
-        let mut found: Vec<CatalogEntry> = found.into_iter().filter(|e| show_installed || !e.installed).collect();
-        let missing: Vec<String> = {
-            let st = self.st.lock();
-            for e in &mut found {
-                e.icon_url = st.catalog_icons.get(&e.id).or_else(|| st.icons.get(&e.id)).cloned();
-            }
-            found.iter().filter(|e| e.icon_url.is_none()).filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect()
-        };
-        if !missing.is_empty() {
-            let me = self.clone();
-            tauri::async_runtime::spawn(async move { me.cache_other_icons(Some(missing)).await });
-        }
-        for e in &mut found {
-            sources::browse::apply(e);
-        }
-        let ids: Vec<String> = found.iter().filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect();
-        self.fetch_other_details(ids);
-        found
-    }
-
-    /// One page of the whole winget catalog for Get apps, by category ("Browsers", ...) and first
-    /// letter ("A" to "Z", "#"). Descriptions and icons the page lacks are looked for in the
-    /// background; `other_details` and `catalog_changed` bring them.
-    pub async fn browse_other(self: &Arc<Self>, category: Option<String>, letter: Option<String>, offset: usize, limit: usize) -> Result<sources::browse::BrowsePage> {
+    /// One page of the whole winget catalog for Get apps: a search (or none), a category
+    /// ("Browsers", ...), a first letter ("A" to "Z", "#") and an order ("popular", "az", "za",
+    /// "updated"). Descriptions and icons the page lacks are looked for in the background;
+    /// `other_details` and `catalog_changed` bring them.
+    pub async fn browse_other(self: &Arc<Self>, req: sources::browse::Request) -> Result<sources::browse::BrowsePage> {
         use sources::browse;
         if !self.settings.read().sources.other {
-            return Ok(browse::BrowsePage { total: 0, entries: vec![], packages: 0, categories: vec![] });
+            return Ok(browse::BrowsePage { total: 0, entries: vec![], packages: 0, categories: vec![], dated: 0 });
         }
         if !sources::winget::index_path().is_file() {
             sources::winget::refresh_index(Duration::from_secs(6 * 3600)).await?;
         }
         let installed = self.st.lock().installed.clone();
-        let show_installed = self.settings.read().show_installed_in_get_apps;
+        // A search finds installed apps too.
+        let show_installed = self.settings.read().show_installed_in_get_apps || req.query.as_deref().is_some_and(|q| !q.trim().is_empty());
         let (page, pkgs) = tauri::async_runtime::spawn_blocking(move || -> Result<(browse::BrowsePage, Vec<sources::winget::Pkg>)> {
             let list = browse::list()?;
             let here: HashSet<String> = installed.iter().filter(|i| i.source == Source::Other).map(|i| other::pkg_of(i).to_ascii_lowercase()).collect();
-            let keep = |i: &browse::Item| show_installed || !here.contains(&i.pkg.id.to_ascii_lowercase());
-            let cat = category.as_deref().and_then(browse::category_index);
-            let letter = letter.and_then(|l| l.chars().next()).map(|c| c.to_ascii_uppercase());
-            let (total, items) = browse::page(&list, cat, letter, offset, limit.clamp(1, 200), keep);
-            let counts = browse::counts(&list, keep);
-            let pkgs: Vec<sources::winget::Pkg> = items.iter().map(|i| i.pkg.clone()).collect();
-            let entries = items
-                .iter()
-                .map(|i| {
-                    let mut e = other::entry(&i.pkg, i.pkg.latest.clone(), Some(i.pkg.id.clone()), here.contains(&i.pkg.id.to_ascii_lowercase()));
-                    browse::apply(&mut e);
-                    e
-                })
-                .collect();
-            let categories = browse::CATEGORIES.iter().zip(counts).map(|(name, count)| browse::CategoryCount { name, count }).collect();
-            Ok((browse::BrowsePage { total, entries, packages: list.packages, categories }, pkgs))
+            Ok(browse::page_for(&list, &req, &here, show_installed))
         })
         .await
         .map_err(|e| anyhow!("{e}"))??;
@@ -1816,7 +2050,7 @@ impl Core {
             JobRequest::Update { app_id, version } => {
                 let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
                 if inst.read_only {
-                    return Err(anyhow!("{} is updated by Steam", inst.name));
+                    return Err(read_only_error(&inst));
                 }
                 let latest = self.st.lock().latest.get(app_id).map(|l| l.version.clone());
                 let target = version.clone().or(latest).unwrap_or_else(|| inst.version.clone());
@@ -1829,10 +2063,16 @@ impl Core {
             }
             JobRequest::Uninstall { app_id, .. } => {
                 let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+                if inst.read_only {
+                    return Err(read_only_error(&inst));
+                }
                 (app_id.clone(), JobKind::Uninstall, inst.version)
             }
             JobRequest::Repair { app_id } => {
                 let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+                if inst.read_only {
+                    return Err(read_only_error(&inst));
+                }
                 (app_id.clone(), JobKind::Repair, inst.version)
             }
         };
@@ -1877,6 +2117,8 @@ impl Core {
                 started_at: None,
                 finished_at: None,
                 cancelable: false,
+                ready: false,
+                needs_admin: false,
             },
             req,
             ctl: tx,
@@ -1970,13 +2212,18 @@ impl Core {
             let at = (insert_at + k).min(jobs.len());
             jobs.insert(at, j);
         }
+        // Downloaded jobs waiting for their install turn swap places among themselves (they
+        // keep the places they have, so nothing jumps ahead of a job that is running).
+        reorder_in_place(&mut jobs[..], ids, |j| &j.job.id, |j| j.job.ready);
         // Installs waiting for their turn follow the new order too.
         let mut seqs: Vec<u64> = jobs.iter().map(|j| j.seq).collect();
         seqs.sort_unstable();
         for (j, s) in jobs.iter_mut().zip(seqs) {
             j.seq = s;
         }
+        let order: HashMap<String, u64> = jobs.iter().map(|j| (j.job.id.clone(), j.seq)).collect();
         drop(jobs);
+        self.install_gate.reorder(&order);
         self.mark_jobs_dirty();
     }
 
@@ -2269,10 +2516,11 @@ impl Core {
             }
         });
         let mut result = self.execute(id, &plan).await;
+        let mut ran: &Plan = &plan;
         if let Err(e) = &result {
             // Other apps try again with admin rights only when Windows would not start the
             // installer without them (error 740), never after an installer that ran.
-            let retry = !plan.app_id.starts_with("other:") || other::needs_elevation(&format!("{e:#}"));
+            let retry = !crate::elevate::admin_unavailable(e) && (!plan.app_id.starts_with("other:") || other::needs_elevation(&format!("{e:#}")));
             if let (Some(fb), true) = (&plan.fallback, retry) {
                 log::warn!("{}: {e:#}; trying fallback", plan.name);
                 self.set_job(id, |j| {
@@ -2282,9 +2530,60 @@ impl Core {
                     j.total = 0;
                 });
                 let first = format!("{e:#}");
-                result = self.execute(id, fb).await.map_err(|e2| anyhow!("{e2:#}\n\nFirst attempt: {first}"));
+                ran = &**fb;
+                result = self.execute(id, fb).await.map_err(|e2| if crate::elevate::admin_unavailable(&e2) { e2 } else { anyhow!("{e2:#}\n\nFirst attempt: {first}") });
             }
         }
+        // Admin rights could not be had (declined, the prompt failed or was not answered, or no
+        // window is open to show it): nothing ran. The job waits in the queue until the user
+        // allows admin rights, and the jobs that need none go on meanwhile.
+        while matches!(&result, Err(e) if crate::elevate::admin_unavailable(e)) {
+            let Some(mut ctl) = self.with_job(id, |j| j.ctl.subscribe()) else { break };
+            let mut gen = self.admin_gen.subscribe();
+            gen.borrow_and_update();
+            let first = !self.jobs.lock().iter().any(|j| j.job.needs_admin && !j.job.state.is_finished());
+            self.with_job(id, |j| j.phase = Phase::Ready);
+            self.set_job(id, |j| {
+                j.state = JobState::Blocked;
+                j.needs_admin = true;
+                j.cancelable = true;
+                j.ready = false;
+                j.step = "Needs admin rights".into();
+                j.detail = "Nothing was installed yet. Allow admin rights to continue".into();
+                j.speed = 0.0;
+                j.eta = None;
+            });
+            // Nothing ran: after a restart it is queued again, not shown as cut off.
+            self.save_queue();
+            self.wake.notify_one();
+            self.emit_apps();
+            if first {
+                if self.window_open() {
+                    self.toast("info", "Some updates need admin rights. Allow them in the Queue to continue.", None);
+                } else {
+                    self.notify("Updates need admin rights", "Open The Updater 3D and allow admin rights to install them.");
+                }
+            }
+            let canceled = tokio::select! {
+                _ = gen.changed() => false,
+                _ = until_canceled(&mut ctl) => true,
+            };
+            if canceled {
+                result = Ok(Outcome::Canceled);
+                break;
+            }
+            self.with_job(id, |j| j.phase = Phase::Download);
+            self.set_job(id, |j| {
+                j.needs_admin = false;
+                j.cancelable = false;
+                j.state = JobState::Downloading;
+                j.step = "Preparing".into();
+                j.detail.clear();
+            });
+            self.emit_apps();
+            result = self.execute(id, ran).await;
+        }
+        self.set_job(id, |j| j.needs_admin = false);
         match result {
             Ok(Outcome::Done) => {
                 let total = self.with_job(id, |j| j.job.total).unwrap_or(0);
@@ -2299,6 +2598,7 @@ impl Core {
                         }
                     }
                 }
+                self.trim_download_cache();
                 let mut name = String::new();
                 let mut kind = JobKind::Update;
                 let mut from = None;
@@ -2319,6 +2619,17 @@ impl Core {
                 });
                 self.st.lock().failed.remove(&app_id);
                 self.st.lock().sizes.remove(&app_id);
+                if kind != JobKind::Uninstall {
+                    let mut p = self.persisted.lock();
+                    p.updated_at.insert(app_id.clone(), now());
+                    store::save_state(&p);
+                    drop(p);
+                    if app_id.starts_with("other:") {
+                        let me = self.clone();
+                        let id = app_id.clone();
+                        tauri::async_runtime::spawn(async move { me.add_to_other_feed(&id).await });
+                    }
+                }
                 let to = plan.to_version.clone();
                 let (akind, title) = match kind {
                     JobKind::Update => (ActivityKind::Update, match &from { Some(f) => format!("Updated {} to {to}", with_version(&name, f)), None => format!("Updated {}", with_version(&name, &to)) }),
@@ -2374,6 +2685,8 @@ impl Core {
     /// Download, wait for the app to close, install, verify.
     async fn execute(self: &Arc<Self>, id: &str, plan: &Plan) -> Result<Outcome> {
         let ctl = self.with_job(id, |j| j.ctl.subscribe()).ok_or_else(|| anyhow!("job vanished"))?;
+        // The copy as it was, to tell what the install changed.
+        let before = self.installed(&plan.app_id);
         let total: u64 = plan.downloads.iter().filter_map(|d| d.size).sum();
         self.with_job(id, |j| j.phase = Phase::Download);
         self.set_job(id, |j| {
@@ -2466,6 +2779,7 @@ impl Core {
             j.step = if installer { "Waiting for another install to finish".into() } else { "Getting ready to unpack".into() };
             j.detail.clear();
             j.cancelable = true;
+            j.ready = installer;
         });
 
         // ---- one installer at a time, in queue order; nothing has run yet, so Cancel still
@@ -2497,6 +2811,7 @@ impl Core {
         };
         self.set_job(id, |j| {
             j.cancelable = false;
+            j.ready = false;
             j.detail.clear();
         });
 
@@ -2549,10 +2864,18 @@ impl Core {
         let silent = self.settings.read().silent_elevation;
         let n = plan.steps.len();
         let install_t0 = Instant::now();
+        // Uninstall entries written from here on were written by this install (a little slack
+        // for the registry clock).
+        let since = std::time::SystemTime::now() - Duration::from_secs(2);
+        // A program already ran: from here on the job can not simply start over.
+        let mut ran_program = false;
         // Each step owns a share of the bar by how long that kind of step takes, so the bar
         // follows the steps: it cannot run ahead of a step that has not started yet.
         let weights: Vec<f64> = plan.steps.iter().map(step_weight).collect();
         let weight_sum: f64 = weights.iter().sum::<f64>().max(f64::EPSILON);
+        // How long this app's own installs took before, when there were any.
+        let runs_key = runs_key(plan);
+        let hint = self.persisted.lock().install_runs.get(&runs_key).and_then(|r| install_detail::usual_time(r.secs, r.runs));
         for (k, step) in plan.steps.iter().enumerate() {
             let label = if n > 1 { format!("{}, step {} of {}", step.label(), k + 1, n) } else { step.label().to_string() };
             let files = match step {
@@ -2565,7 +2888,7 @@ impl Core {
             let detail = step_detail(step, files);
             self.set_job(id, |j| {
                 j.step = label.clone();
-                j.detail = detail;
+                j.detail = detail.clone();
             });
             let step_t0 = Instant::now();
             let step_est = (inst_est * weights[k] / weight_sum).max(2.0);
@@ -2573,13 +2896,27 @@ impl Core {
             // Installers report no progress: move the bar along the expected install time, and
             // past it keep creeping instead of stopping, so it never looks frozen.
             let rum = rum_watch(step, &plan.to_version, &self.adobe_sizes.lock());
+            // What the step does right now, from its log, the programs it runs and its folder,
+            // watched off the async threads.
+            let procs: crate::elevate::Procs = Default::default();
+            let live: Arc<Mutex<install_detail::Live>> = Default::default();
+            let stop_watch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _stop_watch = install_detail::StopOnDrop(stop_watch.clone());
+            if rum.is_none() {
+                let spec = watch_spec(step, detail.clone(), files, before.as_ref(), hint.clone(), &procs);
+                let (stop, out) = (stop_watch.clone(), live.clone());
+                drop(tauri::async_runtime::spawn_blocking(move || install_detail::watch(spec, stop, out)));
+            }
             let ticker = {
                 let me = self.clone();
                 let jid = id.to_string();
                 let label = label.clone();
+                let live = live.clone();
                 tauri::async_runtime::spawn(async move {
                     // Remote Update Manager downloads by itself; its folder shows how far it is.
                     let mut last = (Instant::now(), 0u64);
+                    let mut shown = String::new();
+                    let mut floor = 0.0f64;
                     let mut ema = 0.0f64;
                     let mut dl_done_at: Option<Instant> = None;
                     loop {
@@ -2612,10 +2949,19 @@ impl Core {
                                 });
                             }
                         } else {
+                            let now = live.lock().clone();
+                            // Real progress (files copied or unpacked) moves the bar on when it is
+                            // ahead of the expected time.
+                            let x = (s / step_est).max(now.fraction.unwrap_or(0.0));
+                            floor = floor.max(dl_share + (1.0 - dl_share) * 0.98 * steps_progress(&weights, k, x));
                             me.set_job(&jid, |j| {
                                 j.step = format!("{label}, {}:{:02}", s as u64 / 60, s as u64 % 60);
-                                j.progress = dl_share + (1.0 - dl_share) * 0.98 * steps_progress(&weights, k, s / step_est);
+                                j.progress = floor;
+                                if !now.text.is_empty() && now.text != shown {
+                                    j.detail = now.text.clone();
+                                }
                             });
+                            shown = now.text;
                         }
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
@@ -2624,9 +2970,39 @@ impl Core {
             // Downloaded files this step runs are checked again by the helper right before it
             // runs them, so a file swapped after the download check is not run with admin rights.
             let checks = crate::elevate::file_checks(step, &plan.downloads);
-            let res = self.elevator.run_checked(step.clone(), silent, checks).await;
+            let mut res = self.elevator.run_watched(step.clone(), silent, checks.clone(), self.window_open(), Some(procs.clone())).await;
             ticker.abort();
-            let res = res?;
+            stop_watch.store(true, Ordering::Relaxed);
+            // Windows Installer runs one install at a time (1618): wait for the other one to
+            // finish and run the step again.
+            let busy_t0 = Instant::now();
+            let mut tries = 0;
+            while let Some(wait) = res.as_ref().ok().and_then(|r| busy_retry_delay(r, tries, busy_t0.elapsed())) {
+                tries += 1;
+                self.set_job(id, |j| {
+                    j.step = "Waiting for another Windows install to finish".into();
+                    j.detail = "Windows installs one app at a time. This tries again by itself".into();
+                    j.cancelable = true;
+                });
+                let mut c = ctl.clone();
+                if sleep_or_cancel(&mut c, wait).await {
+                    return Ok(Outcome::Canceled);
+                }
+                self.set_job(id, |j| {
+                    j.step = label.clone();
+                    j.detail.clear();
+                    j.cancelable = false;
+                });
+                res = self.elevator.run_with(step.clone(), silent, checks.clone(), self.window_open()).await;
+            }
+            let res = match res {
+                // A program already ran: the job can not wait and start over, so it fails.
+                Err(e) if ran_program && crate::elevate::admin_unavailable(&e) => return Err(anyhow!("{e:#}")),
+                r => r?,
+            };
+            if matches!(step, sources::Step::Run { .. }) {
+                ran_program = true;
+            }
             if !res.ok {
                 let log = match step {
                     sources::Step::Run { log, .. } => log.clone(),
@@ -2641,6 +3017,7 @@ impl Core {
             let mut p = self.persisted.lock();
             let e = p.install_times.entry(time_key.clone()).or_insert(took);
             *e = *e * 0.5 + took * 0.5;
+            p.install_runs.entry(runs_key.clone()).or_default().add(took);
             store::save_state(&p);
         }
 
@@ -2687,34 +3064,84 @@ impl Core {
                 let _ = tokio::time::timeout(Duration::from_secs(5), ctl.changed()).await;
             }
         }
-        // Installers sometimes finish registering a moment after they exit.
-        for attempt in 0..6 {
+        // Installers sometimes finish registering a while after they exit (a process they
+        // started writes the uninstall entry): keep checking, longest while the app is not in
+        // the list at all.
+        let t0 = Instant::now();
+        loop {
             self.rescan().await;
-            let ok = match &plan.verify {
-                Verify::None => true,
-                Verify::Version { app_id, version: v } => self
-                    .st
-                    .lock()
-                    .installed
-                    .iter()
-                    .any(|i| &i.id == app_id && !i.missing && !version::newer(v, &i.version)),
-                Verify::Removed { app_id } => !self.st.lock().installed.iter().any(|i| &i.id == app_id),
-                Verify::Wait { .. } => true,
-            };
-            if ok {
+            let state = self.check_result(plan, before.as_ref(), since).await;
+            if state == Checked::Done {
                 return Ok(Outcome::Done);
             }
-            if attempt < 5 {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+            let waited = t0.elapsed();
+            if !keep_checking(&state, waited) {
+                return Err(match (&plan.verify, state) {
+                    (Verify::Version { version: v, .. }, Checked::Shows { version: now_v, .. }) => anyhow!("VERIFY|The installer finished, but {} reports {} instead of {}", plan.name, now_v, v),
+                    (Verify::Version { version: v, .. }, _) => anyhow!("VERIFY|The installer finished, but {} reports not installed instead of {}", plan.name, v),
+                    _ => anyhow!("VERIFY|The uninstaller finished, but {} is still installed", plan.name),
+                });
             }
+            if waited >= Duration::from_secs(10) {
+                self.set_job(id, |j| j.step = "Waiting for the installer to finish registering".into());
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+
+    /// What the uninstall list shows after the steps, against what the plan expects.
+    async fn check_result(self: &Arc<Self>, plan: &Plan, before: Option<&Installed>, since: std::time::SystemTime) -> Checked {
         match &plan.verify {
-            Verify::Version { app_id, version: v } => {
-                let now_v = self.installed(app_id).map(|i| i.version).unwrap_or_else(|| "not installed".into());
-                Err(anyhow!("VERIFY|The installer finished, but {} reports {} instead of {}", plan.name, now_v, v))
+            Verify::None | Verify::Wait { .. } => Checked::Done,
+            Verify::Removed { app_id } => {
+                if self.st.lock().installed.iter().any(|i| &i.id == app_id) {
+                    Checked::Shows { version: String::new(), unchanged: true }
+                } else {
+                    Checked::Done
+                }
             }
-            Verify::Removed { .. } => Err(anyhow!("VERIFY|The uninstaller finished, but {} is still installed", plan.name)),
-            Verify::None | Verify::Wait { .. } => unreachable!(),
+            Verify::Version { app_id, version: v } => {
+                let found = self.installed(app_id).filter(|i| !i.missing);
+                if found.as_ref().is_some_and(|i| !version::newer(v, &i.version)) {
+                    return Checked::Done;
+                }
+                let unchanged = |now: &str| before.is_some_and(|b| b.version == now);
+                let Some(rest) = app_id.strip_prefix("other:") else {
+                    return match found {
+                        Some(i) => Checked::Shows { unchanged: unchanged(&i.version), version: i.version },
+                        None => Checked::Missing,
+                    };
+                };
+                // Other apps: the catalog's versions can read differently from the uninstall
+                // list, and an installer can move the app to another scope.
+                let pkg = rest.strip_suffix(":user").unwrap_or(rest).to_string();
+                let feed = self.other.read().clone();
+                let x = other::Expect {
+                    app_id: app_id.clone(),
+                    pkg: pkg.clone(),
+                    pkg_version: plan.to_version.clone(),
+                    expected: v.clone(),
+                    range: feed.as_deref().and_then(|f| f.get(&pkg)).and_then(|pf| other::arp_range(pf, &plan.to_version)),
+                    learned: other::learned_shows(&pkg, &plan.to_version),
+                    declared_scope: other::declared_scope(feed.as_deref(), &pkg, &plan.to_version, before),
+                    before: before.map(|b| b.version.clone()),
+                };
+                let handled: Vec<Installed> = self.st.lock().installed.iter().filter(|i| i.source != Source::Other).cloned().collect();
+                let p2 = pkg.clone();
+                let copies = tauri::async_runtime::spawn_blocking(move || other::package_copies(&p2, &winutil::uninstall_entries(), &handled, since)).await.unwrap_or_default();
+                match other::check_install(&x, &copies) {
+                    c @ other::Check::Done { .. } => {
+                        other::learn_from(&x, &c);
+                        if c != (other::Check::Done { shows: None, scope: None }) {
+                            // List the app again with what was learned (its scope, its version).
+                            self.rescan().await;
+                        }
+                        Checked::Done
+                    }
+                    other::Check::Missing => Checked::Missing,
+                    other::Check::Shows(now) => Checked::Shows { unchanged: unchanged(&now), version: now },
+                }
+            }
         }
     }
 
@@ -2920,6 +3347,60 @@ fn status_refresh_due(n: u64, cc_down: bool) -> bool {
 /// Tell a job to run, pause or cancel. `send_replace` stores the value even when no download is
 /// listening right now: a paused job has ended its download, and a plain `send` would drop the
 /// "run" from Resume, so the job read the old "pause" again and paused itself.
+/// What a check after the install steps found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Checked {
+    Done,
+    /// The app is not in the uninstall list.
+    Missing,
+    /// It shows another version (`unchanged`: the one from before the install), or for an
+    /// uninstall, it is still there.
+    Shows { version: String, unchanged: bool },
+}
+
+/// Check again after `waited`? Installers that hand the work to another process can exit before
+/// that one writes the uninstall entry, and remove the old entry first: a missing app gets three
+/// minutes, an entry the install has not changed yet one, anything else ten seconds.
+fn keep_checking(state: &Checked, waited: Duration) -> bool {
+    let limit = match state {
+        Checked::Done => return false,
+        Checked::Missing => 180,
+        Checked::Shows { unchanged: true, .. } => 60,
+        Checked::Shows { .. } => 10,
+    };
+    waited < Duration::from_secs(limit)
+}
+
+/// Windows Installer runs one install at a time and answers 1618 while another one runs (often
+/// the end of the previous installer, or Windows Update). How long to wait before running the
+/// step again: 15 s, then doubling up to 2 minutes, for about 15 minutes in all.
+fn busy_retry_delay(res: &crate::elevate::StepResult, tries: u32, waited: Duration) -> Option<Duration> {
+    if res.ok || res.code != Some(1618) || waited >= Duration::from_secs(15 * 60) {
+        return None;
+    }
+    Some(Duration::from_secs((15u64 << tries.min(3)).min(120)))
+}
+
+/// Sleep for `d`; true, and sooner, when the job is canceled.
+async fn sleep_or_cancel(ctl: &mut watch::Receiver<Control>, d: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(d) => *ctl.borrow() == Control::Cancel,
+        _ = until_canceled(ctl) => true,
+    }
+}
+
+/// Wait until the job is canceled (forever when it is not).
+async fn until_canceled(ctl: &mut watch::Receiver<Control>) {
+    loop {
+        if *ctl.borrow_and_update() == Control::Cancel {
+            return;
+        }
+        if ctl.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 fn set_control(tx: &watch::Sender<Control>, c: Control) {
     tx.send_replace(c);
 }
@@ -3095,6 +3576,12 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
     (code.into(), first, text.to_string(), None)
 }
 
+/// Does this job keep the 5-minute rescan from running? Only work in progress does; a job that
+/// only waits for admin rights can wait for hours and must not freeze the app list.
+fn rescan_waits_for(j: &JobRec) -> bool {
+    j.active && !j.job.needs_admin
+}
+
 /// Windows notification sounds: the usual one, and a chime that stands out for failures.
 const NOTIFY_SOUND: &str = "Default";
 const FAILED_SOUND: &str = "Reminder";
@@ -3109,7 +3596,32 @@ fn update_notice(total: usize, fresh: &[String]) -> (String, String) {
     (title, body)
 }
 
+/// When an app was last updated: the exact time this app recorded, or the source's date when it
+/// is later (updated outside the app). A source date with no time (only the day) never beats a
+/// recorded time on the same day.
+fn newest_update(recorded: Option<&str>, source: Option<&str>) -> Option<String> {
+    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+    match (recorded, source) {
+        (Some(r), Some(s)) => match (parse(r), parse(s)) {
+            (Some(rt), Some(st)) => {
+                let day_only = s.ends_with("T00:00:00Z");
+                let later = if day_only { st.date_naive() > rt.date_naive() } else { st > rt };
+                Some(if later { s } else { r }.to_string())
+            }
+            (Some(_), None) => Some(r.to_string()),
+            _ => Some(s.to_string()),
+        },
+        (r, s) => r.or(s).map(String::from),
+    }
+}
+
 /// An update's size from the download server when its source did not give one.
+/// Why a copy that Steam or the Microsoft Store manages is not changed here.
+fn read_only_error(inst: &Installed) -> anyhow::Error {
+    let by = if inst.store.is_some() { "the Microsoft Store" } else { "Steam" };
+    anyhow!("{} is updated and removed by {by}", inst.name)
+}
+
 fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u64>) -> Latest {
     if l.size.is_none() {
         l.size = dl_sizes.get(&format!("{app_id}@{}", l.version)).copied().filter(|n| *n > 0);
@@ -3147,6 +3659,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn recently_updated_uses_the_exact_time_the_app_recorded() {
+        use super::newest_update;
+        // Windows only knows the day; the app knows the minute: the minute wins on that day.
+        assert_eq!(newest_update(Some("2026-10-22T12:10:00+00:00"), Some("2026-10-22T00:00:00Z")).as_deref(), Some("2026-10-22T12:10:00+00:00"));
+        // Updated outside the app later on: the newer source date wins.
+        assert_eq!(newest_update(Some("2026-10-20T12:10:00+00:00"), Some("2026-10-22T00:00:00Z")).as_deref(), Some("2026-10-22T00:00:00Z"));
+        assert_eq!(newest_update(Some("2026-10-22T09:00:00+00:00"), Some("2026-10-22T11:30:00+00:00")).as_deref(), Some("2026-10-22T11:30:00+00:00"));
+        assert_eq!(newest_update(None, Some("2026-10-22T00:00:00Z")).as_deref(), Some("2026-10-22T00:00:00Z"));
+        assert_eq!(newest_update(Some("2026-10-22T09:00:00+00:00"), None).as_deref(), Some("2026-10-22T09:00:00+00:00"));
     }
 
     #[test]
@@ -3218,6 +3742,49 @@ mod tests {
             h.await.unwrap();
         }
         assert_eq!(*order.lock(), vec!["second", "fifth"]);
+    }
+
+    #[tokio::test]
+    async fn downloaded_jobs_install_in_the_order_they_were_moved_to() {
+        use std::sync::Arc;
+        let gate = Arc::new(super::TurnGate::new());
+        let (_t0, r0) = tokio::sync::watch::channel(Control::Run);
+        let busy = gate.take("a", "A", 0, r0).await.unwrap();
+        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut hs = Vec::new();
+        for (id, seq) in [("first", 1u64), ("second", 2)] {
+            let (g, o) = (gate.clone(), order.clone());
+            hs.push(tauri::async_runtime::spawn(async move {
+                let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
+                let t = g.take(id, id, seq, rx).await.unwrap();
+                o.lock().push(id);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                drop(t);
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        // Both are downloaded and waiting; the user drags "second" above "first".
+        gate.reorder(&[("second".to_string(), 1u64), ("first".to_string(), 2)].into_iter().collect());
+        drop(busy);
+        for h in hs {
+            h.await.unwrap();
+        }
+        assert_eq!(*order.lock(), vec!["second", "first"]);
+    }
+
+    #[test]
+    fn reordering_ready_jobs_keeps_everything_else_in_place() {
+        // (id, ready): one installing, three ready, one downloading.
+        let mut v: Vec<(String, bool)> = [("inst", false), ("r1", true), ("dl", false), ("r2", true), ("r3", true)].iter().map(|(a, b)| (a.to_string(), *b)).collect();
+        let ids: Vec<String> = ["r3", "r1", "r2", "r3", "dl", "gone"].iter().map(|s| s.to_string()).collect();
+        super::reorder_in_place(&mut v, &ids, |j| &j.0, |j| j.1);
+        let got: Vec<&str> = v.iter().map(|j| j.0.as_str()).collect();
+        assert_eq!(got, vec!["inst", "r3", "dl", "r1", "r2"]);
+        // Only some of them named: those swap among their own places.
+        let ids: Vec<String> = ["r2", "r3"].iter().map(|s| s.to_string()).collect();
+        super::reorder_in_place(&mut v, &ids, |j| &j.0, |j| j.1);
+        let got: Vec<&str> = v.iter().map(|j| j.0.as_str()).collect();
+        assert_eq!(got, vec!["inst", "r2", "dl", "r1", "r3"]);
     }
 
     #[test]
@@ -3461,6 +4028,8 @@ mod queue_tests {
             started_at: None,
             finished_at: None,
             cancelable: false,
+            ready: false,
+            needs_admin: false,
         }
     }
 
@@ -3482,6 +4051,7 @@ mod queue_tests {
             channel: None,
             missing: false,
             read_only: false,
+            store: None,
             icon_remote: None,
             data: SourceData::Tools { key: String::new(), series: String::new() },
         }
@@ -3515,6 +4085,27 @@ mod queue_tests {
         std::fs::write(&file, b"[{").unwrap();
         assert!(load_queue_from(&file).is_empty());
         assert!(load_queue_from(&dir.join("none.json")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restored_jobs_that_all_finish_leave_the_queue_file() {
+        // Seen in the real app: two jobs cut off while installing were restored, one ended Done
+        // and one Failed, and queue.json kept both, so every restart brought them back.
+        let dir = std::env::temp_dir().join(format!("u3d-queue-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("queue.json");
+        let cut_off = SavedJob { job: job("a", JobState::Installing), req: JobRequest::Install { id: "tools:godot".into(), version: None }, phase: Phase::Running, dests: vec![], verify: None };
+        save_queue_to(&file, &[cut_off]);
+        assert_eq!(load_queue_from(&file).len(), 1);
+        // What a fresh Core holds before its first save.
+        let mut saved = String::new();
+        write_queue_if_changed(&file, &mut saved, &[]);
+        assert!(load_queue_from(&file).is_empty(), "the finished restored job is still in the queue file");
+        // Nothing changed since: no second write.
+        std::fs::remove_file(&file).unwrap();
+        write_queue_if_changed(&file, &mut saved, &[]);
+        assert!(!file.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3565,6 +4156,54 @@ mod queue_tests {
     }
 
     #[test]
+    fn each_step_watches_its_log_programs_and_folder() {
+        use crate::install_detail::{DirWatch, LogKind};
+        use crate::sources::Step;
+        let dir = std::env::temp_dir().join(format!("u3d-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut before = installed("other:Example.Zipper", "26.04");
+        before.install_dir = Some(dir.clone());
+        before.size_hint = Some(1_400_000_000);
+        let procs: crate::elevate::Procs = Default::default();
+        let log = std::path::PathBuf::from(r"C:\logs\other-zipper-26.05.log");
+        let run = |exe: &str, label: &str, args: Vec<String>, log: Option<std::path::PathBuf>| Step::Run { exe: exe.into(), args, cwd: None, ok_codes: vec![0], elevated: false, label: label.into(), log };
+        let msi = run("msiexec.exe", "Installing Zipper", vec!["/i".into(), "z.msi".into(), "/l*".into(), log.display().to_string()], Some(log.clone()));
+        let w = watch_spec(&msi, "x".into(), None, Some(&before), None, &procs);
+        assert_eq!(w.log, Some((log.clone(), LogKind::Msi)));
+        assert_eq!(w.procs.as_ref().map(|p| p.1.as_str()), Some("msiexec.exe"));
+        assert!(matches!(&w.dir, Some(DirWatch::Copy { dir: d, expected: Some(1_400_000_000) }) if d == &dir));
+        let inno = run(r"C:\dl\zipper-setup.exe", "Installing Zipper", vec!["/VERYSILENT".into(), format!("/LOG={}", log.display())], Some(log.clone()));
+        let w = watch_spec(&inno, "x".into(), None, None, Some("usually takes about 3 min".into()), &procs);
+        assert_eq!(w.log, Some((log.clone(), LogKind::Inno)));
+        assert!(w.dir.is_none(), "a fresh install has no folder to watch yet");
+        assert_eq!(w.hint.as_deref(), Some("usually takes about 3 min"));
+        let un = run(r"C:\Program Files\Zipper\unins000.exe", "Uninstalling Zipper", vec!["/VERYSILENT".into()], None);
+        let w = watch_spec(&un, "x".into(), None, Some(&before), None, &procs);
+        assert!(w.log.is_none());
+        assert!(matches!(&w.dir, Some(DirWatch::Remove { dir: d }) if d == &dir));
+        let unzip = Step::ExtractZip { zip: "a.zip".into(), dest: "D:/B".into(), strip_root: true, elevated: false, label: String::new() };
+        let w = watch_spec(&unzip, "x".into(), Some(12), None, None, &procs);
+        assert!(matches!(&w.dir, Some(DirWatch::Unpack { files: Some(12), .. })) && w.procs.is_none());
+        // A shared root such as Program Files itself is never walked.
+        before.install_dir = Some(crate::paths::program_files());
+        assert!(watch_spec(&msi, "x".into(), None, Some(&before), None, &procs).dir.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn past_runs_are_kept_per_app() {
+        let mut r = crate::store::InstallRuns::default();
+        r.add(100.0);
+        assert_eq!(r, crate::store::InstallRuns { runs: 1, secs: 100.0 });
+        r.add(200.0);
+        assert_eq!(r.runs, 2);
+        assert!((r.secs - 140.0).abs() < 1e-9);
+        // State saved before this existed still loads.
+        let p: Persisted = serde_json::from_str(r#"{"last_check":null,"notified":{},"last_auto_install_day":null}"#).unwrap();
+        assert!(p.install_runs.is_empty());
+    }
+
+    #[test]
     fn a_zip_counts_its_files() {
         let dir = std::env::temp_dir().join(format!("u3d-zipcount-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3581,5 +4220,108 @@ mod queue_tests {
         }
         assert_eq!(zip_files(&p), Some(3));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod install_check_tests {
+    use super::{busy_retry_delay, keep_checking, Checked};
+    use crate::elevate::StepResult;
+    use std::time::Duration;
+
+    // MEGAsync 6.7.0.3: its installer left the work to a process that wrote the uninstall entry
+    // later; the check gave up after about ten seconds.
+    #[test]
+    fn a_missing_app_is_checked_for_three_minutes_after_its_installer_exits() {
+        let s = Duration::from_secs;
+        assert!(keep_checking(&Checked::Missing, s(60)));
+        assert!(keep_checking(&Checked::Missing, s(170)));
+        assert!(!keep_checking(&Checked::Missing, s(181)));
+        let unchanged = Checked::Shows { version: "1.0".into(), unchanged: true };
+        assert!(keep_checking(&unchanged, s(30)));
+        assert!(!keep_checking(&unchanged, s(61)));
+        let other = Checked::Shows { version: "1.5".into(), unchanged: false };
+        assert!(keep_checking(&other, s(5)));
+        assert!(!keep_checking(&other, s(11)));
+        assert!(!keep_checking(&Checked::Done, s(0)));
+    }
+
+    // Python 3.14.7: "Another installation is already running" (1618) failed the update.
+    #[test]
+    fn a_busy_windows_installer_is_waited_for_instead_of_failing() {
+        let r = |ok: bool, code: Option<u32>| StepResult { ok, code, message: String::new(), output: String::new() };
+        let s = Duration::from_secs;
+        let busy = r(false, Some(1618));
+        assert_eq!(busy_retry_delay(&busy, 0, s(0)), Some(s(15)));
+        assert_eq!(busy_retry_delay(&busy, 1, s(15)), Some(s(30)));
+        assert_eq!(busy_retry_delay(&busy, 3, s(200)), Some(s(120)));
+        assert_eq!(busy_retry_delay(&busy, 9, s(800)), Some(s(120)));
+        assert_eq!(busy_retry_delay(&busy, 10, s(15 * 60)), None, "gives up after 15 minutes");
+        assert_eq!(busy_retry_delay(&r(false, Some(1603)), 0, s(0)), None);
+        assert_eq!(busy_retry_delay(&r(true, Some(0)), 0, s(0)), None);
+    }
+}
+
+#[cfg(test)]
+mod app_icon_tests {
+    use super::*;
+
+    fn other_app(id: &str, pkg: &str) -> Installed {
+        Installed {
+            id: id.into(),
+            source: Source::Other,
+            name: "Media Player".into(),
+            code: "Mp".into(),
+            fg: String::new(),
+            bg: String::new(),
+            version: "1.0".into(),
+            install_dir: None,
+            exe: None,
+            uninstall: None,
+            updated_at: None,
+            size_hint: None,
+            tagline: None,
+            channel: None,
+            missing: false,
+            read_only: false,
+            icon_remote: None,
+            store: None,
+            data: SourceData::Other { pkg: pkg.into(), how: other::How::Name, entry: Box::default(), upgrade_code: None },
+        }
+    }
+
+    /// An Other app whose program file is not found shows its package's catalog icon, not its letters.
+    #[test]
+    fn an_installed_app_without_a_program_icon_shows_the_catalog_icon() {
+        let catalog = HashMap::from([("other:Example.MediaPlayer".to_string(), "asset://catalog.png".to_string())]);
+        let mut icons = HashMap::new();
+        assert_eq!(app_icon(&other_app("other:Example.MediaPlayer", "Example.MediaPlayer"), &icons, &catalog).as_deref(), Some("asset://catalog.png"));
+        assert_eq!(app_icon(&other_app("other:Example.MediaPlayer:user", "Example.MediaPlayer"), &icons, &catalog).as_deref(), Some("asset://catalog.png"));
+        // The program's own icon comes first.
+        icons.insert("other:Example.MediaPlayer".to_string(), "asset://exe.png".to_string());
+        assert_eq!(app_icon(&other_app("other:Example.MediaPlayer", "Example.MediaPlayer"), &icons, &catalog).as_deref(), Some("asset://exe.png"));
+    }
+}
+
+#[cfg(test)]
+mod icon_miss_tests {
+    use super::*;
+
+    #[test]
+    fn misses_saved_under_the_old_rules_are_searched_again() {
+        // the old rules also remembered searches that only timed out
+        assert_eq!(icon_miss_day("2026-10-22"), None);
+        assert_eq!(icon_miss_day("2026-10-22/1"), None);
+        assert_eq!(icon_miss_day("2026-10-22/2"), chrono::NaiveDate::from_ymd_opt(2026, 10, 22));
+        assert_eq!(icon_miss_day("junk/2"), None);
+    }
+
+    #[test]
+    fn small_icons_are_told_from_full_size_ones_of_earlier_versions() {
+        assert!(icon_is_small(std::path::Path::new("C:/x/other-a.b.icon.png")));
+        assert!(icon_is_small(std::path::Path::new("C:/x/other-a.b.dark.png")));
+        assert!(icon_is_small(std::path::Path::new("C:/x/other-a.b.svg")));
+        assert!(!icon_is_small(std::path::Path::new("C:/x/other-a.b.png")));
+        assert!(!icon_is_small(std::path::Path::new("C:/x/other-a.b.ico")));
     }
 }

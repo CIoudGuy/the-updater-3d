@@ -415,6 +415,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], install_root: &Path) -> Vec<I
             tagline: Some(if is_lts(&series) { "Long-term support release".into() } else { "3D creation suite".into() }),
             channel: Some(if is_lts(&series) { "lts".into() } else { "stable".into() }),
             read_only: false,
+            store: None,
             icon_remote: None,
             data: SourceData::Blender { series, kind: BlenderKind::Msi, msi_product_code: code },
         });
@@ -466,6 +467,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], install_root: &Path) -> Vec<I
                 channel: Some(channel),
                 missing: false,
                 read_only: false,
+                store: None,
                 icon_remote: None,
                 data: SourceData::Blender { series, kind, msi_product_code: None },
             });
@@ -493,12 +495,54 @@ pub fn scan(uninstall: &[winutil::UninstallEntry], install_root: &Path) -> Vec<I
             channel: Some("stable".into()),
             missing: false,
             read_only: true,
+            store: None,
             icon_remote: None,
             data: SourceData::Blender { series: version::series(&ver), kind: BlenderKind::Steam, msi_product_code: None },
         });
         break;
     }
+    out.extend(store_copies(&super::msstore::packages()));
     out.sort_by(|a, b| version::cmp(&b.version, &a.version));
+    out
+}
+
+/// Publisher id of the Blender Foundation's Microsoft Store packages.
+const STORE_PUBLISHER: &str = "ppwjx1n5r4v9t";
+
+/// Blender from the Microsoft Store: "Blender" and one package per LTS series
+/// ("BlenderFoundation.Blender4.5LTS"). Listed only; the Store updates and removes them.
+pub fn store_copies(pkgs: &[super::msstore::Package]) -> Vec<Installed> {
+    let mut out = Vec::new();
+    for p in pkgs {
+        let Some(rest) = p.name.strip_prefix("BlenderFoundation.Blender") else { continue };
+        if p.publisher_id() != STORE_PUBLISHER || !rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+            continue;
+        }
+        let c = super::msstore::copy_of(p);
+        let series = version::series(&c.version);
+        let id = if rest.is_empty() { "blender:store".to_string() } else { format!("blender:store:{}", rest.to_ascii_lowercase()) };
+        out.push(Installed {
+            id,
+            source: Source::Blender,
+            name: format!("Blender {series} (Microsoft Store)"),
+            code: "Bl".into(),
+            fg: FG.into(),
+            bg: BG.into(),
+            version: c.version,
+            install_dir: p.install_dir.clone(),
+            updated_at: p.installed_at.clone(),
+            exe: c.exe,
+            uninstall: None,
+            size_hint: None,
+            tagline: Some("Updated by the Microsoft Store".into()),
+            channel: Some(if is_lts(&series) { "lts".into() } else { "stable".into() }),
+            missing: false,
+            read_only: true,
+            store: Some(c.store),
+            icon_remote: None,
+            data: SourceData::Blender { series, kind: BlenderKind::Store, msi_product_code: None },
+        });
+    }
     out
 }
 
@@ -522,7 +566,7 @@ fn ours(dir: Option<&PathBuf>) -> bool {
 pub fn latest_kept(inst: &Installed, all: &[Installed], feed: &Feed, keep_patch_versions: bool) -> Option<Latest> {
     let (series, kind) = kind_of(inst);
     match kind {
-        BlenderKind::Steam => None,
+        BlenderKind::Steam | BlenderKind::Store => None,
         BlenderKind::Beta => {
             let b = feed.builds.iter().find(|b| b.series == series)?;
             let installed_hash = inst.version.split_whitespace().last().unwrap_or("");
@@ -907,7 +951,7 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
             downloads: vec![dl],
             steps: vec![Step::Run {
                 exe: PathBuf::from("msiexec.exe"),
-                args: vec!["/i".into(), file.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "/l*v".into(), log.to_string_lossy().into()],
+                args: vec!["/i".into(), file.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "MSIFASTINSTALL=7".into(), "/l*".into(), log.to_string_lossy().into()],
                 cwd: None,
                 ok_codes: vec![0, 3010, 1641],
                 elevated: true,
@@ -965,6 +1009,7 @@ pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
     let (_, kind) = kind_of(inst);
     let steps = match kind {
         BlenderKind::Steam => bail!("Blender from Steam is removed in Steam"),
+        BlenderKind::Store => bail!("Blender from the Microsoft Store is removed in Windows Settings"),
         BlenderKind::Msi => {
             let u = inst.uninstall.clone().ok_or_else(|| anyhow!("{} has no uninstaller registered", inst.name))?;
             vec![Step::Run { exe: PathBuf::from(&u[0]), args: u[1..].to_vec(), cwd: None, ok_codes: vec![0, 1605, 3010], elevated: true, label: format!("Uninstalling {}", inst.name), log: None }]
@@ -1047,6 +1092,7 @@ mod tests {
             channel: None,
             missing: false,
             read_only: false,
+            store: None,
             icon_remote: None,
             data: SourceData::Blender { series: series.into(), kind, msi_product_code: None },
         }
@@ -1058,6 +1104,43 @@ mod tests {
 
     fn build(ver: &str, label: &str, hash: &str) -> Beta {
         Beta { version: ver.into(), series: version::series(ver), build: hash.into(), url: String::new(), size: None, date: None, label: label.into() }
+    }
+
+    #[test]
+    fn microsoft_store_copies_are_listed_and_left_to_the_store() {
+        use crate::sources::msstore::Package;
+        let pkg = |name: &str, family: &str, ver: &str| Package { name: name.into(), family: family.into(), version: ver.into(), install_dir: None, installed_at: Some("2026-10-01T00:00:00+00:00".into()) };
+        let pkgs = vec![
+            pkg("BlenderFoundation.Blender", "BlenderFoundation.Blender_ppwjx1n5r4v9t", "5.0.1.0"),
+            pkg("BlenderFoundation.Blender4.5LTS", "BlenderFoundation.Blender4.5LTS_ppwjx1n5r4v9t", "4.5.3.0"),
+            // Another publisher's package with the same name, and the Foundation's other apps.
+            pkg("BlenderFoundation.Blender", "BlenderFoundation.Blender_abcdefghijklm", "9.9.9.0"),
+            pkg("BlenderFoundation.Blender-Tools", "BlenderFoundation.Blender-Tools_ppwjx1n5r4v9t", "1.0.0.0"),
+            pkg("Microsoft.WindowsCalculator", "Microsoft.WindowsCalculator_8wekyb3d8bbwe", "11.2.0.0"),
+        ];
+        let v = store_copies(&pkgs);
+        let ids: Vec<&str> = v.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["blender:store", "blender:store:4.5lts"]);
+        let lts = &v[1];
+        assert_eq!(lts.name, "Blender 4.5 (Microsoft Store)");
+        assert_eq!(lts.version, "4.5.3");
+        assert_eq!(lts.channel.as_deref(), Some("lts"));
+        assert_eq!(lts.tagline.as_deref(), Some("Updated by the Microsoft Store"));
+        assert!(lts.read_only && lts.uninstall.is_none() && !lts.missing);
+        assert_eq!(lts.store.as_ref().unwrap().page_url(), "ms-windows-store://pdp/?PFN=BlenderFoundation.Blender4.5LTS_ppwjx1n5r4v9t");
+        assert_eq!(lts.updated_at.as_deref(), Some("2026-10-01T00:00:00+00:00"));
+
+        // Never offered an update, never removed by us, and they change nothing for the other copies.
+        let mut feed = Feed::default();
+        feed.series.insert("4.5".into(), vec![rel("4.5.5"), rel("4.5.3")]);
+        feed.series.insert("5.0".into(), vec![rel("5.0.2"), rel("5.0.1")]);
+        feed.newest_series = Some("5.0".into());
+        let msi = inst("4.2", "4.2.9", BlenderKind::Msi);
+        let mut all = v.clone();
+        all.push(msi.clone());
+        assert!(v.iter().all(|i| latest(i, &all, &feed).is_none()));
+        assert_eq!(latest(&msi, &all, &feed).map(|l| l.version), latest(&msi, std::slice::from_ref(&msi), &feed).map(|l| l.version));
+        assert!(plan_uninstall(lts).is_err());
     }
 
     #[test]

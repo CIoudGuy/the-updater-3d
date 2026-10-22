@@ -15,10 +15,10 @@
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
   import { call, on, send } from "../lib/api";
-  import { OTHER_NOTE, store, statusColor } from "../lib/store.svelte";
+  import { store, statusColor } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router } from "../lib/router.svelte";
-  import { askUninstall, installVersion, modalOpen, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
+  import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
@@ -110,13 +110,13 @@
   });
 
   function doInstallPick() {
-    if (app && pick) installVersion(app, pick, pickInfo?.size ?? null);
+    if (app && pick && !app.readOnly) installVersion(app, pick, pickInfo?.size ?? null);
   }
   function openNotes(url: string) {
     import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url)).catch(() => window.open(url, "_blank"));
   }
   function rowAction(v: VersionInfo): { label: string; title: string } | null {
-    if (!app || v.installed) return null;
+    if (!app || v.installed || app.readOnly) return null;
     if (sideBySide) return { label: `Install ${v.version}`, title: `Install ${v.version} next to ${app.version}` };
     if (v.latest && cmpVersion(v.version, app.version) > 0) return null;
     if (cmpVersion(v.version, app.version) < 0) return app.canRollback ? { label: `Roll back to ${v.version}`, title: `Roll back to ${v.version}` } : null;
@@ -140,7 +140,7 @@
       case "unknown":
         return "Latest version unknown";
       default:
-        return job ? jobStatus(job, false) : "Working";
+        return job ? jobStatus(job) : "Working";
     }
   });
   const keepNote = $derived(app?.sizeOnDisk ? `Roll back without downloading again. Uses about ${bytes(app.sizeOnDisk)}.` : "Roll back without downloading again. Uses more disk space.");
@@ -184,6 +184,9 @@
             {:else if app.status === "failed"}
               <Btn variant="primary" hint="R" title="Retry  R" onclick={() => { const f = store.failedJobs.find((x) => x.appId === app.id); if (f) send("retry_job", { jobId: f.id }); }}>Retry</Btn>
             {/if}
+            {#if app.storeUrl}
+              <Btn variant="secondary" title="Updates and removal happen in the Microsoft Store" onclick={() => openStorePage(app.id)}>Open in Microsoft Store <Icon d={I.external} size={14} width={2.5} /></Btn>
+            {/if}
             {#if app.canUninstall}
               <Btn variant="danger" title="Uninstall {app.name}" onclick={() => askUninstall(app.id)}>Uninstall</Btn>
             {/if}
@@ -200,7 +203,7 @@
       <section aria-label="Version history">
         <div class="sec-h">
           <span>Version history</span>
-          <span class="aside">{versions && !versionsError ? `${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
+          <span class="aside">{versions && !versionsError && !app.readOnly ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
         </div>
         {#if !versions}
           {#each [0, 1, 2, 3] as i (i)}
@@ -242,6 +245,7 @@
       </section>
 
       <aside aria-label="Details">
+        {#if !app.readOnly}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>
           <div class="pk">
@@ -249,9 +253,10 @@
             <Btn variant="raised" size="md" disabled={!pick || !!job} title="{pickBack ? 'Roll back to' : 'Install'} {pick}  Ctrl Enter" onclick={doInstallPick}>{pickBack ? "Roll back" : "Install"}</Btn>
           </div>
           <span class="hint">
-            {#if sideBySide && !pickOpts.length}No other version is offered right now.{:else if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else if app.source === "other"}{OTHER_NOTE} Your settings stay as they are.{:else}Your settings stay as they are.{/if}
+            {#if sideBySide && !pickOpts.length}No other version is offered right now.{:else if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
           </span>
         </div>
+        {/if}
 
         <dl>
           <dt>Location</dt>
@@ -271,7 +276,9 @@
           <dd>{app.updatedAt ? dateLong(app.updatedAt) : "Not known"}</dd>
         </dl>
 
-        {#if isBlender && app.channel === "beta"}
+        {#if app.readOnly}
+          <!-- Steam or the Microsoft Store keeps this copy up to date -->
+        {:else if isBlender && app.channel === "beta"}
           <!-- a pre-release copy has no bug-fix releases to keep -->
         {:else if isBlender}
           <div class="keep">

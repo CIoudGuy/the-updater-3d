@@ -21,7 +21,7 @@ use futures_util::StreamExt;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -432,7 +432,7 @@ pub fn match_on_disk(entries: &[winutil::UninstallEntry], idx: &Index, path: &Pa
 
 fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[Installed], mut find: impl FnMut(&winutil::UninstallEntry) -> Matched) -> Report {
     let mut r = Report::default();
-    for e in entries {
+    for e in &fold_bundles(entries) {
         if !is_app(e) {
             r.hidden += 1;
             continue;
@@ -469,11 +469,13 @@ fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[I
             Err(m) => r.misses.push((e.clone(), m)),
         }
     }
-    // One entry per package: the strongest match, then the newest version.
+    // One entry per copy of a package: the strongest match, then the newest version. A copy for
+    // this user and one for all users are two copies; entries of one scope, or with the same
+    // install folder, are the same copy.
     r.matches.sort_by(|a, b| a.pkg.id.cmp(&b.pkg.id).then(b.how.cmp(&a.how)).then_with(|| version::cmp(&b.entry.display_version, &a.entry.display_version)));
     let mut kept: Vec<Match> = Vec::new();
     for m in std::mem::take(&mut r.matches) {
-        if kept.last().is_some_and(|k| k.pkg.id == m.pkg.id) {
+        if kept.iter().rev().take_while(|k| k.pkg.id == m.pkg.id).any(|k| same_copy(&k.entry, &m.entry)) {
             let id = m.pkg.id.clone();
             r.misses.push((m.entry, Miss::Duplicate(id)));
         } else {
@@ -482,6 +484,100 @@ fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[I
     }
     r.matches = kept;
     r
+}
+
+/// Is this entry a WiX Burn bundle? Its uninstaller is the installer kept in the Package Cache.
+fn is_bundle(e: &winutil::UninstallEntry) -> bool {
+    e.bundle || (!e.windows_installer && e.uninstall_string.to_ascii_lowercase().contains("\\package cache\\") && e.uninstall_string.to_ascii_lowercase().contains("/uninstall"))
+}
+
+/// A Burn bundle and the Windows Installer packages it put on the PC (same name and version, same
+/// scope) are one app. The bundle stays the one listed and removed (its uninstaller removes the
+/// whole chain); its packages add what the bundle does not record: the install date, the install
+/// folder and their product codes, which tell where the program is.
+pub(crate) fn fold_bundles(entries: &[winutil::UninstallEntry]) -> Vec<winutil::UninstallEntry> {
+    let same = |a: &winutil::UninstallEntry, b: &winutil::UninstallEntry| a.display_name.trim().eq_ignore_ascii_case(b.display_name.trim()) && a.display_version.trim() == b.display_version.trim() && entry_scope(a) == entry_scope(b);
+    let mut out = entries.to_vec();
+    for i in 0..out.len() {
+        if !is_bundle(&out[i]) || out[i].display_name.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<winutil::UninstallEntry> = entries.iter().filter(|p| !is_bundle(p) && p.windows_installer && is_guid(&p.key) && same(p, &out[i])).cloned().collect();
+        let b = &mut out[i];
+        for p in parts {
+            if b.install_date.trim().is_empty() {
+                b.install_date = p.install_date.clone();
+            }
+            if (b.install_location.trim().is_empty() || super::locate::bad_place(&b.install_location)) && !p.install_location.trim().is_empty() && !super::locate::bad_place(&p.install_location) {
+                b.install_location = p.install_location.clone();
+            }
+            if super::locate::icon_exe(b).is_none() && super::locate::icon_exe(&p).is_some() {
+                b.display_icon = p.display_icon.clone();
+            }
+            if !b.msi_parts.iter().any(|k| k.eq_ignore_ascii_case(&p.key)) {
+                b.msi_parts.push(p.key.clone());
+            }
+        }
+    }
+    out
+}
+
+/// "user" for a copy registered for this user only, else "machine".
+fn entry_scope(e: &winutil::UninstallEntry) -> &'static str {
+    if e.hive == "HKCU" {
+        "user"
+    } else {
+        "machine"
+    }
+}
+
+/// The folder an entry names: its install location, else the folder of its icon program.
+fn entry_folder(e: &winutil::UninstallEntry) -> String {
+    if !e.install_location.trim().is_empty() {
+        return norm_path(&e.install_location);
+    }
+    let icon = e.display_icon.split(',').next().unwrap_or("").trim().trim_matches('"');
+    if icon.to_ascii_lowercase().ends_with(".exe") {
+        if let Some(p) = Path::new(icon).parent() {
+            return norm_path(&p.to_string_lossy());
+        }
+    }
+    String::new()
+}
+
+/// Do two entries of one package describe the same installed copy?
+fn same_copy(a: &winutil::UninstallEntry, b: &winutil::UninstallEntry) -> bool {
+    if entry_scope(a) == entry_scope(b) {
+        return true;
+    }
+    let (fa, fb) = (entry_folder(a), entry_folder(b));
+    !fa.is_empty() && fa == fb
+}
+
+/// A package installed both for this user and for all users is listed twice: the copy for all
+/// users keeps the plain id, the one for this user gets ":user", and both names say which is which.
+fn split_copies(list: &mut [Installed]) {
+    let scope_of = |i: &Installed| match &i.data {
+        SourceData::Other { entry, .. } => entry_scope(entry),
+        _ => "machine",
+    };
+    let both: Vec<String> = list
+        .iter()
+        .filter(|i| scope_of(i) == "user")
+        .map(|i| pkg_of(i).to_string())
+        .filter(|p| list.iter().any(|o| pkg_of(o) == p && scope_of(o) == "machine"))
+        .collect();
+    for i in list.iter_mut() {
+        if !both.iter().any(|p| p == pkg_of(i)) {
+            continue;
+        }
+        if scope_of(i) == "user" {
+            i.id = format!("other:{}:user", pkg_of(i));
+            i.name = format!("{} (this user)", i.name);
+        } else {
+            i.name = format!("{} (all users)", i.name);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- choosing an installer
@@ -597,6 +693,11 @@ pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static 
 /// that replace that copy are considered: same scope, same kind (MSI or not), same architecture,
 /// unless the installer names the installed product or upgrade code.
 pub fn choose<'a>(m: &'a Manifest, w: &Want) -> std::result::Result<&'a Installer, String> {
+    choose_with(m, w, &LEARNED.read())
+}
+
+/// `choose`, with what earlier installs showed about this package (`Learned`).
+pub fn choose_with<'a>(m: &'a Manifest, w: &Want, learned: &Learned) -> std::result::Result<&'a Installer, String> {
     // Why nothing fits: a reason about this copy (scope, kind, architecture) says more than one
     // about installers that can not run here at all.
     let mut why: (u8, &str) = (0, "no installer for Windows");
@@ -615,7 +716,10 @@ pub fn choose<'a>(m: &'a Manifest, w: &Want) -> std::result::Result<&'a Installe
         let k = kind_of(i);
         // A key name such as "7-Zip" is the same for every architecture; a GUID is not.
         let named = uc || (pc && w.product_code.as_deref().is_some_and(is_guid));
-        if let (Some(ws), Some(is)) = (w.scope, i.scope.as_deref()) {
+        // The scope the installer really installs for, when an earlier install showed it differs
+        // from the catalog's.
+        let iscope = learned.real_scope(&m.id, i.scope.as_deref());
+        if let (Some(ws), Some(is)) = (w.scope, iscope) {
             if ws != is && !named {
                 why = (3, if ws == "user" { "only an installer for all users, this copy is per user" } else { "only a per-user installer, this copy is for all users" });
                 continue;
@@ -647,7 +751,7 @@ pub fn choose<'a>(m: &'a Manifest, w: &Want) -> std::result::Result<&'a Installe
             _ if i.arch == "neutral" => 10,
             _ => 0,
         };
-        s += match (w.scope, i.scope.as_deref()) {
+        s += match (w.scope, iscope) {
             (Some(a), Some(b)) if a == b => 10,
             (_, None) => 5,
             (None, Some("machine")) => 6,
@@ -1082,8 +1186,17 @@ pub const POPULAR: &[(&str, &str)] = &[
 ];
 
 impl Feed {
+    /// A package's versions and newest manifest: read for an installed app, or for the starter
+    /// list (an app just installed from Get apps is not in `pkgs` until the next refresh).
     pub fn get(&self, id: &str) -> Option<&PkgFeed> {
-        self.pkgs.get(&id.to_ascii_lowercase())
+        self.pkgs.get(&id.to_ascii_lowercase()).or_else(|| self.popular.iter().map(|(p, _)| p).find(|p| p.pkg.id.eq_ignore_ascii_case(id)))
+    }
+
+    /// The feed with one more package read (an app installed from a search result).
+    pub fn with_package(&self, pf: PkgFeed) -> Feed {
+        let mut f = self.clone();
+        f.pkgs.insert(pf.pkg.id.to_ascii_lowercase(), pf);
+        f
     }
 }
 
@@ -1096,8 +1209,8 @@ pub fn update_urls(installed: &[Installed], feed: &Feed) -> Vec<(String, String)
         .filter_map(|i| {
             let m = feed.get(pkg_of(i))?.latest.as_ref()?;
             let inst = choose(m, &Want::for_installed(i)).ok()?;
-            let offered = expected_version(m, inst);
-            is_newer(&offered, &i.version).then(|| (format!("{}@{}", i.id, offered), inst.url.clone()))
+            let offered = offered_update(i, feed)?;
+            Some((format!("{}@{}", i.id, offered), inst.url.clone()))
         })
         .collect()
 }
@@ -1204,6 +1317,21 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     Ok(feed)
 }
 
+/// One package's versions and newest manifest, read from the catalog (kept on disk after the
+/// first time).
+pub async fn read_package(id: &str) -> Option<PkgFeed> {
+    let path = winget::index_path();
+    let id = id.to_string();
+    let pkg = tokio::task::spawn_blocking(move || Index::open(&path).ok().and_then(|i| i.by_id(&id))).await.ok().flatten()?;
+    match load_pkg(pkg).await {
+        (pkg, Ok((versions, m))) => Some(PkgFeed { pkg, versions, latest: Some(m) }),
+        (pkg, Err(e)) => {
+            log::warn!("winget {}: {e:#}", pkg.id);
+            None
+        }
+    }
+}
+
 /// What the icon search needs about a package: the manifest's icon and its web pages.
 #[derive(Clone, Debug)]
 pub struct IconSource {
@@ -1262,16 +1390,6 @@ fn program_file(e: &winutil::UninstallEntry) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-fn install_dir(e: &winutil::UninstallEntry) -> Option<PathBuf> {
-    if !e.install_location.trim().is_empty() {
-        let d = winutil::pathbuf(&e.install_location);
-        if d.is_dir() && d.components().count() >= 3 {
-            return Some(d);
-        }
-    }
-    program_file(e).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))).and_then(|p| p.parent().map(Path::to_path_buf)).filter(|d| d.components().count() >= 3)
-}
-
 /// The command that removes the app without questions: the one the entry gives, Windows
 /// Installer's for MSI products, or the uninstaller with the silent switch its type takes.
 pub fn uninstall_cmd(e: &winutil::UninstallEntry, kind: Option<&str>) -> Option<Vec<String>> {
@@ -1323,7 +1441,40 @@ pub fn uninstall_cmd(e: &winutil::UninstallEntry, kind: Option<&str>) -> Option<
     None
 }
 
+/// When the app was installed or last updated: the date the entry records, else when its entry
+/// was last written (Burn bundles and some installers record no date).
+fn entry_date(e: &winutil::UninstallEntry) -> Option<String> {
+    winutil::install_date_iso(e.install_date.trim()).or_else(|| e.written.map(|w| chrono::DateTime::<chrono::Utc>::from(w).format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+}
+
+/// The program file and install folder of a matched entry (see `locate`). An `.ico` the entry
+/// names still serves as the icon when no program file is found.
+fn find_program(e: &winutil::UninstallEntry, hints: &std::cell::OnceCell<super::locate::Hints>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let mut msi = e.msi_parts.clone();
+    if e.windows_installer && is_guid(&e.key) {
+        msi.insert(0, e.key.clone());
+    }
+    // The Start menu is read only when an app does not name its program.
+    let (exe, dir) = if super::locate::icon_exe(e).is_some() { super::locate::locate(e, &msi, &super::locate::Hints::default()) } else { super::locate::locate(e, &msi, hints.get_or_init(read_hints)) };
+    (exe.or_else(|| program_file(e).filter(|p| !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))), dir)
+}
+
+#[cfg(not(test))]
+fn read_hints() -> super::locate::Hints {
+    super::locate::Hints::read()
+}
+
+/// Tests never read this PC's Start menu.
+#[cfg(test)]
+fn read_hints() -> super::locate::Hints {
+    super::locate::Hints::default()
+}
+
 fn make(m: &Match, feed: Option<&Feed>) -> Option<Installed> {
+    make_with(m, feed, &std::cell::OnceCell::new())
+}
+
+fn make_with(m: &Match, feed: Option<&Feed>, hints: &std::cell::OnceCell<super::locate::Hints>) -> Option<Installed> {
     let e = &m.entry;
     let pf = feed.and_then(|f| f.get(&m.pkg.id));
     let man = pf.and_then(|p| p.latest.as_ref());
@@ -1335,7 +1486,7 @@ fn make(m: &Match, feed: Option<&Feed>) -> Option<Installed> {
     };
     let name = man.map(|x| x.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| m.pkg.name.clone());
     let (code, fg, bg) = mark_for(&name, &m.pkg.id);
-    let exe = program_file(e);
+    let (exe, dir) = find_program(e, hints);
     Some(Installed {
         id: format!("other:{}", m.pkg.id),
         source: Source::Other,
@@ -1344,15 +1495,16 @@ fn make(m: &Match, feed: Option<&Feed>) -> Option<Installed> {
         fg,
         bg,
         version: e.display_version.trim().to_string(),
-        install_dir: install_dir(e),
+        install_dir: dir,
         exe,
         uninstall: uninstall_cmd(e, kind.as_deref()),
-        updated_at: winutil::install_date_iso(&e.install_date),
+        updated_at: entry_date(e),
         size_hint: Some(e.estimated_size_kb * 1024).filter(|s| *s > 0),
         tagline: man.and_then(|x| x.description.clone()).or_else(|| Some(e.publisher.clone()).filter(|p| !p.is_empty())),
         channel: None,
         missing: false,
         read_only: false,
+        store: None,
         icon_remote: None,
         data: SourceData::Other { pkg: m.pkg.id.clone(), how: m.how, entry: Box::new(e.clone()), upgrade_code: m.upgrade_code.clone() },
     })
@@ -1372,18 +1524,248 @@ pub fn scan(entries: &[winutil::UninstallEntry], handled: &[Installed], feed: Op
         }
     };
     let r = match_on_disk(entries, &idx, &path, handled);
-    r.matches.iter().filter_map(|m| make(m, feed)).collect()
+    installed_copies(&r.matches, feed)
+}
+
+/// The installed apps for these matches, with a distinct id for each copy.
+fn installed_copies(matches: &[Match], feed: Option<&Feed>) -> Vec<Installed> {
+    installed_copies_with(matches, feed, &std::cell::OnceCell::new())
+}
+
+/// `installed_copies`, with the shortcuts and App Paths given (read once, when an app needs them).
+fn installed_copies_with(matches: &[Match], feed: Option<&Feed>, hints: &std::cell::OnceCell<super::locate::Hints>) -> Vec<Installed> {
+    let mut v: Vec<Installed> = matches.iter().filter_map(|m| make_with(m, feed, hints)).collect();
+    split_copies(&mut v);
+    v
 }
 
 pub fn latest(inst: &Installed, feed: &Feed) -> Option<Latest> {
     let m = feed.get(pkg_of(inst))?.latest.as_ref()?;
+    choose(m, &Want::for_installed(inst)).ok()?;
+    match offered_update(inst, feed) {
+        Some(v) => Some(Latest { version: v, size: None, note: None }),
+        None => Some(Latest { version: inst.version.clone(), size: None, note: None }),
+    }
+}
+
+/// The version an installed app is offered, if any: what the newest package version writes to
+/// the uninstall list, when that is newer than what the app shows and the app is not already at
+/// that package version (the catalog's range of uninstall list versions for it, or what an
+/// earlier install of it showed). Without that an app that writes "6.7.0" for package 6.7.0.3
+/// would be offered 6.7.0.3 again after every update.
+pub fn offered_update(inst: &Installed, feed: &Feed) -> Option<String> {
+    let pf = feed.get(pkg_of(inst))?;
+    let m = pf.latest.as_ref()?;
     let i = choose(m, &Want::for_installed(inst)).ok()?;
     let offered = expected_version(m, i);
-    if is_newer(&offered, &inst.version) {
-        Some(Latest { version: offered, size: None, note: None })
-    } else {
-        Some(Latest { version: inst.version.clone(), size: None, note: None })
+    let range = arp_range(pf, &m.version);
+    let learned = learned_shows(&pf.pkg.id, &m.version);
+    (is_newer(&offered, &inst.version) && !at_version(&inst.version, &offered, range.as_ref(), learned.as_deref())).then_some(offered)
+}
+
+/// The uninstall list versions the catalog lists for a package version (winget's ARP range).
+pub fn arp_range(pf: &PkgFeed, ver: &str) -> Option<(String, String)> {
+    if let Some(r) = pf.versions.iter().find(|r| r.version == ver) {
+        if let (Some(lo), Some(hi)) = (&r.arp_min, &r.arp_max) {
+            return Some((lo.clone(), hi.clone()));
+        }
     }
+    // The index row gives the range of its newest version.
+    if pf.pkg.latest == ver {
+        return Some((pf.pkg.arp_min.clone()?, pf.pkg.arp_max.clone()?));
+    }
+    None
+}
+
+/// Does an app showing `shown` in the uninstall list have the package version that writes
+/// `expected` (with the catalog's `range` for it, and what an earlier install of it showed)?
+pub fn at_version(shown: &str, expected: &str, range: Option<&(String, String)>, learned: Option<&str>) -> bool {
+    !version::newer(expected, shown) || range.is_some_and(|(lo, hi)| !version::newer(lo, shown) && !version::newer(shown, hi)) || learned.is_some_and(|l| version::cmp(l, shown).is_eq())
+}
+
+/// "6.7.0" for "6.7.0.3": the same version with its last parts left off, as some installers
+/// write it to the uninstall list.
+pub fn truncated(shown: &str, expected: &str) -> bool {
+    let (d, e) = (version::parts(shown), version::parts(expected));
+    let plain = shown.trim().chars().next().is_some_and(|c| c.is_ascii_digit());
+    plain && !d.is_empty() && d.len() < e.len() && e[..d.len()] == d[..]
+}
+
+// ---------------------------------------------------------------- what installs showed
+
+/// What installs showed that the catalog does not say, kept on disk: the uninstall list version a
+/// package version really writes, and the scope an installer really installs for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Learned {
+    /// "<package id, lower case>@<package version>" -> version in the uninstall list
+    #[serde(default)]
+    pub versions: std::collections::BTreeMap<String, String>,
+    /// package id, lower case -> (scope the catalog gives, scope it really installs for)
+    #[serde(default)]
+    pub scopes: std::collections::BTreeMap<String, (String, String)>,
+}
+
+impl Learned {
+    fn key(pkg: &str, ver: &str) -> String {
+        format!("{}@{}", pkg.to_ascii_lowercase(), ver)
+    }
+
+    pub fn shows(&self, pkg: &str, ver: &str) -> Option<&str> {
+        self.versions.get(&Self::key(pkg, ver)).map(String::as_str)
+    }
+
+    pub fn set_shows(&mut self, pkg: &str, ver: &str, shown: &str) {
+        self.versions.insert(Self::key(pkg, ver), shown.to_string());
+    }
+
+    /// The scope an installer of `pkg` declared as `declared` really installs for.
+    pub fn real_scope<'a>(&'a self, pkg: &str, declared: Option<&'a str>) -> Option<&'a str> {
+        match (self.scopes.get(&pkg.to_ascii_lowercase()), declared) {
+            (Some((from, to)), Some(d)) if from == d => Some(to.as_str()),
+            _ => declared,
+        }
+    }
+
+    pub fn set_scope(&mut self, pkg: &str, declared: &str, real: &str) {
+        self.scopes.insert(pkg.to_ascii_lowercase(), (declared.to_string(), real.to_string()));
+    }
+}
+
+static LEARNED: Lazy<parking_lot::RwLock<Learned>> = Lazy::new(|| parking_lot::RwLock::new(load_learned()));
+
+#[cfg(not(test))]
+fn learned_file() -> PathBuf {
+    paths::data_dir().join("other-learned.json")
+}
+
+#[cfg(not(test))]
+fn load_learned() -> Learned {
+    std::fs::read(learned_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+// Tests never read or write the app's own file.
+#[cfg(test)]
+fn load_learned() -> Learned {
+    Learned::default()
+}
+
+/// Remember what an install showed, on disk.
+pub fn learn(f: impl FnOnce(&mut Learned)) {
+    let mut l = LEARNED.write();
+    f(&mut l);
+    #[cfg(not(test))]
+    if let Ok(b) = serde_json::to_vec_pretty(&*l) {
+        let tmp = learned_file().with_extension("json.tmp");
+        if std::fs::write(&tmp, b).is_ok() {
+            let _ = std::fs::rename(&tmp, learned_file());
+        }
+    }
+}
+
+pub fn learned_shows(pkg: &str, ver: &str) -> Option<String> {
+    LEARNED.read().shows(pkg, ver).map(String::from)
+}
+
+// ---------------------------------------------------------------- checking an install
+
+/// One copy of a package in the uninstall list, whatever the catalog offers for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PkgCopy {
+    pub id: String,
+    /// user or machine
+    pub scope: &'static str,
+    pub version: String,
+    /// Its uninstall entry was written after the install began.
+    pub rewritten: bool,
+}
+
+/// The copies of a package in the uninstall list, matched like a rescan does but without leaving
+/// out the ones the catalog can not update (an install can move an app to another scope).
+pub fn package_copies(pkg: &str, entries: &[winutil::UninstallEntry], handled: &[Installed], since: std::time::SystemTime) -> Vec<PkgCopy> {
+    let path = winget::index_path();
+    let Ok(idx) = Index::open(&path) else { return vec![] };
+    let r = match_on_disk(entries, &idx, &path, handled);
+    let ms: Vec<Match> = r.matches.into_iter().filter(|m| m.pkg.id.eq_ignore_ascii_case(pkg)).collect();
+    copies_of(&ms, since)
+}
+
+fn copies_of(ms: &[Match], since: std::time::SystemTime) -> Vec<PkgCopy> {
+    installed_copies(ms, None)
+        .into_iter()
+        .filter_map(|i| match &i.data {
+            SourceData::Other { entry, .. } => Some(PkgCopy { id: i.id.clone(), scope: entry_scope(entry), version: i.version.clone(), rewritten: entry.written.is_some_and(|w| w >= since) }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What an install of package version `pkg_version` was expected to leave.
+#[derive(Clone, Debug, Default)]
+pub struct Expect {
+    /// The copy the install was for ("other:<package>" or "other:<package>:user")
+    pub app_id: String,
+    pub pkg: String,
+    pub pkg_version: String,
+    /// What the package version writes to the uninstall list (`expected_version`)
+    pub expected: String,
+    pub range: Option<(String, String)>,
+    pub learned: Option<String>,
+    /// The scope the catalog gives the installer that ran
+    pub declared_scope: Option<String>,
+    /// The copy's version before the install (None for a new install)
+    pub before: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Check {
+    /// Installed. `shows`: the uninstall list version this package version writes, to remember;
+    /// `scope`: (catalog scope, real scope) when the installer installed for another scope.
+    Done { shows: Option<String>, scope: Option<(String, String)> },
+    Missing,
+    Shows(String),
+}
+
+/// Did the install leave what was expected? The copy is found by its id, or, when it is gone, as
+/// the one copy whose entry the install wrote (an installer that moved the app to another
+/// scope). A copy that shows the expected version with its last parts left off ("6.7.0" for
+/// "6.7.0.3") counts when the install wrote its entry or changed its version.
+pub fn check_install(x: &Expect, copies: &[PkgCopy]) -> Check {
+    let found = copies.iter().find(|c| c.id == x.app_id).or_else(|| {
+        let w: Vec<&PkgCopy> = copies.iter().filter(|c| c.rewritten).collect();
+        (w.len() == 1).then(|| w[0])
+    });
+    let Some(c) = found else { return Check::Missing };
+    let at = at_version(&c.version, &x.expected, x.range.as_ref(), x.learned.as_deref());
+    let short = !at && truncated(&c.version, &x.expected) && (c.rewritten || x.before.as_deref().is_none_or(|b| b != c.version));
+    if !at && !short {
+        return Check::Shows(c.version.clone());
+    }
+    let scope = x.declared_scope.as_deref().filter(|d| *d != c.scope).map(|d| (d.to_string(), c.scope.to_string()));
+    Check::Done { shows: short.then(|| c.version.clone()), scope }
+}
+
+/// Remember what a finished install showed (see `Check::Done`).
+pub fn learn_from(x: &Expect, check: &Check) {
+    if let Check::Done { shows, scope } = check {
+        if shows.is_none() && scope.is_none() {
+            return;
+        }
+        learn(|l| {
+            if let Some(v) = shows {
+                l.set_shows(&x.pkg, &x.pkg_version, v);
+            }
+            if let Some((from, to)) = scope {
+                l.set_scope(&x.pkg, from, to);
+            }
+        });
+    }
+}
+
+/// The scope the catalog gives the installer an update of this copy (or a new install) uses.
+pub fn declared_scope(feed: Option<&Feed>, pkg: &str, pkg_version: &str, current: Option<&Installed>) -> Option<String> {
+    let m = feed?.get(pkg)?.latest.as_ref().filter(|m| m.version == pkg_version)?;
+    let w = current.map(Want::for_installed).unwrap_or_else(Want::fresh);
+    choose_with(m, &w, &Learned::default()).ok()?.scope.clone()
 }
 
 // ---------------------------------------------------------------- Get apps
@@ -1422,10 +1804,13 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             let line = super::browse::tagline_for(m.and_then(|m| m.description.as_deref()), super::browse::popular_line(&pf.pkg.id), m.map(|m| m.publisher.as_str()).or(i.tagline.as_deref()));
             let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), line, true);
             e.description = m.and_then(|m| m.long_description.clone());
-            e.name = i.name.clone();
+            e.name = i.name.trim_end_matches(" (all users)").trim_end_matches(" (this user)").to_string();
             Some(e)
         })
         .collect();
+    // A package installed for this user and for all users has one page.
+    let mut seen = HashSet::new();
+    out.retain(|e| seen.insert(e.id.to_ascii_lowercase()));
     for (pf, line) in &feed.popular {
         let id = format!("other:{}", pf.pkg.id);
         if out.iter().any(|e| e.id.eq_ignore_ascii_case(&id)) || installed.iter().any(|i| pkg_of(i).eq_ignore_ascii_case(&pf.pkg.id)) {
@@ -1441,25 +1826,6 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
         out.push(e);
     }
     out
-}
-
-/// Packages of the catalog for a search in Get apps.
-pub fn search(q: &str, installed: &[Installed], limit: usize) -> Vec<CatalogEntry> {
-    if q.trim().chars().count() < 2 {
-        return vec![];
-    }
-    let Ok(idx) = Index::open(&winget::index_path()) else { return vec![] };
-    idx.search(q, limit * 2)
-        .into_iter()
-        .filter(|p| !handled_package(&p.id) && excluded_package(&p.id).is_none())
-        .take(limit)
-        .map(|p| {
-            let have = installed.iter().any(|i| pkg_of(i).eq_ignore_ascii_case(&p.id));
-            let latest = p.latest.clone();
-            let tag = p.id.clone();
-            entry(&p, latest, Some(tag), have)
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------- versions and change lists
@@ -1646,6 +2012,9 @@ fn iso_date(d: &Option<String>) -> Option<String> {
     (d.len() == 10 && d.as_bytes()[4] == b'-').then(|| format!("{d}T00:00:00Z")).or_else(|| Some(d.to_string()))
 }
 
+/// How long one version's change list may take before the list shows without it.
+const NOTES_WAIT: Duration = Duration::from_secs(8);
+
 /// Version list with change lists for a package. `installed` is the version in the uninstall list.
 async fn version_infos(list: &[VerRef], installed: Option<&str>, want: &Want, latest_manifest: Option<&Manifest>) -> Vec<VersionInfo> {
     let top: Vec<VerRef> = list.iter().take(15).cloned().collect();
@@ -1665,12 +2034,26 @@ async fn version_infos(list: &[VerRef], installed: Option<&str>, want: &Want, la
     // A notes page that is not about one version (no version or GitHub tag in its address).
     let page = manifests.iter().flatten().filter_map(|m| m.release_notes_url.as_ref().map(|u| (m, u))).find(|(m, u)| github_tag(u).is_none() && !notes::names_version(u, &m.version) && !u.contains(&m.version.replace('.', "_"))).map(|(_, u)| u.clone());
     let gh = Gh { repo: manifests.iter().flatten().find_map(repo_of), rels: tokio::sync::OnceCell::new(), page };
+    // Change lists of all versions at once, each with a time limit: a slow notes site must not
+    // keep the version list from showing (one page per version, one after another, could take
+    // many minutes). A version whose notes are too slow keeps its link to the full notes.
+    let gh = std::sync::Arc::new(gh);
+    let fetched: Vec<(Vec<String>, Option<String>)> = futures_util::stream::iter(manifests.clone())
+        .map(|m| {
+            let gh = gh.clone();
+            async move {
+                match m {
+                    Some(m) => tokio::time::timeout(NOTES_WAIT, notes_for(&m, &gh)).await.unwrap_or_else(|_| (vec![], m.release_notes_url.clone())),
+                    None => (vec![], None),
+                }
+            }
+        })
+        .buffered(6)
+        .collect()
+        .await;
     let mut out = Vec::new();
-    for (k, (r, m)) in top.iter().zip(manifests.iter()).enumerate() {
-        let (mut lines, url) = match m {
-            Some(m) => notes_for(m, &gh).await,
-            None => (vec![], None),
-        };
+    for (k, ((r, m), (lines, url))) in top.iter().zip(manifests.iter()).zip(fetched).enumerate() {
+        let mut lines = lines;
         if lines.is_empty() {
             lines.push(if url.is_some() { SEE_NOTES.to_string() } else { NO_NOTES.to_string() });
         }
@@ -1768,7 +2151,7 @@ fn silent_args(i: &Installer, kind: &str, file: &Path, log: &Path, update: bool)
     }
     match kind {
         "msi" | "wix" => {
-            let mut a = vec!["/i".into(), file.to_string_lossy().to_string(), "/qn".into(), "/norestart".into(), "/l*v".into(), log.to_string_lossy().to_string()];
+            let mut a = vec!["/i".into(), file.to_string_lossy().to_string(), "/qn".into(), "/norestart".into(), "MSIFASTINSTALL=7".into(), "/l*".into(), log.to_string_lossy().to_string()];
             a.extend(extra);
             (PathBuf::from("msiexec.exe"), a)
         }
@@ -1781,13 +2164,17 @@ fn silent_args(i: &Installer, kind: &str, file: &Path, log: &Path, update: bool)
                 (None, _) => args_of(&i.silent_progress),
             };
             a.extend(extra);
+            // Inno Setup writes what it does to a log, which the job reads for its detail line.
+            if kind == "inno" && !a.iter().any(|x| x.to_ascii_lowercase().starts_with("/log")) {
+                a.push(format!("/LOG={}", log.display()));
+            }
             (file.to_path_buf(), a)
         }
     }
 }
 
 /// A folder the job may watch for running programs: a real app folder, not a shared root.
-fn own_dir(d: &Path) -> bool {
+pub(crate) fn own_dir(d: &Path) -> bool {
     let me = norm_path(&d.to_string_lossy());
     d.components().count() >= 3 && ![paths::program_files(), paths::program_files_x86(), paths::local_app_data(), paths::local_app_data().join("Programs"), paths::app_data()].iter().any(|r| norm_path(&r.to_string_lossy()) == me)
 }
@@ -1796,9 +2183,13 @@ fn own_dir(d: &Path) -> bool {
 pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: Option<&Installed>, size: Option<u64>) -> Result<Plan> {
     let w = current.map(Want::for_installed).unwrap_or_else(Want::fresh);
     let name = current.map(|c| c.name.clone()).unwrap_or_else(|| if m.name.is_empty() { p.name.clone() } else { m.name.clone() });
-    let base = paths::downloads().join("other").join(safe_name(&p.id));
+    // The copy this plan is for: "other:<package>", or "other:<package>:user" next to a copy for
+    // all users. Each copy downloads and logs into its own place.
+    let app_id = current.map(|c| c.id.clone()).unwrap_or_else(|| format!("other:{}", p.id));
+    let tail = safe_name(app_id.strip_prefix("other:").unwrap_or(&p.id));
+    let base = paths::downloads().join("other").join(&tail);
     let dest = base.join(file_name(i, &p.id, &m.version));
-    let log = paths::logs().join(format!("other-{}-{}.log", safe_name(&p.id), safe_name(&m.version)));
+    let log = paths::logs().join(format!("other-{}-{}.log", tail, safe_name(&m.version)));
     let update = current.is_some() && kind != JobKind::Install;
     let admin = needs_admin(i, &w);
     let label = format!("Installing {} {}", name, m.version);
@@ -1829,11 +2220,11 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         ok_codes.extend([3010, 1641]);
     }
     let is_msi = msi_family(&run_kind);
-    if is_msi {
+    let logged = is_msi || args.contains(&format!("/LOG={}", log.display()));
+    if logged {
         cleanup.push(log.clone());
     }
-    let run = |elevated: bool| Step::Run { exe: exe.clone(), args: args.clone(), cwd: None, ok_codes: ok_codes.clone(), elevated, label: label.clone(), log: is_msi.then(|| log.clone()) };
-    let app_id = format!("other:{}", p.id);
+    let run = |elevated: bool| Step::Run { exe: exe.clone(), args: args.clone(), cwd: None, ok_codes: ok_codes.clone(), elevated, label: label.clone(), log: logged.then(|| log.clone()) };
     let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
     let block_names: Vec<String> = if block_dirs.is_empty() { current.and_then(|c| c.exe.as_ref()).and_then(|e| e.file_name()).map(|n| n.to_string_lossy().to_ascii_lowercase()).filter(|n| n.ends_with(".exe")).into_iter().collect() } else { vec![] };
     let make = |steps: Vec<Step>| Plan {
@@ -1879,7 +2270,8 @@ async fn remote_size(url: &str) -> Option<u64> {
 
 /// `id` is "other:<package id>"; `ver` a package version, or None for the newest.
 pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: Option<&Installed>, feed: Option<&Feed>) -> Result<Plan> {
-    let pkg_id = id.strip_prefix("other:").unwrap_or(id);
+    // An installed copy names its package (its id may carry ":user").
+    let pkg_id = current.map(pkg_of).filter(|p| !p.is_empty()).unwrap_or_else(|| id.strip_prefix("other:").unwrap_or(id));
     let (p, list, latest) = pkg_and_versions(pkg_id, feed).await?;
     let label = current.map(|c| c.name.clone()).unwrap_or_else(|| p.name.clone());
     let w = current.map(Want::for_installed).unwrap_or_else(Want::fresh);
@@ -1959,3 +2351,7 @@ pub fn install_seconds(mb: f64) -> f64 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod probe;
+#[cfg(test)]
+mod locate_tests;

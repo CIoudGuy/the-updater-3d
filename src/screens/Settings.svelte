@@ -42,10 +42,13 @@
   // "general" was the old combined page; its settings now live under Background
   const active = $derived.by((): SettingsSection => {
     const want = section === "general" ? "background" : section;
+    if (want === "account" && !store.adobeOn) return "sources";
     return want && (SETTINGS_SECTIONS as readonly string[]).includes(want) ? (want as SettingsSection) : "sources";
   });
-  const idx = $derived(NAV.findIndex((n) => n.id === active));
-  const cur = $derived(NAV[idx] ?? NAV[0]);
+  // Account is all Creative Cloud: only shown while Adobe apps are on (Sources keeps the switch).
+  const nav = $derived(NAV.filter((n) => n.id !== "account" || store.adobeOn));
+  const idx = $derived(nav.findIndex((n) => n.id === active));
+  const cur = $derived(nav[idx] ?? nav[0]);
 
   let dir = $state(1);
   let prevIdx = -1;
@@ -93,7 +96,7 @@
   function navKey(e: KeyboardEvent) {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
-    const n = NAV[Math.max(0, Math.min(NAV.length - 1, idx + (e.key === "ArrowDown" ? 1 : -1)))];
+    const n = nav[Math.max(0, Math.min(nav.length - 1, idx + (e.key === "ArrowDown" ? 1 : -1)))];
     pick(n.id);
     navBtns[n.id]?.focus();
   }
@@ -184,7 +187,7 @@
     <h1 class="h1">Settings</h1>
     <div class="links" role="presentation" onkeydown={navKey}>
       <span class="marker" class:anim bind:this={marker} style="width:{MARKER_BASE}px"><Paint kind="swatch" fill="#202020" /></span>
-      {#each NAV as n (n.id)}
+      {#each nav as n (n.id)}
         <a
           bind:this={navBtns[n.id]}
           href="#/settings/{n.id}"
@@ -208,7 +211,7 @@
         </header>
 
         {#if active === "sources"}
-          <SRow label="Adobe apps" desc="Read from Creative Cloud. Needs Creative Cloud installed and signed in.">
+          <SRow label="Adobe apps" desc={s.sources.adobe ? "Read from Creative Cloud. Needs Creative Cloud installed and signed in." : "Off. Turn on to keep Adobe apps up to date and see Creative Cloud's services."}>
             {#snippet control()}<Toggle checked={s.sources.adobe} label="Adobe apps" onchange={(v) => store.patchSettings({ sources: { ...s.sources, adobe: v } })} />{/snippet}
           </SRow>
           <SRow label="Craft apps" desc="From ArtCraft, including the ArtCraft Launcher.">
@@ -324,10 +327,12 @@
             {/snippet}
           </SRow>
         {:else if active === "storage"}
-          <SRow label="Adobe install location" desc={s.adobeInstallDir ? s.adobeInstallDir + freeOf(s.adobeInstallDir) : "Not set"}>
-            {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("adobeInstallDir")}>Change</Btn>{/snippet}
-          </SRow>
-          <SRow label="Download cache" desc="Installers already used. Safe to remove.">
+          {#if s.sources.adobe}
+            <SRow label="Adobe install location" desc={s.adobeInstallDir ? s.adobeInstallDir + freeOf(s.adobeInstallDir) : "Not set"}>
+              {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("adobeInstallDir")}>Change</Btn>{/snippet}
+            </SRow>
+          {/if}
+          <SRow label="Download cache" desc="Installers already used. Safe to remove. Cleared by itself after 14 days or above 5 GB, oldest first.">
             {#snippet control()}
               <span class="big">{bytes(st.cacheSize) || "0 B"}</span>
               <Btn variant="raised" size="md" title="Clear download cache" disabled={st.cacheSize === 0} onclick={clearCache}>Clear cache</Btn>

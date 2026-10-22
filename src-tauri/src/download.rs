@@ -293,6 +293,112 @@ pub fn sweep(root: &Path, keep: &std::collections::HashSet<PathBuf>) -> u64 {
     freed
 }
 
+/// Installers in the download cache that nothing needs are deleted after this long.
+pub const CACHE_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 3600);
+/// Above this the oldest installers go, until the rest fits.
+pub const CACHE_CAP: u64 = 5 * 1024 * 1024 * 1024;
+
+/// A file in the download cache, for `cache_victims`.
+#[derive(Clone, Debug)]
+pub struct CacheFile {
+    pub path: PathBuf,
+    pub size: u64,
+    /// Since it was last written.
+    pub age: Duration,
+    /// A job that is not finished downloads to it or will run it: never deleted.
+    pub in_use: bool,
+    /// A finished installer kept for "Keep previous version" (roll back without downloading
+    /// again): no age limit, and it goes last when the cache is too big.
+    pub keep: bool,
+    /// The update that used it is done (an installer of this app's own earlier update).
+    pub done: bool,
+}
+
+/// What to delete from the download cache: installers whose update is done, then those older
+/// than `max_age`, unless kept for rolling back, then the oldest (kept ones last) until the rest
+/// fits in `cap`. Never a file a job still needs.
+pub fn cache_victims(files: &[CacheFile], max_age: Duration, cap: u64) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut left: Vec<&CacheFile> = Vec::new();
+    for f in files {
+        if !f.in_use && !f.keep && (f.done || f.age > max_age) {
+            out.push(f.path.clone());
+        } else {
+            left.push(f);
+        }
+    }
+    let mut total: u64 = left.iter().map(|f| f.size).sum();
+    let mut can_go: Vec<&CacheFile> = left.into_iter().filter(|f| !f.in_use).collect();
+    can_go.sort_by(|a, b| a.keep.cmp(&b.keep).then(b.age.cmp(&a.age)));
+    for f in can_go {
+        if total <= cap {
+            break;
+        }
+        total -= f.size;
+        out.push(f.path.clone());
+    }
+    out
+}
+
+/// Apply `cache_victims` to the download cache in `root`. `in_use`: destinations of jobs that
+/// are not finished. `keep_previous`: the "Keep previous version" setting. Partial downloads are
+/// left to `sweep`. Returns the bytes freed.
+pub fn trim_cache(root: &Path, in_use: &std::collections::HashSet<PathBuf>, keep_previous: bool) -> u64 {
+    let low_path = |p: &Path| p.to_string_lossy().to_ascii_lowercase().replace('/', "\\");
+    // A job's file, and what it unpacked next to it (Adobe's update tool).
+    let busy: Vec<String> = in_use.iter().map(|p| low_path(p)).collect();
+    let busy_dirs: Vec<String> = in_use.iter().filter_map(|p| p.parent()).filter(|d| *d != root).map(|d| format!("{}\\", low_path(d))).collect();
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    let now = std::time::SystemTime::now();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let low = p.to_string_lossy().to_ascii_lowercase();
+            if [".part", ".dl.json", ".dl.json.tmp"].iter().any(|x| low.ends_with(x)) {
+                continue;
+            }
+            let Ok(m) = e.metadata() else { continue };
+            let age = m.modified().ok().and_then(|t| now.duration_since(t).ok()).unwrap_or_default();
+            // The folder right under the cache: "self" holds this app's own updates, which are
+            // done once this app runs again; installers of the other apps may be kept to roll back.
+            let top = p.strip_prefix(root).ok().and_then(|r| r.components().next()).map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let finished = load_meta(&sidecar(&p)).is_some_and(|m| m.complete);
+            files.push(CacheFile {
+                in_use: busy.contains(&low_path(&p)) || busy_dirs.iter().any(|d| low_path(&p).starts_with(d.as_str())),
+                keep: keep_previous && finished && ["other", "tools", "craft", "blender"].contains(&top.as_str()),
+                done: top == "self" && age > Duration::from_secs(600),
+                path: p,
+                size: m.len(),
+                age,
+            });
+        }
+    }
+    let mut freed = 0;
+    for p in cache_victims(&files, CACHE_MAX_AGE, CACHE_CAP) {
+        let len = files.iter().find(|f| f.path == p).map(|f| f.size).unwrap_or(0);
+        remove(&p);
+        if !p.exists() {
+            freed += len;
+            // Folders left empty go too (never the cache folder itself).
+            let mut d = p.parent();
+            while let Some(dir) = d.filter(|d| *d != root && d.starts_with(root)) {
+                if std::fs::remove_dir(dir).is_err() {
+                    break;
+                }
+                d = dir.parent();
+            }
+        }
+    }
+    freed
+}
+
 fn hash_file<H: Digest>(p: &std::path::Path, mut h: H) -> Result<String> {
     let mut f = std::fs::File::open(p)?;
     let mut buf = vec![0u8; 1 << 20];

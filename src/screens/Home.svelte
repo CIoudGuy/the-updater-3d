@@ -17,10 +17,15 @@
   import { checkNow, repairApp, togglePauseAll, updateAll, updateOne, isPaused, updateSelf } from "../lib/actions";
   import { bytes, checkedLine, clock, countOf, duration, inUnit, nameList, speedParts, splitVersion, unitFor } from "../lib/format";
   import { allSourcesOff, failedCount, failedSentence, isEmptyLibrary } from "../lib/view";
-  import { NO_STOP_TIP, canPause, jobDetail, jobStatus, pauseTip, pct } from "../lib/jobs";
+  import { NO_STOP_TIP, canPause, groupQueue, jobDetail, jobStatus, pauseTip, pct, queueSections, readyLine } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
+  import { batchCounts } from "../lib/batch";
   import type { ServiceInfo } from "../lib/types";
   import { jobHref } from "../lib/links";
+
+  // Open jobs in Queue order: installing, downloaded and waiting their turn, downloading, not started.
+  const qGroups = $derived(groupQueue(store.openJobs));
+  const qSections = $derived(queueSections(qGroups));
 
   type HState = "first" | "ccdown" | "signedout" | "offline" | "updating" | "failed" | "ready" | "repair" | "empty" | "current";
   const hs = $derived.by((): HState => {
@@ -70,7 +75,8 @@
       case "updating": {
         const batch = store.batchJobs;
         const verb = batch.every((j) => j.kind === "update") ? "Updating " : batch.every((j) => j.kind === "install") ? "Installing " : "Working on ";
-        return { pre: verb, word: countOf(batch.length, "app"), post: "", color: "#7C93D6", op: 0.42 };
+        // Only the apps still going: finished ones show in the line below ("7 of 9 done").
+        return { pre: verb, word: countOf(batchCounts(batch).left, "app"), post: "", color: "#7C93D6", op: 0.42 };
       }
       case "current":
         return { pre: "Everything is ", word: "current", post: "", color: "#7FB77E", op: 0.45 };
@@ -245,6 +251,12 @@
           <span class="k">Time left</span>
           <span class="v">{store.eta == null ? "" : duration(store.eta)}</span>
         </div>
+        {#if batchCounts(store.batchJobs).done > 0}
+          <div class="stat">
+            <span class="k">Done</span>
+            <span class="v">{batchCounts(store.batchJobs).done} <span class="u">of {batchCounts(store.batchJobs).total}</span></span>
+          </div>
+        {/if}
       </div>
     {:else if lede}
       <p class="lede">{lede}</p>
@@ -317,19 +329,26 @@
             {#if store.openJobs.length === 0}
               <div class="sep-top empty">Nothing is updating. Jobs you start show here with live progress.</div>
             {:else}
-              {#each store.openJobs as j, i (j.id)}
-                <div class="jrow" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
-                  <svelte:element this={jobHref(j) ? "a" : "div"} class="applink grow" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
-                    <Mark app={j} size={28} />
-                    <div class="rcol">
-                      <span class="rname ellipsis">{j.name}</span>
-                      <span class="rsub ellipsis">{jobStatus(j, false)}</span>
-                      {#if jobDetail(j)}<span class="rdet ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
-                    </div>
-                  </svelte:element>
-                  <span class="jp"><Num value={pct(j)} />%</span>
-                  <span class="jbar"><BrushBar value={j.progress} color={j.fg} height={5} /></span>
-                </div>
+              {#each qSections as sec (sec.key)}
+                {#if qSections.length > 1}<div class="grp">{sec.label}</div>{/if}
+                {#each sec.jobs as j, i (j.id)}
+                  <div class="jrow" class:calm={sec.key === "ready"} animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
+                    <svelte:element this={jobHref(j) ? "a" : "div"} class="applink grow" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
+                      <Mark app={j} size={28} />
+                      <div class="rcol">
+                        <span class="rname ellipsis">{j.name}</span>
+                        <span class="rsub ellipsis">{sec.key === "ready" ? readyLine(qGroups, i) : jobStatus(j, false)}</span>
+                        {#if jobDetail(j)}<span class="rdet ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
+                      </div>
+                    </svelte:element>
+                    {#if sec.key === "ready"}
+                      <span class="chip">Ready</span>
+                    {:else}
+                      <span class="jp"><Num value={pct(j)} />%</span>
+                      <span class="jbar"><BrushBar value={j.progress} color={j.fg} height={5} /></span>
+                    {/if}
+                  </div>
+                {/each}
               {/each}
             {/if}
           </section>
@@ -338,7 +357,9 @@
     {:else if hs === "updating"}
       <section class="jobs" aria-label="Updating now">
         <div class="sec-h"><span>Updating now</span></div>
-        {#each store.openJobs as j, i (j.id)}
+        {#each qSections as sec (sec.key)}
+        {#if qSections.length > 1}<div class="grp">{sec.label}</div>{/if}
+        {#each sec.jobs as j, i (j.id)}
           <div class="job" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
             <svelte:element this={jobHref(j) ? "a" : "div"} class="applink" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
               <Mark app={j} size={32} />
@@ -347,16 +368,23 @@
                 <span class="rsub ellipsis">{j.fromVersion ? `${j.fromVersion}  →  ${j.toVersion}` : j.toVersion}</span>
               </div>
             </svelte:element>
-            <span class="jstat">
-              <span class="ellipsis" style:color={j.state === "paused" ? "var(--warn)" : "var(--text-2)"}>{jobStatus(j)}</span>
-              {#if jobDetail(j)}<span class="rdet ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
-            </span>
-            <span class="jpct"><Num value={pct(j)} />%</span>
-            <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j)} onclick={() => pauseJob(j.id, j.state)} disabled={!canPause(j)}>
-              <Icon d={j.state === "paused" ? I.play : I.pause} />
-            </button>
-            <span class="jbar2"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
+            {#if sec.key === "ready"}
+              <span class="jstat"><span class="ellipsis" style:color="var(--text-2)">{readyLine(qGroups, i)}</span></span>
+              <span class="jpct"><span class="chip">Ready</span></span>
+              <span class="ib" aria-hidden="true"></span>
+            {:else}
+              <span class="jstat">
+                <span class="ellipsis" style:color={j.state === "paused" ? "var(--warn)" : "var(--text-2)"}>{jobStatus(j)}</span>
+                {#if jobDetail(j)}<span class="rdet ellipsis" title={jobDetail(j)}>{jobDetail(j)}</span>{/if}
+              </span>
+              <span class="jpct"><Num value={pct(j)} />%</span>
+              <button class="ib" aria-label="{j.state === 'paused' ? 'Resume' : 'Pause'} {j.name}" title={pauseTip(j)} onclick={() => pauseJob(j.id, j.state)} disabled={!canPause(j)}>
+                <Icon d={j.state === "paused" ? I.play : I.pause} />
+              </button>
+              <span class="jbar2"><BrushBar value={j.progress} color={j.fg} height={6} fillOpacityOverride={j.state === "paused" ? 0.4 : 0.85} /></span>
+            {/if}
           </div>
+        {/each}
         {/each}
       </section>
     {:else if hs === "failed"}
@@ -589,6 +617,33 @@
     align-items: center;
     gap: 12px;
     border-top: 1px solid var(--sep);
+  }
+  .grp {
+    padding: 14px 0 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-3);
+    border-top: 1px solid var(--sep);
+  }
+  .grp + :global(.jrow),
+  .grp + :global(.job) {
+    border-top-color: transparent;
+  }
+  .chip {
+    flex: none;
+    height: 22px;
+    padding: 0 10px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--ok);
+    background: var(--raised);
+  }
+  .jrow.calm {
+    padding-bottom: 8px;
   }
   .jp {
     font-size: 15px;

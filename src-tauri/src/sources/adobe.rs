@@ -465,6 +465,7 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
             // Components have no program of their own to check.
             missing: missing && !component,
             read_only: false,
+            store: None,
             icon_remote: catalog.and_then(|c| c.icon(&p.sap)).map(String::from),
             data: SourceData::Adobe {
                 sap: p.sap.clone(),
@@ -509,6 +510,7 @@ fn creative_cloud(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntr
         channel: None,
         missing: false,
         read_only: false,
+        store: None,
         icon_remote: catalog.and_then(|c| c.icon("KCCC")).map(String::from),
         data: SourceData::Adobe { sap: "KCCC".into(), codex: e.display_version.clone(), platform: "win64".into(), product_name: "Adobe Creative Cloud".into() },
     })
@@ -676,9 +678,14 @@ pub struct CcStatus {
     pub signed_in: bool,
 }
 
-pub fn cc_status(procs: &[crate::procs::Proc]) -> CcStatus {
+/// Creative Cloud desktop is on this PC.
+pub fn cc_installed() -> bool {
     let acc = paths::program_files_x86().join("Adobe\\Adobe Creative Cloud\\ACC\\Creative Cloud.exe");
-    let installed = acc.exists() || hdbox_dir().join("Setup.exe").exists();
+    acc.exists() || hdbox_dir().join("Setup.exe").exists()
+}
+
+pub fn cc_status(procs: &[crate::procs::Proc]) -> CcStatus {
+    let installed = cc_installed();
     let running = procs.iter().any(|p| {
         let n = p.name.to_ascii_lowercase();
         n == "adobe desktop service.exe" || n == "creative cloud.exe" || n == "adobeipcbroker.exe"

@@ -696,3 +696,34 @@ fn unity_editors_in_the_hubs_own_folder_and_added_by_hand_are_found() {
     assert!(!found.iter().any(|(v, _)| v == "notaversion"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn krita_from_the_microsoft_store_is_listed_and_left_to_the_store() {
+    use crate::sources::msstore::Package;
+    let pkg = |name: &str, family: &str| Package { name: name.into(), family: family.into(), version: "5.2.9.0".into(), install_dir: None, installed_at: None };
+    let pkgs = vec![
+        pkg("49800KritaProject.Krita", "49800KritaProject.Krita_n3kgb906j1zjg"),
+        // Same name from someone else.
+        pkg("12345Someone.Krita", "12345Someone.Krita_aaaaaaaaaaaaa"),
+    ];
+    let v = store_copies(&pkgs);
+    assert_eq!(v.len(), 1);
+    let k = &v[0];
+    assert_eq!(k.id, "tools:krita:store");
+    assert_eq!(k.name, "Krita (Microsoft Store)");
+    assert_eq!(k.version, "5.2.9");
+    assert!(k.read_only && k.uninstall.is_none() && !k.missing);
+    assert_eq!(k.tagline.as_deref(), Some("Updated by the Microsoft Store"));
+    assert_eq!(k.store.as_ref().unwrap().family, "49800KritaProject.Krita_n3kgb906j1zjg");
+
+    // Never offered an update; Get apps still offers Krita from its own site.
+    let feed = feed_with("krita", vec![rel("5.3.0", false)]);
+    assert!(latest(k, &v, &feed).is_none());
+    let c = catalog_entries(&feed, &v);
+    assert!(!c.iter().find(|e| e.id == "tools:krita").unwrap().installed);
+    // Next to a copy from krita.org, that one still updates.
+    let site = inst("krita", "tools:krita", "5.2.6", "");
+    let all = vec![site.clone(), k.clone()];
+    assert_eq!(latest(&site, &all, &feed).unwrap().version, "5.3.0");
+    assert!(catalog_entries(&feed, &all).iter().find(|e| e.id == "tools:krita").unwrap().installed);
+}

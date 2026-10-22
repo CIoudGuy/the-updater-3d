@@ -62,6 +62,12 @@ pub struct AppEntry {
     pub running: bool,
     pub can_uninstall: bool,
     pub can_rollback: bool,
+    /// Steam or the Microsoft Store updates and removes it, not this app.
+    #[serde(default)]
+    pub read_only: bool,
+    /// A Microsoft Store copy: its page in the Store app.
+    #[serde(default)]
+    pub store_url: Option<String>,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,
@@ -198,6 +204,13 @@ pub struct Job {
     /// An installing job that is only waiting (for its turn, or for Creative Cloud), so Cancel is safe
     #[serde(default)]
     pub cancelable: bool,
+    /// Downloaded, waiting for its turn to run the installer (one installer runs at a time)
+    #[serde(default)]
+    pub ready: bool,
+    /// Waiting for the user to allow admin rights (the prompt was declined, failed, or could
+    /// not be shown with no window open). Nothing ran yet.
+    #[serde(default)]
+    pub needs_admin: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -75,7 +75,7 @@ versions can be counted; nothing else.
 
 ## Build from source
 
-Requires [Rust](https://rustup.rs) 1.90+ and Node.js 20+.
+Requires [Rust](https://rustup.rs) 1.95+ and Node.js 20+.
 
 ```bash
 npm install

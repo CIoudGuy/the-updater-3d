@@ -51,6 +51,23 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
 /// Show the main window, creating it if needed. In the background the app runs without any
 /// window (no web view, a few MB), so the window is built on demand and destroyed on close.
+/// Make the web view behave like an app, not a browser: no link address bubble on hover, no
+/// browser shortcuts (find bar, reload, print, zoom), no "open in new window".
+pub fn app_like(w: &tauri::WebviewWindow) {
+    let _ = w.with_webview(|wv| unsafe {
+        let Ok(core) = wv.controller().CoreWebView2() else { return };
+        if let Ok(s) = core.Settings() {
+            let _ = s.SetIsStatusBarEnabled(false);
+            use windows::core::Interface;
+            if let Ok(s3) = s.cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3>() {
+                let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+            }
+            let _ = s.SetIsZoomControlEnabled(false);
+            let _ = s.SetAreDefaultContextMenusEnabled(false);
+        }
+    });
+}
+
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
@@ -88,6 +105,7 @@ pub fn show_main(app: &AppHandle) {
         b = b.center();
     }
     let Ok(w) = b.build() else { return };
+    app_like(&w);
     if let (true, Some((x, y, width, height, max))) = (placed, geo) {
         let _ = w.set_size(tauri::PhysicalSize::new(width, height));
         let _ = w.set_position(PhysicalPosition::new(x, y));
@@ -170,6 +188,7 @@ fn toggle_popup(app: &AppHandle, rect: Rect) {
             else {
                 return;
             };
+            app_like(&w);
             let w2 = w.clone();
             w.on_window_event(move |e| {
                 if let tauri::WindowEvent::Focused(false) = e {

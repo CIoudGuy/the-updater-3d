@@ -156,6 +156,11 @@
     if (want !== currentZoom()) void applyZoom(want).then(measure);
   });
 
+  // Services belongs to Creative Cloud: with Adobe apps off it is not there (an old link goes Home)
+  $effect(() => {
+    if (store.ready && !store.adobeOn && router.route.name === "services") router.replace("home");
+  });
+
   // the app under the pointer belongs to the screen it was on
   $effect(() => {
     router.key;
@@ -231,7 +236,8 @@
       const k = e.key;
       if (k >= "1" && k <= "6") {
         e.preventDefault();
-        router.go(ROUTES[Number(k) - 1]);
+        // Ctrl 6 (Services) only while Adobe apps are on.
+        if (k !== "6" || store.adobeOn) router.go(ROUTES[Number(k) - 1]);
       } else if (k === ",") {
         e.preventDefault();
         router.go("settings");

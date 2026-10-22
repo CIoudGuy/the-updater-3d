@@ -30,3 +30,9 @@ export function currentBatch(jobs: Job[]): Job[] {
   }
   return jobs.filter((j) => batch.includes(j));
 }
+
+/** The Home headline while updating: how many are still going, and how many of the batch are done. */
+export function batchCounts(batch: Job[]): { left: number; done: number; total: number } {
+  const left = batch.filter((j) => OPEN.includes(j.state)).length;
+  return { left, done: batch.length - left, total: batch.length };
+}

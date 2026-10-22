@@ -23,6 +23,8 @@
     { id: "settings", label: "Settings", href: "#/settings", key: "Ctrl ,", d: I.settings },
   ] as const;
 
+  // Services lists Creative Cloud's background services: only shown while Adobe apps are on.
+  const navItems = $derived(NAV.filter((n) => n.id !== "services" || store.adobeOn));
   const active = $derived(router.route.name === "detail" ? "installed" : router.route.name === "getdetail" ? "get" : router.route.name);
   const compact = $derived(ui.compact);
 
@@ -47,6 +49,7 @@
     ui.compact;
     store.updates.length;
     store.ccDown;
+    navItems.length;
     tick().then(layout);
   });
   onMount(() => {
@@ -79,7 +82,7 @@
     <span class="marker" class:anim bind:this={marker} style="width:{MARKER_BASE}px" aria-hidden="true">
       <svg viewBox="0 0 400 24" preserveAspectRatio="none"><path d={BRUSH} fill="#EDEDED" /></svg>
     </span>
-    {#each NAV as n (n.id)}
+    {#each navItems as n (n.id)}
       {@const b = badge(n.id)}
       <a
         bind:this={items[n.id]}

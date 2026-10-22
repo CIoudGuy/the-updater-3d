@@ -1,7 +1,7 @@
 // node --test src/lib/batch.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { currentBatch } from "./batch.ts";
+import { batchCounts, currentBatch } from "./batch.ts";
 import type { Job } from "./types";
 
 const at = (min: number) => new Date(Date.UTC(2020, 0, 1, 5, min)).toISOString();
@@ -30,4 +30,9 @@ test("failed and canceled jobs and an idle list give no batch", () => {
   assert.deepEqual(currentBatch([job("a", "done", 0, 5)]), []);
   const jobs = [job("a", "failed", 10, 11), job("b", "canceled", 10, 12), job("c", "waiting", null, null)];
   assert.deepEqual(ids(currentBatch(jobs)), ["c"]);
+});
+
+test("the updating headline counts only the apps still going, not the finished ones", () => {
+  const batch = [job("a", "installing", 1, null), job("b", "waiting", 1, null), job("c", "done", 0, 2), job("d", "done", 0, 3)];
+  assert.deepEqual(batchCounts(batch), { left: 2, done: 2, total: 4 });
 });

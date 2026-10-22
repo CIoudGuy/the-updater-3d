@@ -145,6 +145,9 @@ export function askUninstall(id: string) {
 export function openApp(id: string) {
   void send("open_app", { appId: id });
 }
+export function openStorePage(id: string) {
+  void send("open_store_page", { appId: id });
+}
 export function showInFolder(id: string) {
   void send("show_in_folder", { appId: id });
 }
@@ -175,6 +178,9 @@ export function runAppMenu(app: AppEntry, id: string) {
       break;
     case "folder":
       showInFolder(app.id);
+      break;
+    case "store":
+      openStorePage(app.id);
       break;
     case "uninstall":
       askUninstall(app.id);

@@ -8,6 +8,9 @@ use updater_lib::download::{self, Control, Outcome, Progress, Throttle};
 use updater_lib::elevate::{execute, Elevator};
 use updater_lib::sources::{Download, Step};
 
+/// Tests that set or depend on the step time limit (an environment variable) run one at a time.
+static STEP_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn tmp(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join("updater3d-tests").join(name);
     let _ = std::fs::remove_dir_all(&d);
@@ -109,6 +112,18 @@ fn run_step_reports_exit_codes() {
 }
 
 #[test]
+fn run_step_tells_which_programs_the_installer_started() {
+    let seen = std::sync::Mutex::new(Vec::<String>::new());
+    let step = Step::Run { exe: "cmd.exe".into(), args: vec!["/c".into(), "ping -n 3 127.0.0.1 >nul".into()], cwd: None, ok_codes: vec![0], elevated: false, label: "x".into(), log: None };
+    let r = updater_lib::elevate::execute_with(&step, &|names| seen.lock().unwrap().extend(names.iter().map(|n| n.to_ascii_lowercase())));
+    assert!(r.ok, "{}", r.message);
+    let seen = seen.lock().unwrap();
+    // cmd.exe itself (the installer) is left out; what it started is named.
+    assert!(seen.iter().any(|n| n == "ping.exe"), "{seen:?}");
+    assert!(!seen.iter().any(|n| n == "cmd.exe"), "{seen:?}");
+}
+
+#[test]
 fn nsis_folder_arguments_are_not_quoted() {
     // NSIS installers only understand /D=<dir> when it is the raw, unquoted tail of the command
     // line, even if the folder has spaces. cmd's echo shows the arguments exactly as received.
@@ -137,6 +152,23 @@ async fn helper_runs_steps_over_the_pipe() {
     let r = el.run(Step::Run { exe: "cmd.exe".into(), args: vec!["/c".into(), "exit 7".into()], cwd: None, ok_codes: vec![0], elevated: true, label: "x".into(), log: None }, false).await.unwrap();
     assert!(!r.ok);
     assert_eq!(r.code, Some(7));
+    // The programs an installer starts reach the app while it runs, before the result.
+    let procs: updater_lib::elevate::Procs = Default::default();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let watcher = {
+        let (procs, seen) = (procs.clone(), seen.clone());
+        tokio::spawn(async move {
+            loop {
+                seen.lock().unwrap().extend(procs.lock().iter().map(|n| n.to_ascii_lowercase()));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+    };
+    let ping = Step::Run { exe: "cmd.exe".into(), args: vec!["/c".into(), "ping -n 3 127.0.0.1 >nul".into()], cwd: None, ok_codes: vec![0], elevated: true, label: "x".into(), log: None };
+    let r = el.run_watched(ping, false, vec![], true, Some(procs.clone())).await.unwrap();
+    watcher.abort();
+    assert!(r.ok, "{}", r.message);
+    assert!(seen.lock().unwrap().iter().any(|n| n == "ping.exe"), "{:?}", seen.lock().unwrap());
     // Same helper keeps serving.
     let r = el.run(Step::RemoveDir { path: dir.clone(), elevated: true, label: "x".into() }, false).await.unwrap();
     assert!(r.ok);
@@ -253,7 +285,11 @@ async fn helper_answers_a_step_it_does_not_know() {
 }
 
 fn uuid_like() -> String {
-    format!("{:x}{:x}", std::process::id(), Instant::now().elapsed().as_nanos() ^ 0x5eed_1234_abcd)
+    // Unique per call: tests running at the same time must not ask for the same pipe name.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    format!("{:x}{:x}{:x}", std::process::id(), n, t)
 }
 
 /// The scheduled-task helper (admin rights, no prompt) only trusts a pipe served by its own
@@ -288,6 +324,7 @@ async fn a_hung_step_fails_after_its_time_limit() {
     let exe = env!("CARGO_BIN_EXE_the-updater-3d");
     std::env::set_var("UPDATER3D_TEST_NO_UAC", "1");
     std::env::set_var("UPDATER3D_TEST_EXE", exe);
+    let _env = STEP_ENV.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("UPDATER3D_TEST_STEP_TIMEOUT_MS", "3000");
     let el = Elevator::new();
     let t0 = Instant::now();
@@ -353,4 +390,50 @@ async fn pause_works_while_waiting_for_the_network() {
     let out = tokio::time::timeout(Duration::from_secs(5), h).await.expect("pause ends the wait at once").unwrap().unwrap();
     assert!(matches!(out, Outcome::Paused));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// MEGAsync-like installers start their real setup (or a self-elevated copy) and exit first.
+/// The step waits for that setup, but not for a program the installer starts outside the temp
+/// and download folders (the app itself, which keeps running).
+#[test]
+fn run_step_waits_for_the_setup_an_installer_hands_off_to() {
+    let _env = STEP_ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tmp("handoff");
+    let part = dir.join("setup-part.exe");
+    std::fs::copy(r"C:\Windows\System32\cmd.exe", &part).unwrap();
+    let marker = dir.join("done.txt");
+    let run = |cmd: String| Step::Run { exe: "powershell.exe".into(), args: vec!["-NoProfile".into(), "-Command".into(), cmd], cwd: None, ok_codes: vec![0], elevated: false, label: "x".into(), log: None };
+    let t0 = Instant::now();
+    let r = execute(&run(format!("Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '/c ping -n 5 127.0.0.1 >nul & echo done>{}'", part.display(), marker.display())));
+    assert!(r.ok, "{}", r.message);
+    assert!(marker.exists(), "the step ended {:.1} s in, before the setup it started was done", t0.elapsed().as_secs_f64());
+    let t1 = Instant::now();
+    let r = execute(&run("Start-Process -WindowStyle Hidden -FilePath cmd.exe -ArgumentList '/c ping -n 30 127.0.0.1 >nul'".into()));
+    assert!(r.ok, "{}", r.message);
+    assert!(t1.elapsed() < Duration::from_secs(15), "waited {:.1} s for a program that is not part of the install", t1.elapsed().as_secs_f64());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// "If the windows admin thing fails then all the updates also fail": a declined or failed
+/// prompt, or one not shown because no window is open, is told apart from a failed step, so the
+/// jobs wait for "Allow admin rights" instead of failing.
+#[tokio::test]
+async fn missing_admin_rights_are_told_apart_from_a_failed_step() {
+    use updater_lib::elevate::admin_unavailable;
+    let step = || Step::WriteFile { path: tmp("noadmin").join("x.txt"), contents: "x".into(), elevated: true };
+    let el = Elevator::declining_for_test();
+    for _ in 0..3 {
+        let e = el.run(step(), false).await.unwrap_err();
+        assert!(admin_unavailable(&e), "{e:#}");
+    }
+    assert_eq!(el.prompts(), 1);
+    // No window open (started at sign-in): no prompt is shown at all.
+    let quiet = Elevator::new();
+    let e = quiet.run_with(step(), false, vec![], false).await.unwrap_err();
+    assert!(admin_unavailable(&e) && format!("{e:#}").contains("Open the app"), "{e:#}");
+    assert_eq!(quiet.connects(), 0);
+    // A step that ran and failed is a real failure.
+    let bad = Step::Run { exe: "cmd.exe".into(), args: vec!["/c".into(), "exit 3".into()], cwd: None, ok_codes: vec![0], elevated: false, label: "x".into(), log: None };
+    let r = quiet.run(bad, false).await.unwrap();
+    assert!(!r.ok && r.code == Some(3));
 }

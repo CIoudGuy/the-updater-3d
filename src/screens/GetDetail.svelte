@@ -13,12 +13,12 @@
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
   import { call, on, send } from "../lib/api";
-  import { OTHER_NOTE, store, statusLabel } from "../lib/store.svelte";
+  import { store, statusLabel } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { router, appHref } from "../lib/router.svelte";
   import { installApp, openApp, updateOne } from "../lib/actions";
   import { installedFor } from "../lib/appview";
-  import { bytes, dateLong, preParts, splitVersion } from "../lib/format";
+  import { bytes, dateLong, preParts, shortVersion, splitVersion } from "../lib/format";
   import { blockedTitle, patchEntries } from "../lib/browse";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -31,10 +31,10 @@
   // a package found by a search is not in the catalog list; an entry hidden because it is
   // installed now (its install just finished on this page) is fetched on its own
   let single = $state<CatalogEntry | null>(null);
-  const browsed = (x: string) => ui.otherBrowse?.entries.find((e) => e.id === x);
-  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? ui.otherFound.find((x) => x.id === id) ?? browsed(id) ?? (single?.id === id ? single : undefined));
+  const browsed = (x: string) => ui.otherBrowse?.entries.find((e) => e?.id === x) ?? undefined;
+  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? browsed(id) ?? (single?.id === id ? single : undefined));
   $effect(() => {
-    if (ui.catalog && !ui.catalog.some((x) => x.id === id) && !ui.otherFound.some((x) => x.id === id) && !browsed(id) && single?.id !== id) {
+    if (ui.catalog && !ui.catalog.some((x) => x.id === id) && !browsed(id) && single?.id !== id) {
       call("get_catalog_entry", { id }).then((e) => {
         if (e) single = e;
       });
@@ -139,7 +139,7 @@
   const ver = $derived.by(() => {
     if (!c) return { big: "", small: "", size: 64 };
     if (chooseOnly) return { big: c.version, small: "", size: 40 };
-    const [main, rest] = preParts(c.version);
+    const [main, rest] = preParts(shortVersion(c.version));
     const [a, b] = splitVersion(main);
     return { big: a, small: [b, rest].filter(Boolean).join(" "), size: b || main.length > 7 ? 48 : 64 };
   });
@@ -170,7 +170,7 @@
       <div class="side">
         <span class="stl" style:color={statusColor}>
           {#if job}
-            <Dab color={statusColor} pulse={job.state === "downloading" || job.state === "installing"} />{jobStatus(job, false)}<span class="pc"><Num value={pct(job)} />%</span>
+            <Dab color={statusColor} pulse={job.state === "downloading" || job.state === "installing"} />{jobStatus(job)}<span class="pc"><Num value={pct(job)} />%</span>
           {:else if isIn}
             <Dab color={statusColor} />{#if installedApp}Installed {installedApp.version}{:else}Installed{/if}{#if canUpdate && installedApp}, {installedApp.latest} available{/if}
           {:else if c.size}
@@ -197,9 +197,9 @@
             <Btn variant="primary" title="Choose a version of {c.name}" onclick={chooseVersion}>Choose a version</Btn>
           {:else}
             {#if c.blocked}
-              <Btn variant="primary" disabled title={blockedTitle(c.blocked)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(c.version)[0]}</Btn>
+              <Btn variant="primary" disabled title={blockedTitle(c.blocked)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(shortVersion(c.version))[0]}</Btn>
             {:else}
-              <Btn variant="primary" title="Install {c.name} {c.version}" onclick={() => installApp(c)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(c.version)[0]}</Btn>
+              <Btn variant="primary" title="Install {c.name} {c.version}" onclick={() => installApp(c)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(shortVersion(c.version))[0]}</Btn>
             {/if}
           {/if}
         </div>
@@ -269,13 +269,13 @@
           <dt>Source</dt>
           <dd>{c.group}<span class="mut">{FROM[c.group] ?? ""}</span></dd>
           <dt>Newest</dt>
-          <dd>{chooseOnly ? "Choose a version" : c.version}</dd>
+          <dd title={c.version}>{chooseOnly ? "Choose a version" : shortVersion(c.version)}</dd>
           <dt>Download</dt>
           <dd>{c.size ? bytes(c.size) : "Not known"}</dd>
           {#if c.prerelease}<dt>Release</dt><dd>Pre-release</dd>{/if}
         </dl>
         <span class="hint">
-          {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "tools"}FreeCAD, Godot and Unity install next to your other versions. OBS Studio and Krita are updated in place. Your projects and settings stay as they are.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else if c.source === "other"}{OTHER_NOTE} Installed silently with the publisher's own installer, as the catalog lists it. Your settings stay as they are.{:else}Your settings stay as they are.{/if}
+          {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "tools"}FreeCAD, Godot and Unity install next to your other versions. OBS Studio and Krita are updated in place. Your projects and settings stay as they are.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else if c.source === "other"}Installed silently with the publisher's own installer, as the catalog lists it. Your settings stay as they are.{:else}Your settings stay as they are.{/if}
           {#if c.prerelease} Pre-release builds can be unstable. Do not rely on them for important work.{/if}
         </span>
       </aside>

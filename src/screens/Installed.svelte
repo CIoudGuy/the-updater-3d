@@ -8,7 +8,7 @@
   import Icon from "../components/Icon.svelte";
   import Num from "../components/Num.svelte";
   import { I } from "../lib/icons";
-  import { GROUPS, OTHER_NOTE, store } from "../lib/store.svelte";
+  import { GROUPS, store } from "../lib/store.svelte";
   import { ui, type InstalledFilter, type InstalledGroup, type SortKey } from "../lib/ui.svelte";
   import { enter, reduced, rise } from "../lib/motion";
   import type { AppEntry, AppStatus } from "../lib/types";
@@ -110,7 +110,6 @@
     <Select options={sortOpts} value={ui.sort} onchange={(v) => ui.setSort(v as SortKey)} width={ui.compact ? 150 : 190} height={30} label="Sort" title="Sort" />
   </div>
 
-  {#if group === "Other apps" && sorted.length > 0}<p class="srcnote solo">{OTHER_NOTE}</p>{/if}
   {#if sorted.length === 0}
     <p class="none" in:rise>
       {none.text}
@@ -120,7 +119,6 @@
     {#if showSections}
       {#each sections as sec (sec.name)}
         <h2 class="grp"><span>{sec.name}</span><span class="n">{sec.items.length}</span></h2>
-        {#if sec.name === "Other apps"}<p class="srcnote">{OTHER_NOTE}</p>{/if}
         <div class="grid">
           {#each sec.items as a, i (a.id)}
             <div class="cell" animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={i}><Tile app={a} compact={ui.compact} /></div>
@@ -230,14 +228,6 @@
   .grp .n {
     font-weight: 400;
     color: var(--text-3);
-  }
-  .srcnote {
-    margin-top: 2px;
-    font-size: 12px;
-    color: var(--text-3);
-  }
-  .srcnote.solo {
-    margin-top: 20px;
   }
   .grid {
     display: grid;

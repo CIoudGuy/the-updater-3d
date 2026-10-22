@@ -63,6 +63,12 @@ pub fn take_route(core: C<'_>) -> Option<String> {
     core.inner().pending_route.lock().take()
 }
 
+/// "Allow admin rights" in the Queue: ask once more and continue the jobs waiting for it.
+#[tauri::command]
+pub fn allow_admin(core: C<'_>) {
+    core.inner().allow_admin();
+}
+
 /// The window opened: set up "Fewer admin prompts" if it is on but not ready yet.
 #[tauri::command]
 pub fn window_ready(core: C<'_>) {
@@ -88,8 +94,20 @@ pub fn repair_app(core: C<'_>, app_id: String) -> Res<()> {
 #[tauri::command]
 pub fn open_app(core: C<'_>, app_id: String) -> Res<()> {
     let i = core.installed(&app_id).ok_or("That app is no longer installed")?;
+    // A Store app starts through the shell, which gives it its package identity.
+    if let Some(t) = i.store.as_ref().and_then(|s| s.launch_target()) {
+        return winutil::shell_open(&t).map_err(err);
+    }
     let exe = i.exe.ok_or("Could not find the program file")?;
     winutil::launch(&exe, &[]).map_err(err)
+}
+
+/// Open a Microsoft Store copy's page in the Store app, where it is updated or removed.
+#[tauri::command]
+pub fn open_store_page(core: C<'_>, app_id: String) -> Res<()> {
+    let i = core.installed(&app_id).ok_or("That app is no longer installed")?;
+    let s = i.store.ok_or("This copy is not from the Microsoft Store")?;
+    winutil::shell_open(&s.page_url()).map_err(err)
 }
 
 #[tauri::command]
@@ -319,8 +337,10 @@ pub async fn clear_cache(core: C<'_>) -> Res<u64> {
     Ok(freed)
 }
 
+/// Async on purpose: a synchronous command that creates a window deadlocks on Windows, so the
+/// tray's "Open app" hung whenever the main window had been closed.
 #[tauri::command]
-pub fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) {
+pub async fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) -> Result<(), String> {
     // Kept until the window reads it: a window built just now has not subscribed to events
     // yet, and "Update all" from the tray must not get lost then.
     if let Some(r) = route {
@@ -333,6 +353,7 @@ pub fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) {
     if let Some(w) = app.get_webview_window("tray") {
         let _ = w.hide();
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -373,20 +394,44 @@ pub async fn catalog_versions(core: C<'_>, id: String) -> Res<Vec<VersionInfo>> 
     c.catalog_versions(&id).await.map_err(|e| format!("{e:#}"))
 }
 
+/// One page of the whole winget catalog (Get apps, Other apps): a search or none, a category,
+/// a first letter and an order.
 #[tauri::command]
-pub async fn search_other_apps(core: C<'_>, query: String) -> Res<Vec<CatalogEntry>> {
+#[allow(clippy::too_many_arguments)]
+pub async fn browse_other_apps(core: C<'_>, query: Option<String>, category: Option<String>, letter: Option<String>, sort: Option<String>, offset: usize, limit: usize) -> Res<crate::sources::browse::BrowsePage> {
     let c = core.inner().clone();
-    Ok(c.search_other(query).await)
-}
-
-/// One page of the whole winget catalog (Get apps, Other apps, Browse all).
-#[tauri::command]
-pub async fn browse_other_apps(core: C<'_>, category: Option<String>, letter: Option<String>, offset: usize, limit: usize) -> Res<crate::sources::browse::BrowsePage> {
-    let c = core.inner().clone();
-    c.browse_other(category, letter, offset, limit).await.map_err(|e| format!("{e:#}"))
+    c.browse_other(crate::sources::browse::Request { query, category, letter, sort, offset, limit }).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[cfg(test)]
+mod window_tests {
+    /// Tauri: a synchronous command that creates a window deadlocks on Windows. Every command that
+    /// can open the main window must be async.
+    #[test]
+    fn commands_that_open_windows_are_async() {
+        let src = include_str!("commands.rs");
+        let mut cmd = false;
+        let mut sync_fn: Option<String> = None;
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("#[tauri::command]") {
+                cmd = true;
+                continue;
+            }
+            if t.starts_with("pub fn ") || t.starts_with("pub async fn ") {
+                sync_fn = (cmd && t.starts_with("pub fn ")).then(|| t.to_string());
+                cmd = false;
+                continue;
+            }
+            if let Some(f) = &sync_fn {
+                let opens = [concat!("tray::", "show_main("), concat!("WebviewWindow", "Builder::new(")];
+                assert!(!opens.iter().any(|o| t.contains(o)), "sync command opens a window: {f}");
+            }
+        }
+    }
 }
