@@ -50,6 +50,16 @@ pub fn run() {
                     store::save_state(&p);
                 }
             }
+            // Keep the Windows startup entry in step with the setting (an uninstall or a cleanup
+            // tool can remove it while the setting stays on).
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let want = core.settings.read().launch_at_startup;
+                let m = app.autolaunch();
+                if want && !m.is_enabled().unwrap_or(false) {
+                    let _ = m.enable();
+                }
+            }
             // Started by Windows at sign-in: stay a tiny background checker, no window.
             if !minimized {
                 tray::show_main(app.handle());
