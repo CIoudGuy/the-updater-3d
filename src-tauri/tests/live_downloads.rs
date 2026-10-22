@@ -19,7 +19,14 @@ fn dir(name: &str) -> std::path::PathBuf {
 fn sha_of(p: &std::path::Path) -> String {
     let mut f = std::fs::File::open(p).unwrap();
     let mut h = Sha256::new();
-    std::io::copy(&mut f, &mut h).unwrap();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
     hex::encode(h.finalize())
 }
 

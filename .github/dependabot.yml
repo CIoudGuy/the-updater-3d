@@ -20,3 +20,8 @@ updates:
       npm:
         patterns: ["*"]
         update-types: [minor, patch]
+    ignore:
+      # svelte-check (and the Svelte toolchain) only supports TypeScript 5 and 6 so far;
+      # TypeScript 7 breaks npm install. Revisit when svelte-check allows it.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
