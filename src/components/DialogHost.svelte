@@ -7,7 +7,8 @@
   import Check from "./Check.svelte";
   import { store } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
-  import { send } from "../lib/api";
+  import { call, send } from "../lib/api";
+  import type { PrefsItem } from "../lib/types";
   import { bytes, bytesParts, unitFor } from "../lib/format";
   import { SPLASH } from "../lib/paths";
 
@@ -18,9 +19,31 @@
   const unApp = $derived(d?.type === "uninstall" ? store.app(d.appId) : undefined);
   /** "Also delete settings and add-ons": off each time the dialog opens */
   let removePrefs = $state(false);
+  /** what ticking it would delete, read from the disk when the box is ticked */
+  let prefsItems = $state<PrefsItem[] | null>(null);
+  let prefsFor = "";
   $effect(() => {
-    if (d?.type === "uninstall") removePrefs = false;
+    if (d?.type === "uninstall") {
+      removePrefs = false;
+      prefsItems = null;
+      prefsFor = "";
+    }
   });
+  $effect(() => {
+    if (removePrefs && unApp && prefsFor !== unApp.id) {
+      const id = unApp.id;
+      prefsFor = id;
+      prefsItems = null;
+      call("prefs_preview", { appId: id })
+        .then((r) => {
+          if (prefsFor === id) prefsItems = r;
+        })
+        .catch(() => {
+          if (prefsFor === id) prefsItems = [];
+        });
+    }
+  });
+  const prefsTotal = $derived((prefsItems ?? []).reduce((n, i) => n + (i.size ?? 0), 0));
 
   function doUninstall() {
     if (!unApp) return;
@@ -62,7 +85,18 @@
       <div class="opt prefs">
         <Check checked={removePrefs} onchange={(v) => (removePrefs = v)}>Also delete settings and add-ons</Check>
         {#if removePrefs}
-          <span class="warnline">Deletes {unApp.name}'s preferences, add-ons and caches in AppData. This can't be undone. Your own files and projects stay.</span>
+          {#if prefsItems === null}
+            <span class="pnote">Checking what it would delete</span>
+          {:else if prefsItems.length === 0}
+            <span class="pnote">No settings or add-ons of {unApp.name} were found, so nothing else is deleted.</span>
+          {:else}
+            <ul class="plist selectable">
+              {#each prefsItems as it (it.path)}
+                <li><span class="pp mono" title={it.path}>{it.path}</span><span class="ps">{it.registry ? "Registry" : it.size ? bytes(it.size) : "Empty"}</span></li>
+              {/each}
+            </ul>
+            <span class="warnline">{prefsTotal > 0 ? `Frees ${bytes(prefsTotal)} more. ` : ""}This can't be undone. Your own files and projects stay.</span>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -158,6 +192,40 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+  .pnote {
+    font-size: 12px;
+    color: var(--text-3);
+  }
+  .plist {
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .plist li {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    font-size: 12px;
+  }
+  .pp {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-2);
+  }
+  .ps {
+    flex: none;
+    color: var(--text-3);
+    font-variant-numeric: tabular-nums;
   }
   .warnline {
     font-size: 12px;

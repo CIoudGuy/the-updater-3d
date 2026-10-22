@@ -25,6 +25,28 @@ impl Roots {
     }
 }
 
+/// What the remove steps would take, with sizes, for the uninstall dialog. Paths under the user's
+/// profile are shown from "AppData" on.
+pub fn preview(steps: &[Step]) -> Vec<crate::model::PrefsItem> {
+    let profile = std::env::var("USERPROFILE").unwrap_or_default().to_ascii_lowercase();
+    let show = |p: &Path| {
+        let s = p.to_string_lossy().to_string();
+        match s.to_ascii_lowercase().strip_prefix(&format!("{profile}\\")) {
+            Some(_) if !profile.is_empty() => s[profile.len() + 1..].to_string(),
+            _ => s,
+        }
+    };
+    steps
+        .iter()
+        .filter_map(|st| match st {
+            Step::RemoveDir { path, .. } => Some(crate::model::PrefsItem { path: show(path), size: Some(crate::winutil::dir_size(path)), registry: false }),
+            Step::RemoveFile { path } => Some(crate::model::PrefsItem { path: show(path), size: path.metadata().ok().map(|m| m.len()), registry: false }),
+            Step::RemoveUserRegKey { path, .. } => Some(crate::model::PrefsItem { path: format!("HKCU\\{path}"), size: None, registry: true }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Settings and add-ons of `inst` that exist on disk, as remove steps. `others` are the other
 /// installed apps (to keep what another version still uses).
 pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {

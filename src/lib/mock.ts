@@ -884,6 +884,14 @@ const handlers: H = {
     return a ? clone(versionsFor(a)) : [];
   },
   get_catalog: () => clone(catalogNow().filter((e) => settings.showInstalledInGetApps || !e.installed)),
+  prefs_preview: ({ appId }) =>
+    appId.startsWith("blender")
+      ? [{ path: String.raw`AppData\Roaming\Blender Foundation\Blender\4.5`, size: 184 * MB, registry: false }]
+      : [
+          { path: String.raw`AppData\Roaming\obs-studio`, size: 42 * MB, registry: false },
+          { path: String.raw`C:\ProgramData\obs-studio`, size: 12 * MB, registry: false },
+        ],
+  get_catalog_entry: ({ id }) => clone(catalogNow().find((e) => e.id === id) ?? null),
   search_other_apps: ({ query }) =>
     OTHER_SEARCH.filter((e) => e.name.toLowerCase().includes(query.toLowerCase()) || e.id.toLowerCase().includes(query.toLowerCase())).map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id) }))
       .filter((e) => settings.showInstalledInGetApps || !e.installed),

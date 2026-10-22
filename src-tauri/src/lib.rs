@@ -40,6 +40,13 @@ pub fn run() {
             // Checking in the background at sign-in is on by default: set it up once.
             {
                 let mut p = core.persisted.lock();
+                if !p.other_apps_default_on {
+                    let mut s = core.settings.write();
+                    s.sources.other = true;
+                    store::save_settings(&s);
+                    p.other_apps_default_on = true;
+                    store::save_state(&p);
+                }
                 if !p.prereleases_default_on {
                     let mut s = core.settings.write();
                     s.blender_channel = "beta".into();
@@ -122,6 +129,8 @@ pub fn run() {
             commands::pause_all,
             commands::resume_all,
             commands::clear_finished_jobs,
+            commands::get_catalog_entry,
+            commands::prefs_preview,
             commands::close_and_continue,
             commands::get_activity,
             commands::export_activity,

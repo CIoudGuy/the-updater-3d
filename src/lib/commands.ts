@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, CatalogEntry, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, CatalogEntry, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 
 export interface Commands {
   /** Everything the UI needs on start. */
@@ -17,12 +17,14 @@ export interface Commands {
   /** Install a specific version of an installed app (roll back or forward). */
   install_version: { args: { appId: string; version: string }; ret: void };
   uninstall_app: { args: { appId: string; removePrefs: boolean }; ret: void };
+  prefs_preview: { args: { appId: string }; ret: PrefsItem[] };
   repair_app: { args: { appId: string }; ret: void };
 
   open_app: { args: { appId: string }; ret: void };
   show_in_folder: { args: { appId: string }; ret: void };
   get_versions: { args: { appId: string }; ret: VersionInfo[] };
   get_catalog: { args: {}; ret: CatalogEntry[] };
+  get_catalog_entry: { args: { id: string }; ret: CatalogEntry | null };
   /** Versions that can be installed for a catalog entry (newest first). */
   catalog_versions: { args: { id: string }; ret: VersionInfo[] };
   /** Packages of the winget catalog matching a Get apps search (Other apps on only). */
