@@ -5,6 +5,7 @@ use crate::sources::Download;
 use anyhow::{bail, Result};
 use futures_util::StreamExt;
 use parking_lot::Mutex;
+use md5::Md5;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -114,6 +115,28 @@ fn sha256_file(p: &std::path::Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+fn md5_file(p: &std::path::Path) -> Result<String> {
+    let mut f = std::fs::File::open(p)?;
+    let mut h = Md5::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Unity publishes "md5-<base64>" as a file's integrity value; this is its lowercase hex form.
+pub fn md5_hex_from_integrity(integrity: &str) -> Option<String> {
+    use base64::Engine;
+    let b64 = integrity.strip_prefix("md5-")?;
+    let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
+    (raw.len() == 16).then(|| hex::encode(raw))
+}
+
 /// Check a finished file. A cached file that fails is deleted so it downloads again.
 pub fn verify(d: &Download) -> Result<()> {
     let m = std::fs::metadata(&d.dest)?;
@@ -128,7 +151,46 @@ pub fn verify(d: &Download) -> Result<()> {
             bail!("Checksum mismatch: expected {want}, got {got}");
         }
     }
+    if let Some(want) = &d.md5 {
+        let got = md5_file(&d.dest)?;
+        if !got.eq_ignore_ascii_case(want) {
+            bail!("Checksum mismatch: expected MD5 {want}, got {got}");
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dl(dest: std::path::PathBuf, size: Option<u64>, md5: Option<String>) -> Download {
+        Download { url: String::new(), dest, size, sha256: None, md5, headers: vec![] }
+    }
+
+    #[test]
+    fn md5_and_size_are_checked() {
+        let dir = std::env::temp_dir().join(format!("u3d-md5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, b"hello world").unwrap();
+        // md5("hello world") = 5eb63bbbe01eeed093cb22bb8f5acdc3
+        let good = "5eb63bbbe01eeed093cb22bb8f5acdc3".to_string();
+        assert!(verify(&dl(f.clone(), Some(11), Some(good.clone()))).is_ok());
+        assert!(verify(&dl(f.clone(), Some(11), Some(good.to_ascii_uppercase()))).is_ok());
+        let e = verify(&dl(f.clone(), Some(11), Some("00".repeat(16)))).unwrap_err().to_string();
+        assert!(e.contains("Checksum mismatch"), "{e}");
+        assert!(verify(&dl(f.clone(), Some(12), Some(good))).unwrap_err().to_string().contains("size"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unity_integrity_value_becomes_hex() {
+        // The value from Unity's release API for 6000.3.27f1.
+        assert_eq!(md5_hex_from_integrity("md5-e5QStPCXCBTa8atkaZRINg==").as_deref(), Some("7b9412b4f0970814daf1ab6469944836"));
+        assert_eq!(md5_hex_from_integrity("sha256-abc"), None);
+        assert_eq!(md5_hex_from_integrity("md5-AAAA"), None);
+    }
 }
 
 pub async fn fetch(d: &Download, progress: Arc<Progress>, throttle: Arc<Throttle>, mut ctl: watch::Receiver<Control>) -> Result<Outcome> {

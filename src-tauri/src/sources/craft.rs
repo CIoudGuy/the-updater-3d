@@ -428,7 +428,7 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
         kind,
         name: a.name.to_string(),
         to_version: r.version.clone(),
-        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, headers: vec![] }],
+        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, headers: vec![] }],
         steps,
         block_dirs: current.and_then(|c| c.install_dir.clone()).into_iter().collect(),
         block_names: vec![format!("{}.exe", a.key)],

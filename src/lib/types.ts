@@ -1,7 +1,7 @@
 // Shared contract between the Rust backend (src-tauri/src/model.rs) and the UI.
 // Field names are camelCase on both sides (serde rename_all = "camelCase").
 
-export type Source = "adobe" | "craft" | "blender";
+export type Source = "adobe" | "craft" | "blender" | "tools";
 
 export type AppStatus =
   | "current" // installed and up to date
@@ -14,7 +14,7 @@ export type AppStatus =
   | "unknown"; // installed, latest version unknown (offline, catalog failed)
 
 export interface AppEntry {
-  /** Stable id. "adobe:SBSTP", "craft:photocraft", "blender:5.2" (one entry per Blender series). */
+  /** Stable id. "adobe:SBSTP", "craft:photocraft", "blender:5.2" (one entry per Blender series), "tools:obs", "tools:godot:4.7.2". */
   id: string;
   source: Source;
   /** "Substance 3D Painter", "PhotoCraft", "Blender 5.2" */
@@ -37,7 +37,7 @@ export interface AppEntry {
   updatedAt: string | null;
   /** Short tagline: "Paint and texture 3D models". */
   tagline: string | null;
-  /** Group shown as a section and filter: "Adobe", "Craft apps", "Blender". */
+  /** Group shown as a section and filter: "Adobe", "Craft apps", "Blender", "More apps". */
   group: string;
   /** Process is running right now (blocks updates). */
   running: boolean;
@@ -135,6 +135,8 @@ export interface Job {
   error: JobError | null;
   startedAt: string | null;
   finishedAt: string | null;
+  /** installing, but only waiting (for its turn or for Creative Cloud), so Cancel is safe */
+  cancelable?: boolean;
 }
 
 export type ActivityKind = "update" | "install" | "uninstall" | "rollback" | "check" | "failure" | "service";
@@ -194,6 +196,8 @@ export interface Settings {
   adobeInstallDir: string;
   /** Root that new Blender versions go into */
   blenderInstallDir: string;
+  /** Root that new Godot versions are unpacked into (one folder per version) */
+  godotInstallDir: string;
   /** "beta" (default) also lists Blender alpha, beta and release candidate builds; "stable" hides them */
   blenderChannel: "stable" | "beta";
   /** Bug-fix releases (5.2.2 -> 5.2.3) keep the old copy instead of replacing it */
@@ -201,7 +205,7 @@ export interface Settings {
   /** Show Craft app pre-releases */
   craftPrereleases: boolean;
   /** Which sources are enabled */
-  sources: { adobe: boolean; craft: boolean; blender: boolean };
+  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean };
   /** Number of parallel downloads */
   parallelDownloads: number;
   /** One UAC prompt ever instead of one per batch (registers an elevated task) */

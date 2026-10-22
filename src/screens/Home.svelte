@@ -387,7 +387,7 @@
           </div>
         {/each}
         {#if otherUpdates > 0}
-          <p class="note">Craft apps and Blender are not affected. {countOf(otherUpdates, "update")} ready in <a href="#/installed" onclick={review}>Installed</a>.</p>
+          <p class="note">Craft apps, Blender and More apps are not affected. {countOf(otherUpdates, "update")} ready in <a href="#/installed" onclick={review}>Installed</a>.</p>
         {/if}
       </section>
     {:else if hs === "signedout"}

@@ -7,7 +7,7 @@
 
 <style>
   .dab path {
-    transition: fill 0.2s ease;
+    transition: fill 0.13s ease;
   }
   .pulse {
     animation: pulse 1.6s ease-in-out infinite;

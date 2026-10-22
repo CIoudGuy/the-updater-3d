@@ -28,12 +28,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background-color 0.12s ease;
+    transition: background-color 0.08s ease;
   }
   .box svg {
     opacity: 0;
     transform: scale(0.6);
-    transition: opacity 0.12s ease, transform 0.12s var(--ease);
+    transition: opacity 0.08s ease, transform 0.08s var(--ease);
   }
   .box.on {
     background: var(--primary);

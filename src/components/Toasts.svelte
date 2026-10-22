@@ -24,7 +24,7 @@
 <div class="stack" aria-live="polite">
   {#each store.toasts as t (t.id)}
     {@const fj = t.kind === "err" ? failedJobFor(t.appId) : undefined}
-    <div class="toast" role="status" animate:flip={{ duration: reduced() ? 0 : 200 }} in:slideIn|global out:slideIn|global={{ duration: 160, x: 18 }}>
+    <div class="toast" role="status" animate:flip={{ duration: reduced() ? 0 : 130 }} in:slideIn|global out:slideIn|global={{ duration: 110, x: 18 }}>
       <Paint kind="blob" fill="#262626" />
       <div class="row">
         <Dab color={COLORS[t.kind]} />

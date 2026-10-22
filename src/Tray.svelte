@@ -148,7 +148,7 @@
     bottom: -4px;
     width: calc(100% + 14px);
     height: 15px;
-    animation: draw 0.42s var(--ease) both;
+    animation: draw 0.28s var(--ease) both;
   }
   .sub {
     position: relative;

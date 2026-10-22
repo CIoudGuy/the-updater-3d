@@ -154,7 +154,7 @@
     });
   }
 
-  async function changeFolder(key: "blenderInstallDir" | "adobeInstallDir") {
+  async function changeFolder(key: "blenderInstallDir" | "adobeInstallDir" | "godotInstallDir") {
     const picked = await call("pick_folder", { current: s[key] });
     if (picked) store.patchSettings({ [key]: picked });
   }
@@ -217,6 +217,9 @@
           <SRow label="Blender" desc="Every installed series is listed. New versions install next to the old ones.">
             {#snippet control()}<Toggle checked={s.sources.blender} label="Blender" onchange={(v) => store.patchSettings({ sources: { ...s.sources, blender: v } })} />{/snippet}
           </SRow>
+          <SRow label="More apps" desc="OBS Studio, Krita, FreeCAD, Godot, Unity. The Unity Editor download is about 4 GB.">
+            {#snippet control()}<Toggle checked={s.sources.tools} label="More apps: OBS Studio, Krita, FreeCAD, Godot, Unity" onchange={(v) => store.patchSettings({ sources: { ...s.sources, tools: v } })} />{/snippet}
+          </SRow>
           <SRow label="Blender pre-releases" desc="Alpha, beta and release candidate builds appear in Get apps, marked Pre-release.">
             {#snippet control()}
               <Segmented options={[{ value: "beta", label: "Show" }, { value: "stable", label: "Hide" }]} value={s.blenderChannel} onchange={(v) => store.patchSettings({ blenderChannel: v })} label="Blender pre-releases" />
@@ -231,6 +234,9 @@
           <SRow label="Blender install folder" desc={s.blenderInstallDir ? s.blenderInstallDir + freeOf(s.blenderInstallDir) : "Not set"}>
             {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("blenderInstallDir")}>Change</Btn>{/snippet}
           </SRow>
+          <SRow label="Godot install folder" desc={s.godotInstallDir ? s.godotInstallDir + freeOf(s.godotInstallDir) : "Not set"}>
+            {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("godotInstallDir")}>Change</Btn>{/snippet}
+          </SRow>
         {:else if active === "updates"}
           <SRow label="Check for updates" desc="Runs in the background, even with this window closed.">
             {#snippet control()}<Select options={intervalOpts} value={String(s.checkInterval)} onchange={(v) => store.patchSettings({ checkInterval: Number(v) })} width={180} label="Check for updates" />{/snippet}
@@ -239,7 +245,7 @@
             {#snippet control()}<Segmented options={modeOpts} value={s.autoMode} onchange={(v) => store.patchSettings({ autoMode: v })} label="Automatic updates" />{/snippet}
             {#snippet below()}
               {#if s.autoMode === "install"}
-                <div class="win" in:rise out:rise={{ duration: 120 }}>
+                <div class="win" in:rise out:rise={{ duration: 80 }}>
                   <span>Install between</span>
                   <Select options={timeOpts(s.windowStart)} value={s.windowStart} onchange={(v) => store.patchSettings({ windowStart: v })} width={84} height={30} label="Start time" />
                   <span>and</span>
@@ -404,7 +410,7 @@
     pointer-events: none;
   }
   .marker.anim {
-    transition: transform 0.28s var(--ease), height 0.2s, top 0.28s var(--ease), opacity 0.2s;
+    transition: transform 0.18s var(--ease), height 0.13s, top 0.18s var(--ease), opacity 0.13s;
   }
   /* old and new page share one grid cell while they cross-fade */
   .stage {

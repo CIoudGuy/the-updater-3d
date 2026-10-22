@@ -3,7 +3,7 @@
 use crate::download::{self, Control, Outcome, Progress, Throttle};
 use crate::elevate::Elevator;
 use crate::model::*;
-use crate::sources::{self, adobe, blender, craft, Installed, Latest, Plan, SourceData, Verify};
+use crate::sources::{self, adobe, blender, craft, tools, Installed, Latest, Plan, SourceData, Verify};
 use crate::store::{self, Persisted};
 use crate::{paths, procs, version, winutil};
 use anyhow::{anyhow, Result};
@@ -53,6 +53,7 @@ pub struct Core {
     pub adobe: RwLock<Option<Arc<adobe::Catalog>>>,
     pub craft: RwLock<Option<Arc<craft::Feed>>>,
     pub blender: RwLock<Option<Arc<blender::Feed>>>,
+    pub tools: RwLock<Option<Arc<tools::Feed>>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
     pub throttle: Arc<Throttle>,
@@ -107,6 +108,7 @@ impl Core {
             adobe: RwLock::new(None),
             craft: RwLock::new(None),
             blender: RwLock::new(None),
+            tools: RwLock::new(None),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
             throttle,
@@ -277,7 +279,7 @@ impl Core {
                 tagline: i.tagline.clone(),
                 group: i.source.group().into(),
                 running: is_running,
-                can_uninstall: !i.read_only && (i.uninstall.is_some() || matches!(i.data, SourceData::Blender { .. })),
+                can_uninstall: !i.read_only && (i.uninstall.is_some() || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
                 channel: i.channel.clone(),
                 note,
@@ -305,6 +307,9 @@ impl Core {
             if s.sources.blender {
                 v.extend(blender::scan(&un, &PathBuf::from(&s.blender_install_dir)));
             }
+            if s.sources.tools {
+                v.extend(tools::scan(&un, &PathBuf::from(&s.godot_install_dir)));
+            }
             // Leftover registrations whose files are gone are not installed apps (Adobe kept
             // listing a deleted Photoshop). They show up in Get apps instead.
             v.retain(|i| !i.missing);
@@ -322,6 +327,7 @@ impl Core {
         let cat = self.adobe.read().clone();
         let cf = self.craft.read().clone();
         let bf = self.blender.read().clone();
+        let tf = self.tools.read().clone();
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
         for i in &installed {
@@ -329,6 +335,7 @@ impl Core {
                 Source::Adobe => cat.as_ref().and_then(|c| adobe::latest(i, &installed, c)),
                 Source::Craft => cf.as_ref().and_then(|f| craft::latest(i, f)),
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest(i, &installed, f)),
+                Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
             };
             if let Some(l) = l {
                 latest.insert(i.id.clone(), l);
@@ -405,7 +412,7 @@ impl Core {
 
     pub fn update_disk_status(&self) {
         let s = self.settings.read().clone();
-        let mut roots: Vec<PathBuf> = vec![paths::downloads(), PathBuf::from(&s.adobe_install_dir), PathBuf::from(&s.blender_install_dir), paths::program_files()];
+        let mut roots: Vec<PathBuf> = vec![paths::downloads(), PathBuf::from(&s.adobe_install_dir), PathBuf::from(&s.blender_install_dir), PathBuf::from(&s.godot_install_dir), paths::program_files()];
         roots.dedup();
         let mut disks: Vec<DiskInfo> = Vec::new();
         for r in roots {
@@ -491,7 +498,19 @@ impl Core {
                 }
             }
         };
-        let (a, c, b) = tokio::join!(adobe_f, craft_f, blender_f);
+        let tools_f = async {
+            if !settings.sources.tools {
+                return None;
+            }
+            match tools::fetch(&installed).await {
+                Ok(f) => Some(Arc::new(f)),
+                Err(e) => {
+                    log::warn!("more apps feed: {e:#}");
+                    None
+                }
+            }
+        };
+        let (a, c, b, t) = tokio::join!(adobe_f, craft_f, blender_f, tools_f);
         if a.is_some() {
             *self.adobe.write() = a;
         } else if settings.sources.adobe {
@@ -506,6 +525,11 @@ impl Core {
             *self.blender.write() = b;
         } else if settings.sources.blender {
             unknown.insert("blender");
+        }
+        if t.is_some() {
+            *self.tools.write() = t;
+        } else if settings.sources.tools {
+            unknown.insert("tools");
         }
         self.st.lock().unknown_sources = unknown.clone();
         self.rescan().await;
@@ -534,7 +558,7 @@ impl Core {
             s.scan_step = None;
         });
         let meta = if !unknown.is_empty() {
-            let names: Vec<&str> = unknown.iter().map(|s| match *s { "adobe" => "Adobe", "craft" => "Craft apps", _ => "Blender" }).collect();
+            let names: Vec<&str> = unknown.iter().map(|s| match *s { "adobe" => "Adobe", "craft" => "Craft apps", "tools" => "More apps", _ => "Blender" }).collect();
             Some(format!("Could not reach {}", names.join(", ")))
         } else {
             None
@@ -672,6 +696,10 @@ impl Core {
             let ext = if url.ends_with(".svg") { "svg" } else { "webp" };
             wanted.push((format!("craft:{}", a.key), url, format!("craft-{}.{ext}", a.key)));
         }
+        for a in tools::APPS {
+            let ext = if a.icon.ends_with(".svg") { "svg" } else { "png" };
+            wanted.push((format!("tools:{}", a.key), a.icon.to_string(), format!("tools-{}.{ext}", a.key)));
+        }
         let mut have_now: Vec<(String, String)> = Vec::new();
         for (id, url, name) in wanted {
             if self.st.lock().catalog_icons.contains_key(&id) {
@@ -700,10 +728,11 @@ impl Core {
         let settings = self.settings.read().clone();
         self.rescan().await;
         let installed = self.st.lock().installed.clone();
-        let (a, c, b) = tokio::join!(
+        let (a, c, b, t) = tokio::join!(
             async { if settings.sources.adobe { adobe::fetch_catalog().await.ok() } else { None } },
             async { if settings.sources.craft { craft::fetch(settings.craft_prereleases).await.ok() } else { None } },
             async { if settings.sources.blender { blender::fetch(&installed, settings.blender_channel == "beta").await.ok() } else { None } },
+            async { if settings.sources.tools { tools::fetch(&installed).await.ok() } else { None } },
         );
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
         if let Some(a) = a {
@@ -714,6 +743,9 @@ impl Core {
         }
         if let Some(b) = b {
             *self.blender.write() = Some(Arc::new(b));
+        }
+        if let Some(t) = t {
+            *self.tools.write() = Some(Arc::new(t));
         }
         self.rescan().await;
         let me = self.clone();
@@ -782,6 +814,11 @@ impl Core {
                 out.extend(craft::catalog_entries(f, &st.installed));
             }
         }
+        if s.sources.tools {
+            if let Some(f) = self.tools.read().as_ref() {
+                out.extend(tools::catalog_entries(f, &st.installed));
+            }
+        }
         for e in &mut out {
             if let Some(u) = st.catalog_icons.get(&e.id) {
                 e.icon_url = Some(u.clone());
@@ -816,6 +853,11 @@ impl Core {
                 let feed = self.blender.read().clone().ok_or_else(|| anyhow!("Blender releases are not loaded yet"))?;
                 blender::catalog_versions(id, &feed).await
             }
+            "tools" => {
+                let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists are not loaded yet"))?;
+                let installed = self.st.lock().installed.clone();
+                tools::catalog_versions(parts.next().unwrap_or(""), &feed, &installed).await
+            }
             _ => Err(anyhow!("Unknown app {id}")),
         }
     }
@@ -833,6 +875,10 @@ impl Core {
             SourceData::Blender { .. } => {
                 let feed = self.blender.read().clone().ok_or_else(|| anyhow!("Blender releases are not loaded yet"))?;
                 blender::versions(&inst, &feed).await
+            }
+            SourceData::Tools { .. } => {
+                let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists are not loaded yet"))?;
+                tools::versions(&inst, &feed).await
             }
         }
     }
@@ -903,6 +949,7 @@ impl Core {
                 error: None,
                 started_at: None,
                 finished_at: None,
+                cancelable: false,
             },
             req,
             ctl: tx,
@@ -926,7 +973,7 @@ impl Core {
     pub fn pause(&self, id: &str) {
         self.with_job(id, |j| {
             if matches!(j.job.state, JobState::Downloading) {
-                let _ = j.ctl.send(Control::Pause);
+                set_control(&j.ctl, Control::Pause);
             } else if j.job.state == JobState::Waiting {
                 j.job.state = JobState::Paused;
                 j.job.step = "Paused".into();
@@ -938,7 +985,7 @@ impl Core {
     pub fn resume(&self, id: &str) {
         self.with_job(id, |j| {
             if j.job.state == JobState::Paused {
-                let _ = j.ctl.send(Control::Run);
+                set_control(&j.ctl, Control::Run);
                 j.job.state = JobState::Waiting;
                 j.job.step = "Waiting".into();
             }
@@ -949,7 +996,7 @@ impl Core {
 
     pub fn cancel(&self, id: &str) -> Result<()> {
         let r = self.with_job(id, |j| match j.job.state {
-            JobState::Installing | JobState::Verifying => Err(anyhow!("{} is installing now and cannot be stopped safely", j.job.name)),
+            JobState::Installing | JobState::Verifying if !j.job.cancelable => Err(anyhow!("{} is installing now and cannot be stopped safely", j.job.name)),
             JobState::Waiting | JobState::Paused if !j.active => {
                 j.job.state = JobState::Canceled;
                 j.job.step = "Canceled".into();
@@ -957,7 +1004,7 @@ impl Core {
                 Ok(())
             }
             _ => {
-                let _ = j.ctl.send(Control::Cancel);
+                set_control(&j.ctl, Control::Cancel);
                 Ok(())
             }
         });
@@ -1113,6 +1160,12 @@ impl Core {
                         let v = if repair { Some(inst.version.clone()) } else { version.clone() };
                         craft::plan_install(key, v.as_deref(), kind, Some(&inst), feed.as_deref(), s.craft_prereleases).await
                     }
+                    SourceData::Tools { .. } => {
+                        let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists could not be loaded. Check your connection."))?;
+                        let kind = if repair { JobKind::Repair } else if version.as_ref().is_some_and(|v| tools::cmp_ver(&inst.version, v).is_gt()) { JobKind::Rollback } else { JobKind::Update };
+                        let target = if repair { Some(inst.version.clone()) } else { version.clone().or(latest) };
+                        tools::plan_install(&inst.id, target.as_deref(), kind, Some(&inst), &installed, &feed, tools::Ctx { godot_root: std::path::Path::new(&s.godot_install_dir) }).await
+                    }
                     SourceData::Blender { .. } => {
                         if repair {
                             return Err(anyhow!("Repair is not available for Blender. Install the same version again from its page."));
@@ -1179,6 +1232,10 @@ impl Core {
                         )
                         .await
                     }
+                    "tools" => {
+                        let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists could not be loaded"))?;
+                        tools::plan_install(id, version.as_deref(), JobKind::Install, None, &installed, &feed, tools::Ctx { godot_root: std::path::Path::new(&s.godot_install_dir) }).await
+                    }
                     _ => Err(anyhow!("Unknown app {id}")),
                 }
             }
@@ -1188,6 +1245,7 @@ impl Core {
                     Source::Adobe => adobe::plan_uninstall(inst),
                     Source::Craft => craft::plan_uninstall(inst),
                     Source::Blender => blender::plan_uninstall(inst),
+                    Source::Tools => tools::plan_uninstall(inst),
                 }
             }
         }
@@ -1407,10 +1465,14 @@ impl Core {
             j.progress = dl_share;
             j.state = JobState::Installing;
             j.step = "Waiting for another install to finish".into();
+            j.cancelable = true;
         });
 
-        // ---- one installer at a time
-        let _lock = self.install_lock.lock().await;
+        // ---- one installer at a time; nothing has run yet, so Cancel still works while waiting
+        let Some(_lock) = take_turn(&self.install_lock, ctl.clone()).await else {
+            return Ok(Outcome::Canceled);
+        };
+        self.set_job(id, |j| j.cancelable = false);
 
         // ---- the app must be closed
         loop {
@@ -1536,6 +1598,11 @@ impl Core {
         });
         // Handed to another program: wait for it to finish, showing the wait.
         if let Verify::Wait { app_id, version: v, minutes } = &plan.verify {
+            // Creative Cloud queues its own installs: let the next job hand off now, and let this
+            // one be canceled (Creative Cloud may still finish what it started).
+            drop(_lock);
+            self.set_job(id, |j| j.cancelable = true);
+            let mut ctl = ctl.clone();
             let t0 = Instant::now();
             loop {
                 self.rescan().await;
@@ -1555,7 +1622,8 @@ impl Core {
                     j.step = format!("Finishing in Creative Cloud, {}:{:02}", s / 60, s % 60);
                     j.progress = 0.05 + 0.94 * install_curve(s as f64 / 600.0);
                 });
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                // Wake at once on Cancel instead of after the next check.
+                let _ = tokio::time::timeout(Duration::from_secs(5), ctl.changed()).await;
             }
         }
         // Installers sometimes finish registering a moment after they exit.
@@ -1634,6 +1702,8 @@ impl Core {
         let rescan = new.sources.adobe != old.sources.adobe
             || new.sources.craft != old.sources.craft
             || new.sources.blender != old.sources.blender
+            || new.sources.tools != old.sources.tools
+            || new.godot_install_dir != old.godot_install_dir
             || new.blender_channel != old.blender_channel
             || new.craft_prereleases != old.craft_prereleases
             || new.blender_install_dir != old.blender_install_dir
@@ -1677,6 +1747,31 @@ async fn with_adobe_notes(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
     list
 }
 
+/// Wait for the one-installer-at-a-time slot, giving up when the job is canceled meanwhile.
+async fn take_turn(lock: &tokio::sync::Mutex<()>, mut ctl: watch::Receiver<Control>) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    let canceled = async {
+        loop {
+            if *ctl.borrow_and_update() == Control::Cancel {
+                return;
+            }
+            if ctl.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        g = lock.lock() => Some(g),
+        _ = canceled => None,
+    }
+}
+
+/// Tell a job to run, pause or cancel. `send_replace` stores the value even when no download is
+/// listening right now: a paused job has ended its download, and a plain `send` would drop the
+/// "run" from Resume, so the job read the old "pause" again and paused itself.
+fn set_control(tx: &watch::Sender<Control>, c: Control) {
+    tx.send_replace(c);
+}
+
 /// What kind of install this is (for learned timings) and a first guess of its seconds.
 fn install_estimate(plan: &Plan, bytes: u64) -> (String, f64) {
     let mb = bytes as f64 / (1024.0 * 1024.0);
@@ -1695,6 +1790,10 @@ fn install_estimate(plan: &Plan, bytes: u64) -> (String, f64) {
         "blender" if runs_msi => ("blender:msi".into(), 150.0),
         "blender" => ("blender:zip".into(), 20.0 + mb / 30.0),
         "craft" => ("craft".into(), 25.0),
+        "tools" => {
+            let key = plan.app_id.split(':').nth(1).unwrap_or("");
+            (format!("tools:{key}"), tools::install_seconds(key, mb))
+        }
         other => (other.to_string(), 30.0),
     }
 }
@@ -1795,7 +1894,38 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_bytes, install_curve, rum_watch, with_version};
+    use super::{folder_bytes, install_curve, rum_watch, set_control, take_turn, with_version};
+    use crate::download::Control;
+
+    #[tokio::test]
+    async fn cancel_works_while_waiting_for_the_install_slot() {
+        let lock = tokio::sync::Mutex::new(());
+        let busy = lock.lock().await; // another job is installing
+        let (tx, rx) = tokio::sync::watch::channel(Control::Run);
+        let wait = take_turn(&lock, rx);
+        tokio::pin!(wait);
+        // Still waiting while the other install runs.
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut wait).await.is_err());
+        set_control(&tx, Control::Cancel);
+        let got = tokio::time::timeout(std::time::Duration::from_millis(500), &mut wait).await.expect("Cancel must end the wait");
+        assert!(got.is_none());
+        drop(busy);
+        // With nothing else installing, the slot is taken right away.
+        let (_tx2, rx2) = tokio::sync::watch::channel(Control::Run);
+        assert!(take_turn(&lock, rx2).await.is_some());
+    }
+
+    #[test]
+    fn resume_after_pause_is_not_lost() {
+        // Pause while the download listens, the download ends, then Resume with nobody listening.
+        let (tx, rx) = tokio::sync::watch::channel(Control::Run);
+        set_control(&tx, Control::Pause);
+        assert_eq!(*rx.borrow(), Control::Pause);
+        drop(rx);
+        set_control(&tx, Control::Run);
+        // The restarted download must see "run", not the old "pause".
+        assert_eq!(*tx.subscribe().borrow(), Control::Run);
+    }
 
     #[test]
     fn remote_update_manager_progress_comes_from_its_folder() {

@@ -77,7 +77,7 @@
   }
   .select :global(.chev) {
     color: var(--text-3);
-    transition: transform 0.15s var(--ease);
+    transition: transform 0.1s var(--ease);
   }
   .open :global(.chev) {
     transform: rotate(180deg);

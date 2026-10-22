@@ -82,7 +82,7 @@
     transform: scale(0.97);
   }
   .chev :global(svg) {
-    transition: transform 0.15s var(--ease);
+    transition: transform 0.1s var(--ease);
   }
   .chev.open :global(svg) {
     transform: rotate(180deg);

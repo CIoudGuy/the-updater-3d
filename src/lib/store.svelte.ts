@@ -2,6 +2,7 @@
 import { call, on, send, setErrorHandler } from "./api";
 import type { ActivityEntry, AppEntry, AppStatus, Job, Settings, Status } from "./types";
 import { driveOf } from "./format";
+import { currentBatch } from "./batch";
 
 const defaultSettings: Settings = {
   checkInterval: 4,
@@ -21,10 +22,11 @@ const defaultSettings: Settings = {
   language: "en_US",
   adobeInstallDir: "",
   blenderInstallDir: "",
+  godotInstallDir: "",
   blenderChannel: "beta",
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
-  sources: { adobe: true, craft: true, blender: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true },
   parallelDownloads: 3,
   silentElevation: false,
   uiZoom: 1,
@@ -74,7 +76,7 @@ function syncList<T extends { id: string }>(cur: T[], next: T[]): T[] {
   return cur;
 }
 
-export const GROUPS = ["Adobe", "Craft apps", "Blender"] as const;
+export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps"] as const;
 
 export function isOpenState(s: Job["state"]) {
   return s === "waiting" || s === "paused" || s === "blocked" || s === "downloading" || s === "installing" || s === "verifying";
@@ -105,8 +107,8 @@ class Store {
   activeJobs = $derived(this.jobs.filter((j) => isRunningState(j.state) || j.state === "paused" || j.state === "blocked"));
   waitingJobs = $derived(this.jobs.filter((j) => j.state === "waiting"));
   blockedJobs = $derived(this.jobs.filter((j) => j.state === "blocked"));
-  /** jobs that still count toward the overall batch numbers */
-  batchJobs = $derived(this.jobs.filter((j) => j.state !== "canceled" && j.state !== "failed"));
+  /** jobs of the batch running now, for the overall numbers (see currentBatch) */
+  batchJobs = $derived(currentBatch(this.jobs));
   speed = $derived(this.jobs.reduce((n, j) => n + (j.state === "downloading" ? j.speed : 0), 0));
   downloaded = $derived(this.batchJobs.reduce((n, j) => n + Math.min(j.downloaded, j.total), 0));
   totalBytes = $derived(this.batchJobs.reduce((n, j) => n + j.total, 0));

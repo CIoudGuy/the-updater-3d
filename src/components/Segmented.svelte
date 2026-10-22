@@ -85,7 +85,7 @@
     opacity: 0;
   }
   .marker.anim {
-    transition: transform 0.28s var(--ease), height 0.2s var(--ease), top 0.2s var(--ease), opacity 0.2s;
+    transition: transform 0.18s var(--ease), height 0.13s var(--ease), top 0.13s var(--ease), opacity 0.13s;
   }
   .opt {
     position: relative;
@@ -96,7 +96,7 @@
     color: var(--text-2);
     font-weight: 500;
     white-space: nowrap;
-    transition: color 0.15s ease, transform var(--t-fast) var(--ease);
+    transition: color 0.1s ease, transform var(--t-fast) var(--ease);
   }
   .opt:hover {
     color: var(--text);

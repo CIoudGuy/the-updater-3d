@@ -30,7 +30,7 @@ async fn sha_from_feed() -> String {
 #[ignore]
 async fn download_pauses_resumes_limits_and_verifies() {
     let dir = tmp("dl");
-    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some(sha_from_feed().await), headers: vec![] };
+    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some(sha_from_feed().await), md5: None, headers: vec![] };
     let throttle = Arc::new(Throttle::new());
     throttle.set(3 * 1024 * 1024);
     let (tx, rx) = tokio::sync::watch::channel(Control::Run);
@@ -67,7 +67,7 @@ async fn download_pauses_resumes_limits_and_verifies() {
 #[ignore]
 async fn bad_checksum_is_rejected_and_deleted() {
     let dir = tmp("badsum");
-    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some("00".repeat(32)), headers: vec![] };
+    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some("00".repeat(32)), md5: None, headers: vec![] };
     let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
     let r = download::fetch(&d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await;
     assert!(r.is_err());
@@ -106,6 +106,20 @@ fn run_step_reports_exit_codes() {
     assert!(!bad.ok);
     assert_eq!(bad.code, Some(1603));
     assert!(bad.output.contains("nope"));
+}
+
+#[test]
+fn nsis_folder_arguments_are_not_quoted() {
+    // NSIS installers only understand /D=<dir> when it is the raw, unquoted tail of the command
+    // line, even if the folder has spaces. cmd's echo shows the arguments exactly as received.
+    let dir = r"C:\Program Files\Unity\Hub\Editor\6000.3.27f1";
+    let run = |args: Vec<String>| execute(&Step::Run { exe: "cmd.exe".into(), args, cwd: None, ok_codes: vec![0], elevated: false, label: "x".into(), log: None });
+    let r = run(vec!["/c".into(), "echo".into(), "/S".into(), format!("/D={dir}")]);
+    assert!(r.ok, "{}", r.message);
+    assert_eq!(r.output.trim(), format!("/S /D={dir}"));
+    // Other arguments with spaces are still quoted.
+    let r = run(vec!["/c".into(), "echo".into(), "a b".into()]);
+    assert_eq!(r.output.trim(), "\"a b\"");
 }
 
 /// Talks to a real helper process over the named pipe (started without UAC in debug builds).

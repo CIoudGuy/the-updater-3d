@@ -382,7 +382,7 @@
   }
   .wrow.other,
   .wrow.settling {
-    transition: transform 0.16s var(--ease);
+    transition: transform 0.1s var(--ease);
   }
   .wrow.dragging {
     z-index: 3;
@@ -391,7 +391,7 @@
     border-top-color: transparent;
   }
   .wrow.dragging.settling {
-    transition: transform 0.15s var(--ease);
+    transition: transform 0.1s var(--ease);
   }
   .dragbg {
     position: absolute;

@@ -20,7 +20,7 @@
     flex: none;
     border-radius: 10px;
     background: #3a3a3a;
-    transition: background-color 0.12s ease;
+    transition: background-color 0.08s ease;
   }
   .toggle.on {
     background: var(--primary);
@@ -36,7 +36,7 @@
     height: 14px;
     border-radius: 50%;
     background: var(--text-2);
-    transition: transform 0.12s var(--ease), background-color 0.12s ease;
+    transition: transform 0.09s var(--ease), background-color 0.08s ease;
   }
   .on .knob {
     transform: translateX(14px);

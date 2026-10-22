@@ -49,9 +49,9 @@ export const NO_STOP_TIP = "Installing now. It can't be stopped safely.";
 export function canPause(j: Pick<Job, "state">): boolean {
   return j.state === "downloading" || j.state === "paused" || j.state === "waiting";
 }
-/** The backend refuses to cancel while the installer runs. */
-export function canCancel(j: Pick<Job, "state">): boolean {
-  return j.state !== "installing" && j.state !== "verifying";
+/** The backend refuses to cancel while the installer runs, unless the job is only waiting. */
+export function canCancel(j: Pick<Job, "state" | "cancelable">): boolean {
+  return (j.state !== "installing" && j.state !== "verifying") || !!j.cancelable;
 }
 /** Tooltip for the pause or resume button: the reason when it is disabled, else the action with its key. */
 export function pauseTip(j: Pick<Job, "state">, keys = ""): string {
@@ -59,6 +59,6 @@ export function pauseTip(j: Pick<Job, "state">, keys = ""): string {
   return (j.state === "paused" ? "Resume" : "Pause") + keys;
 }
 /** Tooltip for the cancel button. */
-export function cancelTip(j: Pick<Job, "state">, label = "Cancel", keys = ""): string {
+export function cancelTip(j: Pick<Job, "state" | "cancelable">, label = "Cancel", keys = ""): string {
   return canCancel(j) ? label + keys : NO_STOP_TIP;
 }

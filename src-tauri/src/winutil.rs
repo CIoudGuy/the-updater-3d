@@ -16,6 +16,23 @@ pub fn cmd(exe: impl AsRef<std::ffi::OsStr>) -> Command {
     c
 }
 
+/// NSIS installers read `/D=<dir>` (install folder) and `_?=<dir>` (uninstall in place) from the
+/// raw command line: they must come last and must not be quoted, even when the path has spaces.
+pub fn is_raw_arg(a: &str) -> bool {
+    a.starts_with("/D=") || a.starts_with("_?=")
+}
+
+/// Add program arguments, passing the NSIS ones (`is_raw_arg`) through unquoted.
+pub fn add_args(c: &mut Command, args: &[String]) {
+    for a in args {
+        if is_raw_arg(a) {
+            c.raw_arg(a);
+        } else {
+            c.arg(a);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UninstallEntry {
     pub key: String,
@@ -407,9 +424,137 @@ pub fn pathbuf(s: &str) -> PathBuf {
     PathBuf::from(s.trim().trim_matches('"').trim_end_matches(['\\', '/']))
 }
 
+// ---------------------------------------------------------------- no helper programs
+// Antivirus heuristics distrust an unsigned app that quietly starts schtasks, whoami or
+// taskkill, so these talk to Windows directly instead.
+
+/// "4.5.14" from the exe's version resource (the numeric file version, not the display text).
+pub fn exe_version(exe: &Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
+    let name = HSTRING::from(exe.as_os_str());
+    unsafe {
+        let len = GetFileVersionInfoSizeW(&name, None);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        GetFileVersionInfoW(&name, None, len, buf.as_mut_ptr().cast()).ok()?;
+        let mut info: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut size = 0u32;
+        if !VerQueryValueW(buf.as_ptr().cast(), &HSTRING::from("\\"), &mut info, &mut size).as_bool() || info.is_null() || (size as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>() {
+            return None;
+        }
+        let f = &*(info as *const VS_FIXEDFILEINFO);
+        if f.dwSignature != 0xFEEF04BD {
+            return None;
+        }
+        let (a, b, c) = (f.dwFileVersionMS >> 16, f.dwFileVersionMS & 0xFFFF, f.dwFileVersionLS >> 16);
+        if a == 0 && b == 0 {
+            return None;
+        }
+        Some(format!("{a}.{b}.{c}"))
+    }
+}
+
+/// The signed-in Windows account's SID, "S-1-5-21-...".
+pub fn current_user_sid() -> Option<String> {
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u8; len.max(1) as usize];
+        let got = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), len, &mut len);
+        let _ = CloseHandle(token);
+        got.ok()?;
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut s = windows::core::PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut s).ok()?;
+        let out = s.to_string().ok();
+        let _ = LocalFree(Some(HLOCAL(s.0.cast())));
+        out.filter(|v| v.starts_with("S-1-"))
+    }
+}
+
+/// Run `f` with the Task Scheduler service, on this thread (COM set up and torn down here).
+fn with_task_service<T>(f: impl FnOnce(&windows::Win32::System::TaskScheduler::ITaskService) -> windows::core::Result<T>) -> windows::core::Result<T> {
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+    use windows::Win32::System::TaskScheduler::{ITaskService, TaskScheduler};
+    use windows::Win32::System::Variant::VARIANT;
+    unsafe {
+        let init = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let r = (|| {
+            let svc: ITaskService = CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)?;
+            let none = VARIANT::default();
+            svc.Connect(&none, &none, &none, &none)?;
+            f(&svc)
+        })();
+        if init.is_ok() {
+            CoUninitialize();
+        }
+        r
+    }
+}
+
+/// Is a scheduled task with this name registered in the root folder?
+pub fn task_exists(name: &str) -> bool {
+    with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name)) }).is_ok()
+}
+
+/// Start a scheduled task now.
+pub fn run_task(name: &str) -> bool {
+    use windows::Win32::System::Variant::VARIANT;
+    with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name))?.Run(&VARIANT::default()) }).is_ok()
+}
+
+/// Ask a process to close, like clicking its X: WM_CLOSE to each of its top-level windows.
+pub fn close_process_windows(pid: u32) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
+    unsafe extern "system" fn each(hwnd: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let mut owner = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut owner));
+            if owner == lp.0 as u32 {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
+        }
+        true.into()
+    }
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(pid as isize));
+    }
+}
+
+/// End a process at once.
+pub fn kill_process(pid: u32) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(h, 1);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_versions_and_account_without_helper_programs() {
+        // notepad.exe always carries a numeric version resource.
+        let np = std::path::PathBuf::from(std::env::var("WINDIR").unwrap()).join("System32").join("notepad.exe");
+        let v = exe_version(&np).expect("notepad version");
+        assert!(v.split('.').count() == 3 && v.split('.').all(|p| p.parse::<u32>().is_ok()), "{v}");
+        assert!(current_user_sid().unwrap().starts_with("S-1-5-"));
+        assert!(!task_exists("The Updater 3D test task that does not exist"));
+    }
 
     #[test]
     fn splits_adobe_uninstall_string() {

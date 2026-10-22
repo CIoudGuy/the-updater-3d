@@ -261,7 +261,8 @@ struct VersionCache {
     entries: HashMap<String, (i64, String)>,
 }
 
-/// `blender.exe --version` for portable copies we did not install (cached by exe mtime).
+/// The version of a portable copy we did not install (cached by exe mtime). Read from the exe's
+/// version resource: running `blender.exe --version` in the background upset antivirus.
 fn probe_version(exe: &Path) -> Option<String> {
     let cache_path = paths::data_dir().join("blender-versions.json");
     let mut cache: VersionCache = std::fs::read(&cache_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
@@ -272,9 +273,7 @@ fn probe_version(exe: &Path) -> Option<String> {
             return Some(v.clone());
         }
     }
-    let out = winutil::cmd(exe).arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let v = text.lines().find_map(|l| l.trim().strip_prefix("Blender ").map(|s| s.split_whitespace().next().unwrap_or("").to_string()))?;
+    let v = winutil::exe_version(exe)?;
     cache.entries.insert(key, (mtime, v.clone()));
     let _ = std::fs::write(&cache_path, serde_json::to_vec(&cache).unwrap_or_default());
     Some(v)
@@ -694,7 +693,7 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
             kind,
             name: name.clone(),
             to_version: b.display(),
-            downloads: vec![Download { url: b.url.clone(), dest: zip.clone(), size: b.size, sha256: sha, headers: vec![] }],
+            downloads: vec![Download { url: b.url.clone(), dest: zip.clone(), size: b.size, sha256: sha, md5: None, headers: vec![] }],
             steps: zip_steps(&zip, &dir, &marker, &name, dir.exists()),
             block_dirs: vec![dir],
             block_names: vec![],
@@ -739,7 +738,7 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
             kind,
             name: format!("Blender {t_series}"),
             to_version: target.version.clone(),
-            downloads: vec![Download { url, dest: file.clone(), size: target.msi_size, sha256: sha, headers: vec![] }],
+            downloads: vec![Download { url, dest: file.clone(), size: target.msi_size, sha256: sha, md5: None, headers: vec![] }],
             steps: vec![Step::Run {
                 exe: PathBuf::from("msiexec.exe"),
                 args: vec!["/i".into(), file.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "/l*v".into(), log.to_string_lossy().into()],
@@ -781,7 +780,7 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
         kind,
         name: name.clone(),
         to_version: target.version.clone(),
-        downloads: vec![Download { url, dest: zip.clone(), size: target.zip_size, sha256: sha, headers: vec![] }],
+        downloads: vec![Download { url, dest: zip.clone(), size: target.zip_size, sha256: sha, md5: None, headers: vec![] }],
         steps,
         block_dirs: vec![],
         block_names: vec![],

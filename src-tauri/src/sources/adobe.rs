@@ -638,7 +638,7 @@ pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dir
         kind: JobKind::Update,
         name: name.to_string(),
         to_version: to_version.to_string(),
-        downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, headers: vec![] }],
+        downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, md5: None, headers: vec![] }],
         steps: vec![
             Step::ExtractZip { zip, dest: exe_dir.clone(), strip_root: false, elevated: false, label: "Preparing Adobe Remote Update Manager".into() },
             Step::Run {

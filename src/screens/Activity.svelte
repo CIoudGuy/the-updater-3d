@@ -253,7 +253,7 @@
   }
   .chev {
     display: flex;
-    transition: transform 0.2s var(--ease);
+    transition: transform 0.13s var(--ease);
   }
   .chev.up {
     transform: rotate(180deg);

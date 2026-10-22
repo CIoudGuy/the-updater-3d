@@ -6,7 +6,7 @@
 
   // Colour wash that rises from the bottom of a card. The edge waves slowly while active.
   let { color, level, active = false, rest = 0.08 }: { color: string; level: number; active?: boolean; rest?: number } = $props();
-  const lv = Tween.of(() => level, { duration: reduced() ? 0 : 700, easing: cubicOut });
+  const lv = Tween.of(() => level, { duration: reduced() ? 0 : 420, easing: cubicOut });
 </script>
 
 <div class="wash" aria-hidden="true">
