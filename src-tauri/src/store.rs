@@ -18,12 +18,27 @@ fn migrate_from_old_id() {
         return;
     }
     let old = paths::local_app_data().join("cloud.devalt.theupdater3d").join("data");
-    if old.join("settings.json").exists() {
-        for f in ["settings.json", "state.json", "activity.jsonl"] {
-            let _ = std::fs::copy(old.join(f), paths::data_dir().join(f));
+    migrate_dirs(&old, &paths::data_dir());
+    let _ = std::fs::write(flag, "");
+}
+
+fn migrate_dirs(old: &std::path::Path, new: &std::path::Path) {
+    // Never overwrite what this version already saved (window size, history, settings changed
+    // since): copy whole files only when they are missing here.
+    for f in ["settings.json", "state.json", "activity.jsonl"] {
+        if old.join(f).exists() && !new.join(f).exists() {
+            let _ = std::fs::copy(old.join(f), new.join(f));
         }
     }
-    let _ = std::fs::write(flag, "");
+    // Settings that already exist here only take "Fewer admin prompts" from the old version,
+    // because its Windows task is still registered.
+    let read = |p: std::path::PathBuf| std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+    if let (Some(o), Some(mut n)) = (read(old.join("settings.json")), read(new.join("settings.json"))) {
+        if o["silentElevation"] == true && n["silentElevation"] != true {
+            n["silentElevation"] = serde_json::Value::Bool(true);
+            let _ = std::fs::write(new.join("settings.json"), serde_json::to_vec_pretty(&n).unwrap_or_default());
+        }
+    }
 }
 
 pub fn save_settings(s: &Settings) {
@@ -131,4 +146,41 @@ impl log::Log for FileLog {
         }
     }
     fn flush(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn persisted_keeps_window_placement() {
+        let mut p = super::Persisted::default();
+        p.window = Some((120, 80, 1400, 900, false));
+        let back: super::Persisted = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
+        assert_eq!(back.window, Some((120, 80, 1400, 900, false)));
+        // State files written before the window field existed still load.
+        let old: super::Persisted = serde_json::from_str(r#"{"last_check":null,"notified":{},"last_auto_install_day":null}"#).unwrap();
+        assert_eq!(old.window, None);
+    }
+
+    #[test]
+    fn carry_over_keeps_what_the_new_version_saved() {
+        let root = std::env::temp_dir().join(format!("u3d-migrate-{}", std::process::id()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("state.json"), r#"{"notified":{}}"#).unwrap();
+        std::fs::write(old.join("settings.json"), r#"{"silentElevation":true,"uiZoom":1.0}"#).unwrap();
+        std::fs::write(new.join("state.json"), r#"{"notified":{},"window":[10,20,1500,950,false]}"#).unwrap();
+        std::fs::write(new.join("settings.json"), r#"{"silentElevation":false,"uiZoom":1.25}"#).unwrap();
+        super::migrate_dirs(&old, &new);
+        let state: super::Persisted = serde_json::from_slice(&std::fs::read(new.join("state.json")).unwrap()).unwrap();
+        assert_eq!(state.window, Some((10, 20, 1500, 950, false)), "window placement must survive");
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(new.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(settings["silentElevation"], true);
+        assert_eq!(settings["uiZoom"], 1.25);
+        // Missing files are still copied across.
+        std::fs::remove_file(new.join("state.json")).unwrap();
+        super::migrate_dirs(&old, &new);
+        assert!(new.join("state.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
