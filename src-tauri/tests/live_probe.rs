@@ -174,13 +174,14 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
     assert!(plan.downloads[0].size.is_some() && plan.downloads[0].sha256.is_some());
 }
 
-/// Creative Cloud itself: found from its uninstall entry, the catalog has a newer version, and the
-/// update plan downloads Adobe's setup and accepts it only with a valid Adobe signature. Nothing
-/// is installed: the setup is downloaded into a temp folder, checked and deleted.
+/// Creative Cloud itself: found from its uninstall entry, the newest full build comes from its
+/// update service, and the plan downloads Adobe's offline installer for that exact build with the
+/// size and MD5 Adobe's server reports, then runs its Set-up.exe silently. Nothing is downloaded
+/// or installed here.
 #[tokio::test]
 #[ignore]
-async fn creative_cloud_updates_with_adobes_signed_setup() {
-    use updater_lib::download::{self, Control, Outcome, Progress, Throttle};
+async fn creative_cloud_updates_with_adobes_offline_installer() {
+    use updater_lib::sources::Step;
     let un = winutil::uninstall_entries();
     let cat = adobe::fetch_catalog().await.unwrap();
     let all = adobe::scan(Some(&cat), &un);
@@ -204,13 +205,12 @@ async fn creative_cloud_updates_with_adobes_signed_setup() {
     )
     .await
     .unwrap();
-    assert!(matches!(&plan.steps[0], updater_lib::sources::Step::Run { args, elevated: true, .. } if args == &vec!["--silent".to_string()]));
-    let mut d = plan.downloads[0].clone();
-    assert_eq!(d.signer.as_deref(), Some("Adobe Inc."));
-    let dir = std::env::temp_dir().join(format!("u3d-cc-{}", std::process::id()));
-    d.dest = dir.join("setup.exe");
-    let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
-    let r = download::fetch(&d, std::sync::Arc::new(Progress::new()), std::sync::Arc::new(Throttle::new()), rx).await;
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(matches!(r, Ok(Outcome::Done)), "{:?}", r.err());
+    // The full build (6.11.0.478.6), not the catalog's short "6.11.0".
+    assert!(latest.version.split('.').count() >= 5, "{}", latest.version);
+    let d = &plan.downloads[0];
+    println!("{} {:?} bytes md5 {:?}", d.url, d.size, d.md5);
+    assert!(d.url.contains("/StandaloneBuilds/ACCC/ESD/") && d.url.ends_with(".zip"));
+    assert!(d.size.unwrap_or(0) > 100_000_000 && d.md5.as_deref().is_some_and(|m| m.len() == 32));
+    assert!(matches!(&plan.steps[0], Step::ExtractZip { .. }));
+    assert!(matches!(&plan.steps[1], Step::Run { exe, args, elevated: true, .. } if exe.ends_with("Set-up.exe") && args == &vec!["--silent".to_string()]));
 }
