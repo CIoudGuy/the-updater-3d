@@ -1,7 +1,7 @@
 // Shared contract between the Rust backend (src-tauri/src/model.rs) and the UI.
 // Field names are camelCase on both sides (serde rename_all = "camelCase").
 
-export type Source = "adobe" | "craft" | "blender" | "tools";
+export type Source = "adobe" | "craft" | "blender" | "tools" | "other";
 
 export type AppStatus =
   | "current" // installed and up to date
@@ -14,7 +14,7 @@ export type AppStatus =
   | "unknown"; // installed, latest version unknown (offline, catalog failed)
 
 export interface AppEntry {
-  /** Stable id. "adobe:SBSTP", "craft:photocraft", "blender:5.2" (one entry per Blender series), "tools:obs", "tools:godot:4.7.2". */
+  /** Stable id. "adobe:SBSTP", "craft:photocraft", "blender:5.2" (one entry per Blender series), "tools:obs", "tools:godot:4.7.2", "other:7zip.7zip" (a winget package). */
   id: string;
   source: Source;
   /** "Substance 3D Painter", "PhotoCraft", "Blender 5.2" */
@@ -205,7 +205,8 @@ export interface Settings {
   /** Show Craft app pre-releases */
   craftPrereleases: boolean;
   /** Which sources are enabled */
-  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean };
+  /** `other`: every other app, matched from the public winget catalog (off by default) */
+  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean };
   /** Number of parallel downloads */
   parallelDownloads: number;
   /** One UAC prompt ever instead of one per batch (registers an elevated task) */

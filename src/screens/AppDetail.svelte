@@ -14,7 +14,7 @@
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
   import { call, send } from "../lib/api";
-  import { store, statusColor } from "../lib/store.svelte";
+  import { OTHER_NOTE, store, statusColor } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router } from "../lib/router.svelte";
   import { installVersion, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
@@ -211,7 +211,7 @@
             <Btn variant="raised" size="md" disabled={!pick || !!job} title="{pickBack ? 'Roll back to' : 'Install'} {pick}  Ctrl Enter" onclick={doInstallPick}>{pickBack ? "Roll back" : "Install"}</Btn>
           </div>
           <span class="hint">
-            {#if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
+            {#if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else if app.source === "other"}{OTHER_NOTE} Your settings stay as they are.{:else}Your settings stay as they are.{/if}
           </span>
         </div>
 

@@ -54,12 +54,18 @@
         Removes {unApp.name} {unApp.version}{unApp.sizeOnDisk ? ` and frees ${bytes(unApp.sizeOnDisk)}` : ""}. Your projects and media files are not touched.
       {/if}
     </p>
-    <div class="opt prefs">
-      <Check checked={removePrefs} onchange={(v) => (removePrefs = v)}>Also delete settings and add-ons</Check>
-      {#if removePrefs}
-        <span class="warnline">Deletes {unApp.name}'s preferences, add-ons and caches in AppData. This can't be undone. Your own files and projects stay.</span>
-      {/if}
-    </div>
+    {#if unApp.source === "other"}
+      <div class="opt info">
+        <span class="grow">Runs {unApp.name}'s own uninstaller. Its settings stay where it keeps them.</span>
+      </div>
+    {:else}
+      <div class="opt prefs">
+        <Check checked={removePrefs} onchange={(v) => (removePrefs = v)}>Also delete settings and add-ons</Check>
+        {#if removePrefs}
+          <span class="warnline">Deletes {unApp.name}'s preferences, add-ons and caches in AppData. This can't be undone. Your own files and projects stay.</span>
+        {/if}
+      </div>
+    {/if}
     <div class="actions first">
       <Btn variant="raised" onclick={() => ui.closeDialog()} hint="Esc">Cancel</Btn>
       <Btn variant="danger" title="Uninstall {unApp.name}" onclick={doUninstall}>Uninstall</Btn>
