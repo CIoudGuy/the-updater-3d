@@ -126,10 +126,6 @@ fn remove_dir(p: &Path) -> Result<()> {
     Err(anyhow!("Could not remove {}: {}", p.display(), last.map(|e| e.to_string()).unwrap_or_default()))
 }
 
-fn ps_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
 /// Run one step in this process (the helper, or the app when it already runs as admin).
 pub fn execute(step: &Step) -> StepResult {
     let r: Result<(Option<u32>, String)> = (|| match step {
@@ -169,16 +165,10 @@ pub fn execute(step: &Step) -> StepResult {
             if let Some(p) = lnk.parent() {
                 std::fs::create_dir_all(p)?;
             }
-            let script = format!(
-                "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({});$s.TargetPath={};$s.WorkingDirectory={};$s.Save()",
-                ps_quote(&lnk.to_string_lossy()),
-                ps_quote(&target.to_string_lossy()),
-                ps_quote(&target.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default())
-            );
-            let out = winutil::cmd("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output()?;
-            if !out.status.success() {
-                bail!("Could not create the shortcut: {}", tail(&out.stderr, 500));
-            }
+            // Written directly (no PowerShell): antivirus tools stop hidden script hosts.
+            let mut link = mslnk::ShellLink::new(target).map_err(|e| anyhow!("Could not create the shortcut: {e}"))?;
+            link.set_working_dir(target.parent().map(|p| p.to_string_lossy().to_string()));
+            link.create_lnk(lnk).map_err(|e| anyhow!("Could not create the shortcut: {e}"))?;
             Ok((None, String::new()))
         }
         Step::OpenUri { uri, .. } => winutil::shell_open(uri).map(|_| (None, String::new())),

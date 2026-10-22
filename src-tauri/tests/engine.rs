@@ -2,7 +2,6 @@
 //! admin helper protocol. Network tests are ignored by default:
 //! cargo test --test engine -- --include-ignored --nocapture
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use updater_lib::download::{self, Control, Outcome, Progress, Throttle};
@@ -129,4 +128,15 @@ async fn helper_runs_steps_over_the_pipe() {
     assert!(r.ok);
     assert!(!dir.exists());
     el.disconnect().await;
+}
+
+#[test]
+fn shortcut_is_written_without_powershell() {
+    let dir = tmp("lnk");
+    let lnk = dir.join("Blender 9.9.9.lnk");
+    let r = execute(&Step::Shortcut { lnk: lnk.clone(), target: std::path::PathBuf::from(r"C:\Windows\notepad.exe"), label: "x".into() });
+    assert!(r.ok, "{}", r.message);
+    let bytes = std::fs::read(&lnk).unwrap();
+    assert_eq!(&bytes[..4], &[0x4C, 0, 0, 0], "a .lnk file starts with its header size");
+    let _ = std::fs::remove_dir_all(dir);
 }
