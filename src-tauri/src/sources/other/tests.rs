@@ -244,6 +244,63 @@ fn refuses_installers_that_would_install_a_second_copy() {
 }
 
 #[test]
+fn a_32_bit_copy_in_its_own_folder_stays_32_bit() {
+    // A 32 bit copy in its own folder (registered in the 32 bit view, name without an
+    // architecture) is updated with the 32 bit installer, not given a second 64 bit copy.
+    let mut x86 = entry("7-Zip", "HKLM32", "7-Zip 26.04", "26.04", "Igor Pavlov");
+    x86.install_location = "D:\\Tools\\7-Zip".into();
+    let mut e64 = inst("x64", "exe", None);
+    e64.silent = Some("/S".into());
+    let mut e86 = inst("x86", "exe", None);
+    e86.silent = Some("/S".into());
+    let m = manifest(vec![e64, e86]);
+    assert_eq!(choose(&m, &Want::for_entry(&x86, None)).unwrap().arch, "x86");
+}
+
+#[test]
+fn an_exe_without_a_silent_switch_is_not_run() {
+    // An exe whose manifest only says "InstallModes: silent", with no switch, is not run.
+    let mut boiler = inst("x64", "exe", None);
+    boiler.install_modes = vec!["interactive".into(), "silent".into()];
+    assert_eq!(choose(&manifest(vec![boiler]), &Want::fresh()).unwrap_err(), "its installer has no silent mode");
+}
+
+#[test]
+fn the_admin_retry_does_not_uninstall_again() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    // A per-user copy whose installer removes the old one first: the admin retry only installs.
+    let mut user = installed_from(entry("Zipper", "HKCU", "Zipper", "26.04", "Example Pavlov"), "Example.Zipper");
+    user.uninstall = Some(vec!["C:\\Users\\Someone\\AppData\\Local\\Zipper\\uninstall.exe".into(), "/S".into()]);
+    let mut nsis = inst("x64", "nsis", Some("user"));
+    nsis.upgrade_behavior = Some("uninstallPrevious".into());
+    let plan = build_plan(&p, &manifest(vec![nsis.clone()]), &nsis, JobKind::Update, Some(&user), None).unwrap();
+    assert_eq!(plan.steps.len(), 2, "removes the old copy, then installs");
+    let fb = plan.fallback.as_ref().expect("retry with admin rights");
+    assert_eq!(fb.steps.len(), 1, "the retry does not run the old uninstaller again");
+    assert!(fb.steps[0].elevated());
+}
+
+#[test]
+fn msi_logs_are_cleaned_up_and_zip_paths_stay_inside() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    // The Windows Installer log goes once the update worked.
+    let msi = inst("x64", "msi", None);
+    let plan = build_plan(&p, &manifest(vec![msi.clone()]), &msi, JobKind::Install, None, None).unwrap();
+    let Step::Run { log: Some(log), .. } = &plan.steps[0] else { panic!() };
+    assert!(plan.cleanup.contains(log));
+
+    // A rooted or absolute installer path in a zip is refused like "..".
+    let mut zip = inst("x64", "zip", None);
+    zip.nested_kind = Some("inno".into());
+    for bad in ["C:\\Windows\\evil.exe", "\\evil.exe", "/evil.exe"] {
+        zip.nested_path = Some(bad.into());
+        assert!(build_plan(&p, &manifest(vec![zip.clone()]), &zip, JobKind::Install, None, None).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn compares_versions_carefully() {
     assert!(is_newer("26.05", "26.04"));
     assert!(is_newer("3.0.24", "3.0.20.0"));

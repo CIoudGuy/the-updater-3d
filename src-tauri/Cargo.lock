@@ -4410,7 +4410,7 @@ dependencies = [
 
 [[package]]
 name = "the-updater-3d"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

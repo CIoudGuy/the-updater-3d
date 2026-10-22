@@ -172,6 +172,12 @@ pub fn execute(step: &Step) -> StepResult {
             Ok((None, String::new()))
         }
         Step::OpenUri { uri, .. } => winutil::shell_open(uri).map(|_| (None, String::new())),
+        Step::RemoveIfOnlyUninstaller { path, .. } => {
+            if path.is_dir() && winutil::only_uninstaller_left(path) {
+                remove_dir(path)?;
+            }
+            Ok((None, String::new()))
+        }
         Step::RemoveUserRegKey { path, .. } => {
             match winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).delete_subkey_all(path) {
                 Ok(()) => Ok((None, String::new())),

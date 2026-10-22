@@ -618,6 +618,37 @@ pub fn authenticode_signer(file: &Path) -> Option<String> {
     }
 }
 
+/// After an uninstall: is nothing left in `dir` but the uninstaller itself (uninstall.exe,
+/// uninst.exe, unins000.exe and its .dat) and logs? A few files at most, so a folder that still
+/// holds anything else, such as the user's own files, is never taken for a leftover.
+pub fn only_uninstaller_left(dir: &Path) -> bool {
+    fn walk(d: &Path, files: &mut Vec<String>, depth: u8) -> bool {
+        let Ok(rd) = std::fs::read_dir(d) else { return false };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth >= 2 || !walk(&p, files, depth + 1) {
+                    return false;
+                }
+            } else {
+                files.push(e.file_name().to_string_lossy().to_ascii_lowercase());
+                if files.len() > 8 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+    let mut files = Vec::new();
+    if !walk(dir, &mut files, 0) {
+        return false;
+    }
+    files.iter().all(|f| {
+        let uninstaller = (f.starts_with("unins") || f.starts_with("uninst")) && [".exe", ".dat", ".msg", ".ini"].iter().any(|x| f.ends_with(x));
+        uninstaller || f.ends_with(".log")
+    })
+}
+
 /// Ask a process to close, like clicking its X: WM_CLOSE to each of its top-level windows.
 pub fn close_process_windows(pid: u32) {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -690,6 +721,23 @@ mod tests {
     fn quotes_round_trip() {
         let args = vec!["--a=1".to_string(), "C:\\Program Files\\x y\\".to_string(), "say \"hi\"".to_string()];
         assert_eq!(split_command_line(&join_args(&args)), args);
+    }
+
+    #[test]
+    fn only_a_folder_holding_just_its_uninstaller_counts_as_left_over() {
+        let d = std::env::temp_dir().join(format!("u3d-leftover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("logs")).unwrap();
+        std::fs::write(d.join("Uninstall.exe"), b"x").unwrap();
+        std::fs::write(d.join("logs").join("install.log"), b"x").unwrap();
+        assert!(only_uninstaller_left(&d));
+        std::fs::write(d.join("unins000.dat"), b"x").unwrap();
+        assert!(only_uninstaller_left(&d));
+        // Anything else, the user's own files included, keeps the folder.
+        std::fs::write(d.join("my project.blend"), b"x").unwrap();
+        assert!(!only_uninstaller_left(&d));
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(!only_uninstaller_left(&d), "a folder that is gone is not removed again");
     }
 
     #[test]
