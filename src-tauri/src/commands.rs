@@ -59,8 +59,7 @@ pub fn install_version(core: C<'_>, app_id: String, version: String) -> Res<()> 
 
 #[tauri::command]
 pub fn uninstall_app(core: C<'_>, app_id: String, remove_prefs: Option<bool>) -> Res<()> {
-    let _ = remove_prefs;
-    core.inner().enqueue(JobRequest::Uninstall { app_id }).map(|_| ()).map_err(err)
+    core.inner().enqueue(JobRequest::Uninstall { app_id, remove_prefs: remove_prefs.unwrap_or(false) }).map(|_| ()).map_err(err)
 }
 
 #[tauri::command]

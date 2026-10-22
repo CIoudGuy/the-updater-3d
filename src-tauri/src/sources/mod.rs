@@ -97,6 +97,8 @@ pub enum Step {
     Shortcut { lnk: PathBuf, target: PathBuf, label: String },
     RemoveFile { path: PathBuf },
     OpenUri { uri: String, label: String },
+    /// Delete a key (and everything under it) in the user's own registry hive, HKCU.
+    RemoveUserRegKey { path: String, label: String },
 }
 
 impl Step {
@@ -106,7 +108,8 @@ impl Step {
             | Step::ExtractZip { label, .. }
             | Step::RemoveDir { label, .. }
             | Step::Shortcut { label, .. }
-            | Step::OpenUri { label, .. } => label,
+            | Step::OpenUri { label, .. }
+            | Step::RemoveUserRegKey { label, .. } => label,
             Step::WriteFile { .. } => "Writing settings",
             Step::RemoveFile { .. } => "Cleaning up",
         }

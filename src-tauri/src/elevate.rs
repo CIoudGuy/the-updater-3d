@@ -172,6 +172,13 @@ pub fn execute(step: &Step) -> StepResult {
             Ok((None, String::new()))
         }
         Step::OpenUri { uri, .. } => winutil::shell_open(uri).map(|_| (None, String::new())),
+        Step::RemoveUserRegKey { path, .. } => {
+            match winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).delete_subkey_all(path) {
+                Ok(()) => Ok((None, String::new())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((None, String::new())),
+                Err(e) => Err(anyhow!("Could not delete HKCU\\{path}: {e}")),
+            }
+        }
     })();
     match r {
         Ok((code, output)) => StepResult { ok: true, code, message: String::new(), output },

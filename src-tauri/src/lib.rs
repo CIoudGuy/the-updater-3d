@@ -6,6 +6,7 @@ pub mod http;
 pub mod model;
 pub mod notes;
 pub mod paths;
+pub mod prefs;
 pub mod procs;
 pub mod selfupdate;
 pub mod services;

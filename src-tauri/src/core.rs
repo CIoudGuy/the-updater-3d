@@ -21,7 +21,8 @@ use tokio::sync::{watch, Notify};
 pub enum JobRequest {
     Update { app_id: String, version: Option<String> },
     Install { id: String, version: Option<String> },
-    Uninstall { app_id: String },
+    /// `remove_prefs`: also delete the app's settings and add-ons ("Also delete settings and add-ons")
+    Uninstall { app_id: String, remove_prefs: bool },
     Repair { app_id: String },
 }
 
@@ -909,7 +910,7 @@ impl Core {
                 let v = version.clone().or_else(|| self.catalog().into_iter().find(|c| &c.id == id).map(|c| c.version)).unwrap_or_default();
                 (id.clone(), JobKind::Install, v)
             }
-            JobRequest::Uninstall { app_id } => {
+            JobRequest::Uninstall { app_id, .. } => {
                 let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
                 (app_id.clone(), JobKind::Uninstall, inst.version)
             }
@@ -1024,7 +1025,7 @@ impl Core {
         let req = self.with_job(id, |j| j.req.clone()).ok_or_else(|| anyhow!("That job is gone"))?;
         self.jobs.lock().retain(|j| j.job.id != id);
         self.st.lock().failed.remove(match &req {
-            JobRequest::Update { app_id, .. } | JobRequest::Uninstall { app_id } | JobRequest::Repair { app_id } => app_id,
+            JobRequest::Update { app_id, .. } | JobRequest::Uninstall { app_id, .. } | JobRequest::Repair { app_id } => app_id,
             JobRequest::Install { id, .. } => id,
         });
         self.enqueue(req)?;
@@ -1247,7 +1248,7 @@ impl Core {
                     _ => Err(anyhow!("Unknown app {id}")),
                 }
             }
-            JobRequest::Uninstall { app_id } => {
+            JobRequest::Uninstall { app_id, remove_prefs } => {
                 let inst = installed.iter().find(|i| &i.id == app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
                 let mut plan = match inst.source {
                     Source::Adobe => adobe::plan_uninstall(inst),
@@ -1259,6 +1260,10 @@ impl Core {
                 let others: Vec<PathBuf> = installed.iter().filter(|i| i.id != inst.id).filter_map(|i| i.install_dir.clone()).collect();
                 if let Some(dir) = inst.install_dir.as_deref().and_then(|d| leftover_dir(d, &others)) {
                     plan.steps.push(sources::Step::RemoveDir { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
+                }
+                if *remove_prefs {
+                    let rest: Vec<sources::Installed> = installed.iter().filter(|i| i.id != inst.id).cloned().collect();
+                    plan.steps.extend(crate::prefs::steps(inst, &rest, &crate::prefs::Roots::system()));
                 }
                 Ok(plan)
             }
