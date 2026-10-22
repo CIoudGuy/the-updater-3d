@@ -1,0 +1,17 @@
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+installer/
+
+# Release settings and private notes (never commit)
+src-tauri/.update-key
+src-tauri/.update-feed
+*.local.md
+
+# Editor and tool folders
+.claude/
+.vscode/
+design/
+*.log
