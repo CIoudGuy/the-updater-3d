@@ -307,7 +307,21 @@ pub async fn install_self_update(app: AppHandle, core: C<'_>) -> Res<()> {
         return Err("Finish or cancel the queue first".into());
     }
     let r = c.self_release.lock().clone().ok_or("No update for The Updater 3D right now")?;
-    crate::selfupdate::install(&r).await.map_err(|e| format!("{e:#}"))?;
+    // A second click while the first one is still downloading does nothing.
+    static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+    c.toast("info", format!("Downloading The Updater 3D {}", r.version), None);
+    if let Err(e) = crate::selfupdate::install(&r).await {
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        return Err(format!("{e:#}"));
+    }
+    // The admin helper is another copy of this exe; close it so the installer can replace it.
+    c.elevator.disconnect().await;
+    if let Some(t) = app.tray_by_id("main") {
+        let _ = t.set_visible(false);
+    }
     app.exit(0);
     Ok(())
 }

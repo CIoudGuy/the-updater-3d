@@ -103,12 +103,27 @@ pub async fn install(r: &Release) -> Result<()> {
     let progress = Arc::new(Progress::new());
     download::fetch(&d, progress, Arc::new(Throttle::new()), rx).await.context("Downloading the update")?;
     let exe = std::env::current_exe()?;
-    // Wait for the installer, then start the updated app. Runs after we exit.
-    let script = format!(
-        "Start-Sleep -Milliseconds 800; Start-Process -Wait -FilePath '{}' -ArgumentList '/S'; Start-Process -FilePath '{}'",
-        dest.display().to_string().replace('\'', "''"),
-        exe.display().to_string().replace('\'', "''")
-    );
+    let log = paths::logs().join("self-update.log");
+    let q = |p: &std::path::Path| p.display().to_string().replace('\'', "''");
+    // Runs after we exit: wait until this process is really gone (the installer refuses to
+    // replace a running app), close any other copy of this exe, install, then start the new one.
+    let script = [
+        format!("$log = '{}'", q(&log)),
+        "function L($m) { (Get-Date -Format s) + ' ' + $m | Out-File -FilePath $log -Append -Encoding utf8 }".to_string(),
+        format!("L 'waiting for process {} to exit'", std::process::id()),
+        format!("Wait-Process -Id {} -Timeout 60 -ErrorAction SilentlyContinue", std::process::id()),
+        format!(
+            "Get-Process -Name 'the-updater-3d' -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{}' }} | Stop-Process -Force -ErrorAction SilentlyContinue",
+            q(&exe)
+        ),
+        "Start-Sleep -Milliseconds 400".to_string(),
+        format!("L 'installing {}'", r.version),
+        format!("$p = Start-Process -FilePath '{}' -ArgumentList '/S' -Wait -PassThru", q(&dest)),
+        "L ('installer exit code ' + $p.ExitCode)".to_string(),
+        format!("Start-Process -FilePath '{}'", q(&exe)),
+        "L 'started the new version'".to_string(),
+    ]
+    .join("; ");
     winutil::cmd("powershell.exe").args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]).spawn()?;
     Ok(())
 }

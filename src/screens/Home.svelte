@@ -14,7 +14,7 @@
   import { store } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router, appHref } from "../lib/router.svelte";
-  import { checkNow, repairApp, togglePauseAll, updateAll, updateOne, isPaused } from "../lib/actions";
+  import { checkNow, repairApp, togglePauseAll, updateAll, updateOne, isPaused, updateSelf } from "../lib/actions";
   import { bytes, checkedLine, clock, countOf, duration, inUnit, nameList, splitVersion, unitFor } from "../lib/format";
   import { jobStatus, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -189,7 +189,7 @@
     <div class="selfup" in:rise>
       <Dab color="#7C93D6" />
       <span>The Updater 3D {store.status.selfUpdate} is ready.</span>
-      <button class="lnk" onclick={() => send("install_self_update", {})}>Update and restart</button>
+      <button class="lnk" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading, restarts by itself" : "Update and restart"}</button>
     </div>
   {/if}
 

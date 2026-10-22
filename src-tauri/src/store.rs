@@ -6,7 +6,24 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 
 pub fn load_settings() -> Settings {
+    migrate_from_old_id();
     std::fs::read(paths::settings_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// 1.0.0 used another app id and data folder. Bring its settings, state and activity across
+/// once, so things like "Fewer admin prompts" stay on after updating.
+fn migrate_from_old_id() {
+    let flag = paths::data_dir().join("migrated-from-1.0.0");
+    if flag.exists() {
+        return;
+    }
+    let old = paths::local_app_data().join("cloud.devalt.theupdater3d").join("data");
+    if old.join("settings.json").exists() {
+        for f in ["settings.json", "state.json", "activity.jsonl"] {
+            let _ = std::fs::copy(old.join(f), paths::data_dir().join(f));
+        }
+    }
+    let _ = std::fs::write(flag, "");
 }
 
 pub fn save_settings(s: &Settings) {

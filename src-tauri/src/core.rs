@@ -1435,11 +1435,34 @@ impl Core {
         let n = plan.steps.len();
         for (k, step) in plan.steps.iter().enumerate() {
             let label = if n > 1 { format!("{}, step {} of {}", step.label(), k + 1, n) } else { step.label().to_string() };
+            let base = 0.85 + 0.13 * (k as f64 / n.max(1) as f64);
+            let span = 0.13 / n.max(1) as f64;
             self.set_job(id, |j| {
                 j.step = label.clone();
-                j.progress = 0.85 + 0.13 * (k as f64 / n.max(1) as f64);
+                j.progress = base;
             });
-            let res = self.elevator.run(step.clone(), silent).await?;
+            // Installers report no progress, so show they are alive: elapsed time, and a bar
+            // that creeps toward the end of this step without ever claiming to be done.
+            let ticker = {
+                let me = self.clone();
+                let jid = id.to_string();
+                let label = label.clone();
+                tokio::spawn(async move {
+                    let t0 = Instant::now();
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        let s = t0.elapsed().as_secs();
+                        let frac = 1.0 - (-(s as f64) / 90.0).exp();
+                        me.set_job(&jid, |j| {
+                            j.step = format!("{label}, {}:{:02}", s / 60, s % 60);
+                            j.progress = base + span * 0.95 * frac;
+                        });
+                    }
+                })
+            };
+            let res = self.elevator.run(step.clone(), silent).await;
+            ticker.abort();
+            let res = res?;
             if !res.ok {
                 let log = match step {
                     sources::Step::Run { log, .. } => log.clone(),
@@ -1555,7 +1578,8 @@ impl Core {
 
 /// Fill in Adobe release notes for the newest versions (Adobe only publishes them as web pages).
 async fn with_adobe_notes(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
-    let jobs = list.iter().take(6).map(|v| {
+    // Pages are per minor version and cached, so every version costs only a few requests.
+    let jobs = list.iter().take(25).map(|v| {
         let url = v.notes_url.clone();
         let ver = v.version.clone();
         async move {
@@ -1572,6 +1596,8 @@ async fn with_adobe_notes(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
             if v.date.is_none() {
                 v.date = n.date;
             }
+        } else if version::parts(&v.version).get(2).copied().unwrap_or(0) > 0 {
+            v.notes = vec!["Bug-fix release. Adobe lists no details for it.".into()];
         }
     }
     list
