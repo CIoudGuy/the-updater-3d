@@ -264,4 +264,6 @@ export interface EventMap {
   toast: { kind: "ok" | "warn" | "err" | "info"; text: string; appId?: string };
   /** tray asked the main window to navigate */
   navigate: string;
+  /** a cached version history (get_versions, catalog_versions) was refreshed in the background */
+  "versions-changed": { id: string };
 }

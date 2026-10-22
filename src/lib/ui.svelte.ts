@@ -86,8 +86,6 @@ class Ui {
   catalog = $state<CatalogEntry[] | null>(null);
   /** Winget catalog packages found by the last Get apps search (Other apps) */
   otherFound = $state<CatalogEntry[]>([]);
-  /** Scroll position of the page when Get apps was left for a detail page */
-  getScroll = 0;
 
   searchEl: HTMLInputElement | null = null;
   /** app under the pointer or keyboard focus, target of the U shortcut */

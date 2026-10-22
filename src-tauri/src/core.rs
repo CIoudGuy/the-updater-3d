@@ -576,6 +576,7 @@ impl Core {
 
         let apps = self.apps();
         let updates: Vec<&AppEntry> = apps.iter().filter(|a| a.status == AppStatus::Update).collect();
+        self.warm_versions(updates.iter().map(|a| a.id.clone()).collect());
         let n = updates.len();
         let checked = now();
         {
@@ -900,7 +901,68 @@ impl Core {
         tokio::task::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default()
     }
 
-    pub async fn catalog_versions(&self, id: &str) -> Result<Vec<VersionInfo>> {
+    /// Get apps version list: the saved copy at once when there is one (refreshed in the
+    /// background when it is a few minutes old), else fetched now and saved.
+    pub async fn catalog_versions(self: &Arc<Self>, id: &str) -> Result<Vec<VersionInfo>> {
+        let key = format!("get-{id}");
+        if let Some((list, age)) = notes_cache::read(&key) {
+            if age > notes_cache::FRESH {
+                self.refresh_versions_later(key, id.to_string(), false);
+            }
+            return Ok(list);
+        }
+        let list = self.fetch_catalog_versions(id).await?;
+        notes_cache::write(&key, &list);
+        Ok(list)
+    }
+
+    /// Version history of an installed app, cached like `catalog_versions`.
+    pub async fn versions(self: &Arc<Self>, app_id: &str) -> Result<Vec<VersionInfo>> {
+        let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+        let key = format!("app-{app_id}");
+        // A copy saved before an update marks the old version as installed: not usable.
+        if let Some((list, age)) = notes_cache::read(&key).filter(|(l, _)| notes_cache::matches_installed(l, &inst.version)) {
+            if age > notes_cache::FRESH {
+                self.refresh_versions_later(key, app_id.to_string(), true);
+            }
+            return Ok(list);
+        }
+        let list = self.fetch_versions(app_id).await?;
+        notes_cache::write(&key, &list);
+        Ok(list)
+    }
+
+    /// Fetch a version list again in the background; tell the window when it changed.
+    fn refresh_versions_later(self: &Arc<Self>, key: String, id: String, installed: bool) {
+        if !notes_cache::start(&key) {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let fresh = if installed { me.fetch_versions(&id).await } else { me.fetch_catalog_versions(&id).await };
+            if let Ok(list) = fresh {
+                let changed = notes_cache::read(&key).is_none_or(|(old, _)| old != list);
+                notes_cache::write(&key, &list);
+                if changed {
+                    me.emit("versions-changed", serde_json::json!({ "id": id }));
+                }
+            }
+            notes_cache::done(&key);
+        });
+    }
+
+    /// After a check: load the version histories of apps that have an update, so they open at once.
+    fn warm_versions(self: &Arc<Self>, app_ids: Vec<String>) {
+        for id in app_ids {
+            let key = format!("app-{id}");
+            let stale = notes_cache::read(&key).is_none_or(|(_, age)| age > notes_cache::FRESH);
+            if stale {
+                self.refresh_versions_later(key, id, true);
+            }
+        }
+    }
+
+    async fn fetch_catalog_versions(&self, id: &str) -> Result<Vec<VersionInfo>> {
         let s = self.settings.read().clone();
         let mut parts = id.splitn(3, ':');
         match parts.next().unwrap_or("") {
@@ -928,7 +990,7 @@ impl Core {
         }
     }
 
-    pub async fn versions(&self, app_id: &str) -> Result<Vec<VersionInfo>> {
+    async fn fetch_versions(&self, app_id: &str) -> Result<Vec<VersionInfo>> {
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
         let s = self.settings.read().clone();
         match &inst.data {
@@ -1330,7 +1392,8 @@ impl Core {
                 // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Not for
                 // Other apps: nothing is known about what they keep there.
                 let others: Vec<PathBuf> = installed.iter().filter(|i| i.id != inst.id).filter_map(|i| i.install_dir.clone()).collect();
-                if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source != Source::Other).and_then(|d| leftover_dir(d, &others)) {
+                let removed_already = |d: &std::path::Path| plan.steps.iter().any(|s| matches!(s, sources::Step::RemoveDir { path, .. } if path.as_path() == d));
+                if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source != Source::Other).and_then(|d| leftover_dir(d, &others)).filter(|d| !removed_already(d)) {
                     plan.steps.push(sources::Step::RemoveDir { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
                 }
                 if *remove_prefs {
@@ -1500,7 +1563,9 @@ impl Core {
 
         // Split the bar by expected time: a Blender MSI downloads in seconds but installs for
         // minutes, an Adobe app the other way round. Learned install times beat the defaults.
-        let (time_key, default_secs) = install_estimate(plan, total);
+        // An uninstall's time follows how much there is to remove.
+        let est_bytes = if plan.kind == JobKind::Uninstall { self.installed(&plan.app_id).and_then(|i| i.size_hint).unwrap_or(0) } else { total };
+        let (time_key, default_secs) = install_estimate(plan, est_bytes);
         let inst_est = self.persisted.lock().install_times.get(&time_key).copied().unwrap_or(default_secs).max(5.0);
         let left_to_fetch = total.saturating_sub(plan.downloads.iter().map(download::existing_bytes).sum::<u64>());
         let dl_est = left_to_fetch as f64 / (15.0 * 1024.0 * 1024.0);
@@ -1610,9 +1675,16 @@ impl Core {
         let silent = self.settings.read().silent_elevation;
         let n = plan.steps.len();
         let install_t0 = Instant::now();
+        // Each step owns a share of the bar by how long that kind of step takes, so the bar
+        // follows the steps: it cannot run ahead of a step that has not started yet.
+        let weights: Vec<f64> = plan.steps.iter().map(step_weight).collect();
+        let weight_sum: f64 = weights.iter().sum::<f64>().max(f64::EPSILON);
         for (k, step) in plan.steps.iter().enumerate() {
             let label = if n > 1 { format!("{}, step {} of {}", step.label(), k + 1, n) } else { step.label().to_string() };
             self.set_job(id, |j| j.step = label.clone());
+            let step_t0 = Instant::now();
+            let step_est = (inst_est * weights[k] / weight_sum).max(2.0);
+            let weights = weights.clone();
             // Installers report no progress: move the bar along the expected install time, and
             // past it keep creeping instead of stopping, so it never looks frozen.
             let rum = rum_watch(step, &plan.to_version, &self.adobe_sizes.lock());
@@ -1626,7 +1698,7 @@ impl Core {
                     let mut ema = 0.0f64;
                     let mut dl_done_at: Option<Instant> = None;
                     loop {
-                        let s = install_t0.elapsed().as_secs_f64();
+                        let s = step_t0.elapsed().as_secs_f64();
                         if let Some((dir, prefix, expected)) = &rum {
                             let got = folder_bytes(dir, prefix);
                             let dt = last.0.elapsed().as_secs_f64().max(0.001);
@@ -1657,7 +1729,7 @@ impl Core {
                         } else {
                             me.set_job(&jid, |j| {
                                 j.step = format!("{label}, {}:{:02}", s as u64 / 60, s as u64 % 60);
-                                j.progress = dl_share + (1.0 - dl_share) * 0.98 * install_curve(s / inst_est);
+                                j.progress = dl_share + (1.0 - dl_share) * 0.98 * steps_progress(&weights, k, s / step_est);
                             });
                         }
                         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1891,6 +1963,62 @@ fn under_program_files(p: &std::path::Path) -> bool {
     [paths::program_files(), paths::program_files_x86()].iter().any(|r| s.starts_with(&format!("{}\\", r.to_string_lossy().to_ascii_lowercase())))
 }
 
+/// Saved version histories and release notes (data folder `notes-cache`), so they open at once.
+mod notes_cache {
+    use crate::model::VersionInfo;
+    use crate::{paths, version};
+    use once_cell::sync::Lazy;
+    use parking_lot::Mutex;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    /// Older than this, a saved list is shown and fetched again in the background.
+    pub const FRESH: Duration = Duration::from_secs(5 * 60);
+
+    static RUNNING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+    fn file(key: &str) -> std::path::PathBuf {
+        let safe: String = key.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+        paths::data_dir().join("notes-cache").join(format!("{safe}.json"))
+    }
+
+    pub fn read(key: &str) -> Option<(Vec<VersionInfo>, Duration)> {
+        let f = file(key);
+        let age = f.metadata().ok()?.modified().ok()?.elapsed().unwrap_or_default();
+        let list: Vec<VersionInfo> = serde_json::from_slice(&std::fs::read(&f).ok()?).ok()?;
+        (!list.is_empty()).then_some((list, age))
+    }
+
+    pub fn write(key: &str, list: &[VersionInfo]) {
+        if list.is_empty() {
+            return;
+        }
+        let f = file(key);
+        if let Some(d) = f.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&f, serde_json::to_vec(list).unwrap_or_default());
+    }
+
+    /// True when no refresh of `key` runs yet (and marks one as running).
+    pub fn start(key: &str) -> bool {
+        RUNNING.lock().insert(key.to_string())
+    }
+
+    pub fn done(key: &str) {
+        RUNNING.lock().remove(key);
+    }
+
+    /// A saved list still fits the installed version: the one it marks installed is that version.
+    pub fn matches_installed(list: &[VersionInfo], installed: &str) -> bool {
+        let same = |v: &str| v == installed || (!v.contains(' ') && !installed.contains(' ') && version::cmp(v, installed).is_eq());
+        match list.iter().find(|v| v.installed) {
+            Some(v) => same(&v.version),
+            None => !list.iter().any(|v| same(&v.version)),
+        }
+    }
+}
+
 /// The scheduler wakes every few seconds; most ticks do nothing.
 const TICK_SECS: u64 = 5;
 
@@ -1925,6 +2053,27 @@ fn set_control(tx: &watch::Sender<Control>, c: Control) {
     tx.send_replace(c);
 }
 
+/// How long a step usually takes, relative to the others: running an installer or uninstaller is
+/// the long part, unpacking is shorter, and removing leftovers or writing a file is quick.
+fn step_weight(step: &sources::Step) -> f64 {
+    match step {
+        sources::Step::Run { .. } | sources::Step::OpenUri { .. } => 1.0,
+        sources::Step::ExtractZip { .. } => 0.5,
+        sources::Step::RemoveDir { .. } => 0.1,
+        _ => 0.02,
+    }
+}
+
+/// Share of the install phase done in step `k` after `x` = its elapsed / expected time: the
+/// steps before it, plus its own share moving along `install_curve`, which never reaches the
+/// end of the share. So step 1 of 5 cannot show the bar of a nearly finished install.
+fn steps_progress(weights: &[f64], k: usize, x: f64) -> f64 {
+    let total: f64 = weights.iter().sum::<f64>().max(f64::EPSILON);
+    let before: f64 = weights.iter().take(k).sum();
+    let own = weights.get(k).copied().unwrap_or(0.0);
+    ((before + own * install_curve(x)) / total).min(1.0)
+}
+
 /// What kind of install this is (for learned timings) and a first guess of its seconds.
 fn install_estimate(plan: &Plan, bytes: u64) -> (String, f64) {
     let mb = bytes as f64 / (1024.0 * 1024.0);
@@ -1932,7 +2081,9 @@ fn install_estimate(plan: &Plan, bytes: u64) -> (String, f64) {
     let runs_rum = plan.steps.iter().any(|s| matches!(s, sources::Step::Run { exe, .. } if exe.to_string_lossy().contains("RemoteUpdateManager")));
     let src = plan.app_id.split(':').next().unwrap_or("app");
     if plan.kind == JobKind::Uninstall {
-        return (format!("{src}:uninstall"), 30.0);
+        // Per app (removing Unity takes far longer than removing OBS), from its size on disk.
+        let app: String = plan.app_id.split(':').take(2).collect::<Vec<_>>().join(":");
+        return (format!("{app}:uninstall"), 20.0 + mb / 120.0);
     }
     if runs_rum {
         return ("adobe:rum".into(), 600.0);
@@ -2099,6 +2250,39 @@ mod tests {
         let parent_of_other = pf.join("Suite");
         assert_eq!(leftover_dir(&parent_of_other, &[parent_of_other.join("App")]), None);
         assert_eq!(leftover_dir(&PathBuf::from("C:\\"), &[]), None);
+    }
+
+    #[test]
+    fn install_bar_follows_the_steps() {
+        use super::steps_progress;
+        // Unity's uninstall: its uninstaller, then the leftover folders and files (5 steps).
+        let w = [1.0, 0.1, 0.1, 0.02, 0.02];
+        let step2_starts = 1.0 / w.iter().sum::<f64>();
+        // The uninstaller runs far past its estimate: still step 1, so the bar stays short of
+        // where step 2 begins (it showed 98% here before).
+        let p = steps_progress(&w, 0, 20.0);
+        assert!(p < step2_starts && p > 0.7, "{p}");
+        // It keeps moving forward through the later steps and ends at the end.
+        assert!(steps_progress(&w, 1, 0.0) >= p);
+        assert!(steps_progress(&w, 2, 0.5) > steps_progress(&w, 1, 0.5));
+        assert!(steps_progress(&w, 4, 1e9) > 0.999);
+        // A plan with one step behaves as before.
+        assert!((steps_progress(&[1.0], 0, 1.0) - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn saved_version_lists_are_dropped_after_an_update() {
+        use crate::model::VersionInfo;
+        let v = |ver: &str, installed: bool| VersionInfo { version: ver.into(), date: None, notes: vec![], notes_url: None, size: None, installed, latest: false, prerelease: false };
+        let saved = vec![v("4.5.14", false), v("4.5.5", true)];
+        assert!(super::notes_cache::matches_installed(&saved, "4.5.5"));
+        // Updated to 4.5.14 since: the saved list still marks 4.5.5.
+        assert!(!super::notes_cache::matches_installed(&saved, "4.5.14"));
+        // Lists that mark nothing (Get apps) fit unless they contain the installed version.
+        assert!(super::notes_cache::matches_installed(&[v("5.2.2", false)], "4.5.5"));
+        // Blender pre-release builds differ only by their hash.
+        let b = vec![v("5.4.0 Alpha fbe82a4", true)];
+        assert!(!super::notes_cache::matches_installed(&b, "5.4.0 Alpha 1234567"));
     }
 
     #[test]

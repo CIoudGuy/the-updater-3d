@@ -182,7 +182,7 @@ fn leaves_apps_of_the_other_sources_alone() {
     let r = match_all(&[blender, adobe, zipper], &idx, &[listed], &HashMap::new());
     assert!(r.matches.is_empty());
     assert!(r.misses.iter().all(|(_, m)| *m == Miss::Handled));
-    assert!(handled_package("BlenderFoundation.Blender.LTS.4.5") && handled_package("Unity.Unity.6000") && !handled_package("Unity.UnityHub"));
+    assert!(handled_package("BlenderFoundation.Blender.LTS.4.5") && handled_package("Unity.Unity.6000") && handled_package("Unity.UnityHub") && !handled_package("Unity.TuanjieHub"));
     assert_eq!(excluded_package("Microsoft.VisualStudio.2022.Community"), Some("updated by the Visual Studio Installer"));
     assert_eq!(excluded_package("Microsoft.VisualStudioCode"), None);
 }

@@ -11,11 +11,12 @@
   import Num from "../components/Num.svelte";
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
-  import { call, send } from "../lib/api";
-  import { OTHER_NOTE, store } from "../lib/store.svelte";
+  import { call, on, send } from "../lib/api";
+  import { OTHER_NOTE, store, statusLabel } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { router, appHref } from "../lib/router.svelte";
-  import { installApp } from "../lib/actions";
+  import { installApp, openApp, updateOne } from "../lib/actions";
+  import { installedFor } from "../lib/appview";
   import { bytes, dateLong, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -32,7 +33,12 @@
     const j = store.jobByApp.get(id);
     return j && j.kind === "install" ? j : undefined;
   });
-  const installedApp = $derived(c?.installed ? store.app(id) : undefined);
+  /** the installed app behind this entry, also a side-by-side one such as "tools:godot:4.7.2" */
+  const installedApp = $derived(c ? installedFor(c) : undefined);
+  const isIn = $derived(!!c && (c.installed || !!installedApp));
+  const canUpdate = $derived(installedApp?.status === "update");
+  /** an update of the installed app is already queued or running */
+  const updating = $derived(!!installedApp && ["updating", "queued", "blocked"].includes(installedApp.status));
   /** "Choose a version" entries have no concrete newest version. */
   const chooseOnly = $derived(!!c && c.pickVersion && !/^\d/.test(c.version));
 
@@ -53,10 +59,27 @@
         }
       });
   }
+  /** The backend refreshed the cached history in the background: swap it in without a spinner or a scroll jump. */
+  function loadQuiet() {
+    const n = ++seq;
+    call("catalog_versions", { id })
+      .then((r) => {
+        if (n === seq && (failed || JSON.stringify(r) !== JSON.stringify(versions))) {
+          failed = false;
+          versions = r;
+        }
+      })
+      .catch(() => {});
+  }
   function refreshCatalog() {
     call("get_catalog", {}).then((r) => (ui.catalog = r));
   }
   onMount(() => {
+    let offVersions = () => {};
+    let gone = false;
+    on("versions-changed", (e) => {
+      if (e.id === id) loadQuiet();
+    }).then((u) => (gone ? u() : (offVersions = u)));
     // the list from Get apps is shown at once; a direct link has to fetch it
     refreshCatalog();
     load();
@@ -69,7 +92,11 @@
       back();
     };
     window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
+    return () => {
+      gone = true;
+      offVersions();
+      window.removeEventListener("keydown", k);
+    };
   });
   // an install that just ended changes which versions and which entry count as installed
   let hadJob = false;
@@ -80,7 +107,7 @@
   });
 
   function back() {
-    router.go("get");
+    router.up("get");
   }
   function openNotes(url: string) {
     import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url)).catch(() => window.open(url, "_blank"));
@@ -99,7 +126,7 @@
     return { big: a, small: [b, rest].filter(Boolean).join(" "), size: b || main.length > 7 ? 48 : 64 };
   });
   const installable = $derived((versions ?? []).filter((v) => !v.installed).length);
-  const statusColor = $derived(job ? "var(--text)" : c?.installed ? "var(--ok)" : "var(--text-3)");
+  const statusColor = $derived(job ? "var(--text)" : canUpdate ? "var(--warn)" : isIn ? "var(--ok)" : "var(--text-3)");
 </script>
 
 <section class="screen detail">
@@ -126,8 +153,8 @@
         <span class="stl" style:color={statusColor}>
           {#if job}
             <Dab color={statusColor} pulse={job.state === "downloading" || job.state === "installing"} />{jobStatus(job, false)}<span class="pc"><Num value={pct(job)} />%</span>
-          {:else if c.installed}
-            <Dab color={statusColor} />Installed
+          {:else if isIn}
+            <Dab color={statusColor} />{#if installedApp}Installed {installedApp.version}{:else}Installed{/if}{#if canUpdate && installedApp}, {installedApp.latest} available{/if}
           {:else if c.size}
             {bytes(c.size)} download
           {/if}
@@ -138,9 +165,15 @@
               <Icon d={job.state === "paused" ? I.play : I.pause} />{job.state === "paused" ? "Resume" : "Pause"}
             </Btn>
             <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job, "Cancel", "  Esc")}>Cancel</Btn>
-          {:else if c.installed}
+          {:else if isIn}
             {#if installedApp}
-              <Btn variant="secondary" title="Open {c.name} in Installed" onclick={() => router.go(appHref(installedApp.id))}>View in Installed</Btn>
+              <Btn variant="ghost" title="Open {c.name}" onclick={() => openApp(installedApp.id)}>Open</Btn>
+              {#if canUpdate}
+                <Btn variant="primary" title="Update to {installedApp.latest}" onclick={() => updateOne(installedApp.id)}>Update to {installedApp.latest}</Btn>
+              {:else if updating}
+                <Btn variant="secondary" disabled title={statusLabel(installedApp.status)}>{statusLabel(installedApp.status)}</Btn>
+              {/if}
+              <Btn variant="secondary" href={appHref(installedApp.id)} title="Show {c.name} in Installed" onclick={(e) => { e.preventDefault(); router.go(appHref(installedApp.id)); }}>View in Installed</Btn>
             {/if}
           {:else if chooseOnly}
             <Btn variant="primary" title="Choose a version of {c.name}" onclick={chooseVersion}>Choose a version</Btn>
@@ -186,15 +219,15 @@
               {/if}
               <span class="grow"></span>
               {#if v.notesUrl}
-                <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full notes</button>
+                <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full release notes</button>
               {/if}
               {#if c && !v.installed}
                 <Btn class="ins" variant="ghost" size="sm" disabled={!!job} title="Install {c.name} {v.version}" onclick={() => installApp(c, v.version, v.size)}>Install</Btn>
               {/if}
             </div>
             {#if v.notes.length}
-              <ul class="notes">
-                {#each v.notes as n (n)}
+              <ul class="notes selectable">
+                {#each v.notes as n, ni (ni)}
                   <li><svg viewBox="0 0 20 20" width="5" height="5" aria-hidden="true"><path d={DAB} fill="#6E6E6E" /></svg>{n}</li>
                 {/each}
               </ul>
@@ -392,6 +425,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  .notes {
+    cursor: text;
   }
   .notes li {
     display: flex;

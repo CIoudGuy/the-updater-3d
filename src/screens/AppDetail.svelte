@@ -13,11 +13,11 @@
   import Num from "../components/Num.svelte";
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
-  import { call, send } from "../lib/api";
+  import { call, on, send } from "../lib/api";
   import { OTHER_NOTE, store, statusColor } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
   import { router } from "../lib/router.svelte";
-  import { installVersion, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
+  import { askUninstall, installVersion, openApp, repairApp, showInFolder, updateOne } from "../lib/actions";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -43,6 +43,17 @@
       if (seq === reqSeq) versions = r;
     });
   });
+  /** The backend refreshed the cached history in the background: swap the list in without a spinner, and only when it differs. */
+  function reloadQuiet() {
+    const aid = app?.id;
+    if (!aid) return;
+    const seq = ++reqSeq;
+    call("get_versions", { appId: aid })
+      .then((r) => {
+        if (seq === reqSeq && JSON.stringify(r) !== JSON.stringify(versions)) versions = r;
+      })
+      .catch(() => {});
+  }
 
   const installable = $derived((versions ?? []).filter((v) => !v.installed));
   let pick = $state("");
@@ -59,6 +70,11 @@
 
   let picker = $state<{ focus: () => void }>();
   onMount(() => {
+    let offVersions = () => {};
+    let gone = false;
+    on("versions-changed", (e) => {
+      if (app && e.id === app.id) reloadQuiet();
+    }).then((u) => (gone ? u() : (offVersions = u)));
     if (ui.pickVersion) {
       ui.pickVersion = false;
       setTimeout(() => picker?.focus(), 250);
@@ -70,7 +86,11 @@
       }
     };
     window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
+    return () => {
+      gone = true;
+      offVersions();
+      window.removeEventListener("keydown", k);
+    };
   });
 
   function doInstallPick() {
@@ -118,7 +138,7 @@
   {:else}
     <Splash colors={[app.fg]} opacity={0.07} left lines />
 
-    <a class="back" href="#/installed" title="Back  Alt Left" onclick={(e) => { e.preventDefault(); router.go("installed"); }}><Icon d={I.back} />Installed</a>
+    <a class="back" href="#/installed" title="Back  Alt Left" onclick={(e) => { e.preventDefault(); router.up("installed"); }}><Icon d={I.back} />Installed</a>
 
     <header class="hd" in:rise>
       <Mark app={app} size={80} fs={30} />
@@ -147,6 +167,9 @@
               <Btn variant="primary" hint="R" title="Repair {app.name}  R" onclick={() => repairApp(app.id)}>Repair</Btn>
             {:else if app.status === "failed"}
               <Btn variant="primary" hint="R" title="Retry  R" onclick={() => { const f = store.failedJobs.find((x) => x.appId === app.id); if (f) send("retry_job", { jobId: f.id }); }}>Retry</Btn>
+            {/if}
+            {#if app.canUninstall}
+              <Btn variant="danger" title="Uninstall {app.name}" onclick={() => askUninstall(app.id)}>Uninstall</Btn>
             {/if}
           {/if}
         </div>
@@ -185,15 +208,15 @@
                 {/if}
                 <span class="grow"></span>
                 {#if v.notesUrl}
-                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full notes</button>
+                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full release notes</button>
                 {/if}
                 {#if act}
                   <Btn variant="ghost" size="sm" title={act.title} onclick={() => installVersion(app, v.version, v.size)}>{act.label}</Btn>
                 {/if}
               </div>
               {#if v.notes.length}
-                <ul class="notes">
-                  {#each v.notes as n (n)}
+                <ul class="notes selectable">
+                  {#each v.notes as n, ni (ni)}
                     <li><svg viewBox="0 0 20 20" width="5" height="5" aria-hidden="true"><path d={DAB} fill="#6E6E6E" /></svg>{n}</li>
                   {/each}
                 </ul>
@@ -390,6 +413,7 @@
     align-items: center;
     padding: 0 9px;
     font-size: 12px;
+    white-space: nowrap;
   }
   .tx {
     position: relative;
@@ -413,6 +437,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+  }
+  .notes {
+    cursor: text;
   }
   .notes li {
     display: flex;

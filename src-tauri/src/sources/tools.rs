@@ -30,6 +30,10 @@ pub const MARKER: &str = ".the-updater-3d.json";
 const KRITA_STABLE: &str = "https://download.kde.org/stable/krita/";
 const KRITA_ATTIC: &str = "https://download.kde.org/Attic/krita/";
 const UNITY_API: &str = "https://services.api.unity.com/unity/editor/release/v1/releases";
+/// Unity Hub's update feed (electron-builder): newest version, installer, size and SHA-512.
+const HUB_FEED: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/latest.yml";
+const HUB_FILES: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/";
+const HUB_NOTES: &str = "https://unity.com/unity-hub/release-notes";
 
 pub struct AppDef {
     pub key: &'static str,
@@ -50,6 +54,8 @@ pub const APPS: &[AppDef] = &[
     AppDef { key: "freecad", name: "FreeCAD", tagline: "Parametric 3D CAD modeler", code: "Fc", fg: "#E8736A", bg: "#2C1311", icon: "https://raw.githubusercontent.com/FreeCAD/FreeCAD/main/src/Gui/Icons/freecad.svg", side_by_side: true },
     AppDef { key: "godot", name: "Godot", tagline: "Game engine and editor", code: "Gd", fg: "#6FB1E3", bg: "#0F2131", icon: "https://godotengine.org/assets/press/icon_color.png", side_by_side: true },
     AppDef { key: "unity", name: "Unity Editor", tagline: "Game engine and real-time 3D", code: "Un", fg: "#F0F0F2", bg: "#2A2F36", icon: "https://unity.com/icon-dark.svg", side_by_side: true },
+    // Unity editors only start with a license, which Unity Hub signs in for and keeps.
+    AppDef { key: "unityhub", name: "Unity Hub", tagline: "Signs in and licenses Unity editors", code: "Uh", fg: "#F0F0F2", bg: "#2A2F36", icon: "https://unity.com/icon-dark.svg", side_by_side: false },
 ];
 
 pub fn def(key: &str) -> Option<&'static AppDef> {
@@ -76,6 +82,8 @@ pub struct Rel {
     /// Checksum file to read at install time when GitHub has no digest (FreeCAD)
     pub sums_url: Option<String>,
     pub md5: Option<String>,
+    /// Lowercase hex SHA-512 (Unity Hub)
+    pub sha512: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,9 +190,6 @@ pub fn unity_bullets(md: &str) -> Vec<String> {
         let t = t.trim().trim_end_matches('.').to_string();
         if !t.is_empty() {
             out.push(t);
-        }
-        if out.len() >= 12 {
-            break;
         }
     }
     out
@@ -415,6 +420,7 @@ pub fn parse_unity(v: &Value) -> Vec<Rel> {
             sha256: None,
             sums_url: None,
             md5: d["integrity"].as_str().and_then(download::md5_hex_from_integrity),
+            sha512: None,
         });
     }
     out
@@ -445,13 +451,14 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         s.dedup();
         s
     };
-    let (obs, fc, gd, gdb, kr, un) = tokio::join!(
+    let (obs, fc, gd, gdb, kr, un, hub) = tokio::join!(
         github("obsproject/obs-studio", 40),
         github("FreeCAD/FreeCAD", 100),
         github("godotengine/godot", 60),
         async { if godot_pre { github("godotengine/godot-builds", 60).await.ok() } else { None } },
         krita_releases(false, 1),
         unity_page("stream=LTS"),
+        unity_hub_releases(),
     );
     let mut put = |key: &str, r: Result<Vec<Rel>>| match r {
         Ok(l) if !l.is_empty() => {
@@ -471,6 +478,7 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         l
     }));
     put("krita", kr);
+    put("unityhub", hub);
     // Newest version first, so the first stable one is what is offered when no version is picked.
     put("unity", un.map(|mut l| {
         sort_newest_first(&mut l);
@@ -491,6 +499,59 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         bail!("Could not reach GitHub, download.kde.org or Unity");
     }
     Ok(feed)
+}
+
+/// The newest Unity Hub from its update feed (`version`, x64 `url`, `sha512` in base64, `size`).
+pub fn parse_hub_feed(yml: &str) -> Option<Rel> {
+    let field = |line: &str, k: &str| line.trim().trim_start_matches("- ").strip_prefix(k).map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string());
+    let version = yml.lines().find_map(|l| if l.starts_with("version:") { field(l, "version:") } else { None })?;
+    let date = yml.lines().find_map(|l| if l.starts_with("releaseDate:") { field(l, "releaseDate:") } else { None });
+    // Each file is "- url:" followed by its sha512 and size; take the x64 one.
+    let lines: Vec<&str> = yml.lines().collect();
+    let i = lines.iter().position(|l| field(l, "url:").is_some_and(|u| u.contains("-x64") || !u.contains("arm64")))?;
+    let url = field(lines[i], "url:")?;
+    let mut sha512 = None;
+    let mut size = None;
+    for l in lines.iter().skip(i + 1).take(4) {
+        if l.trim_start().starts_with("- ") {
+            break;
+        }
+        if let Some(v) = field(l, "sha512:") {
+            use base64::Engine;
+            sha512 = base64::engine::general_purpose::STANDARD.decode(v).ok().map(|b| b.iter().map(|x| format!("{x:02x}")).collect::<String>());
+        }
+        if let Some(v) = field(l, "size:") {
+            size = v.parse().ok();
+        }
+    }
+    let file = url.rsplit('/').next().unwrap_or(&url).to_string();
+    Some(Rel { version, date, url: format!("{HUB_FILES}{url}"), file, sha512: Some(sha512?), size, notes_url: Some(HUB_NOTES.into()), ..Default::default() })
+}
+
+/// Unity Hub releases: the newest one installable (it is the only one with a published checksum),
+/// every version with its change list from the release notes page.
+async fn unity_hub_releases() -> Result<Vec<Rel>> {
+    let (feed, page) = tokio::join!(text_of_fresh(HUB_FEED, 30 * 60), text_of_fresh(HUB_NOTES, 6 * 3600));
+    let mut newest = parse_hub_feed(&feed.ok_or_else(|| anyhow!("Unity Hub's update feed did not answer"))?).ok_or_else(|| anyhow!("Unity Hub's update feed changed its format"))?;
+    let mut out: Vec<Rel> = Vec::new();
+    for (ver, date, lines) in page.as_deref().map(notes::unity_hub).unwrap_or_default() {
+        if ver == newest.version {
+            newest.notes = lines;
+            if newest.date.is_none() {
+                newest.date = date;
+            }
+            continue;
+        }
+        out.push(Rel { version: ver, date, notes: lines, notes_url: Some(HUB_NOTES.into()), ..Default::default() });
+    }
+    out.insert(0, newest);
+    sort_newest_first(&mut out);
+    Ok(out)
+}
+
+async fn text_of_fresh(url: &str, secs: u64) -> Option<String> {
+    let f = http::get_cached(url, &[], Duration::from_secs(secs)).await.ok()?;
+    Some(String::from_utf8_lossy(&f.body).into_owned())
 }
 
 // ---------------------------------------------------------------- installed apps
@@ -739,8 +800,22 @@ fn scan_unity(un: &[winutil::UninstallEntry], out: &mut Vec<Installed>) {
     }
 }
 
+fn scan_unity_hub(un: &[winutil::UninstallEntry], out: &mut Vec<Installed>) {
+    let d = def("unityhub").unwrap();
+    if let Some(e) = un.iter().find(|e| e.display_name.starts_with("Unity Hub") && !e.display_version.is_empty()) {
+        let dir = if !e.install_location.is_empty() {
+            winutil::pathbuf(&e.install_location)
+        } else {
+            exe_dir_of(&e.uninstall_string).unwrap_or_else(|| paths::program_files().join("Unity Hub"))
+        };
+        let exe = dir.join("Unity Hub.exe");
+        out.push(from_entry(d, "tools:unityhub".into(), d.name.into(), e, String::new(), dir, exe));
+    }
+}
+
 pub fn scan(uninstall: &[winutil::UninstallEntry], godot_root: &Path) -> Vec<Installed> {
     let mut out = Vec::new();
+    scan_unity_hub(uninstall, &mut out);
     scan_obs(uninstall, &mut out);
     scan_krita(uninstall, &mut out);
     scan_freecad(uninstall, &mut out);
@@ -909,7 +984,7 @@ pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>>
     }
     let newest = list.iter().find(|r| allow_pre || !r.prerelease).map(|r| r.version.clone());
     list.truncate(25);
-    fill_notes(&key, &mut list, 6).await;
+    fill_notes(&key, &mut list, 25).await;
     with_fallback_notes(&key, &mut list);
     Ok(list.iter().map(|r| info(r, cmp_ver(&r.version, &inst.version).is_eq(), newest.as_deref() == Some(r.version.as_str()))).collect())
 }
@@ -959,7 +1034,7 @@ pub async fn catalog_versions(key: &str, feed: &Feed, installed: &[Installed]) -
     trim_pre(&mut list);
     list.truncate(25);
     let newest = list.iter().find(|r| !r.prerelease).map(|r| r.version.clone());
-    fill_notes(key, &mut list, 6).await;
+    fill_notes(key, &mut list, 25).await;
     with_fallback_notes(key, &mut list);
     let have: Vec<&Installed> = installed.iter().filter(|i| tools_key(i) == key).collect();
     Ok(list.iter().map(|r| info(r, have.iter().any(|i| cmp_ver(&i.version, &r.version).is_eq()), newest.as_deref() == Some(r.version.as_str()))).collect())
@@ -1047,13 +1122,19 @@ fn run_installer(dest: &Path, args: Vec<String>, elevated: bool, label: String) 
 pub fn build_plan(key: &str, rel: &Rel, kind: JobKind, current: Option<&Installed>, ctx: &Ctx<'_>) -> Result<Plan> {
     let d = def(key).ok_or_else(|| anyhow!("unknown app {key}"))?;
     let dest = paths::downloads().join("tools").join(&rel.file);
-    let dl = Download { url: rel.url.clone(), dest: dest.clone(), size: rel.size, sha256: rel.sha256.clone(), md5: rel.md5.clone(), signer: None, headers: vec![] };
+    let dl = Download { url: rel.url.clone(), dest: dest.clone(), size: rel.size, sha256: rel.sha256.clone(), md5: rel.md5.clone(), signer: None, sha512: rel.sha512.clone(), headers: vec![] };
     let label = format!("Installing {} {}", d.name, rel.version);
     let current_dir = current.and_then(|c| c.install_dir.clone());
     let repair = kind == JobKind::Repair;
     let (app_id, name, steps, block_dirs, block_names) = match key {
         "obs" => ("tools:obs".to_string(), d.name.to_string(), vec![run_installer(&dest, vec!["/S".into()], true, label)], current_dir.into_iter().collect::<Vec<_>>(), vec!["obs64.exe".to_string()]),
         "krita" => ("tools:krita".to_string(), d.name.to_string(), vec![run_installer(&dest, vec!["/S".into()], true, label)], current_dir.into_iter().collect(), vec!["krita.exe".to_string()]),
+        "unityhub" => {
+            if rel.url.is_empty() || rel.sha512.is_none() {
+                bail!("Only the newest Unity Hub can be downloaded with a checksum, so other versions are not installed");
+            }
+            ("tools:unityhub".to_string(), d.name.to_string(), vec![run_installer(&dest, vec!["/S".into()], true, label)], current_dir.into_iter().collect(), vec!["Unity Hub.exe".to_string()])
+        }
         "freecad" => {
             let series = version::series(&rel.version);
             let same = current.is_some_and(|c| series_of(c) == series);
@@ -1130,12 +1211,22 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
     // over that copy.
     let here = current.or_else(|| {
         installed.iter().find(|i| tools_key(i) == key && match key {
-            "obs" | "krita" => true,
+            "obs" | "krita" | "unityhub" => true,
             "freecad" => series_of(i) == version::series(&rel.version),
             _ => false,
         })
     });
-    build_plan(key, &rel, kind, here, &ctx)
+    let mut plan = build_plan(key, &rel, kind, here, &ctx)?;
+    // A Unity editor only starts with a license from Unity Hub: install Hub first when it is missing.
+    if key == "unity" && !installed.iter().any(|i| tools_key(i) == "unityhub") {
+        if let Some(hub) = feed.list("unityhub").first().filter(|r| !r.url.is_empty() && r.sha512.is_some()) {
+            let h = build_plan("unityhub", hub, JobKind::Install, None, &ctx)?;
+            plan.downloads.splice(0..0, h.downloads);
+            plan.steps.splice(0..0, h.steps);
+            plan.cleanup.extend(h.cleanup);
+        }
+    }
+    Ok(plan)
 }
 
 /// Uninstall steps for an app with an NSIS uninstaller. The uninstaller is run in place (`_?=`),

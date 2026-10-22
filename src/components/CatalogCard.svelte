@@ -15,9 +15,10 @@
   import { I } from "../lib/icons";
   import { call, send } from "../lib/api";
   import { store } from "../lib/store.svelte";
-  import { router, getHref } from "../lib/router.svelte";
+  import { router, getHref, appHref } from "../lib/router.svelte";
+  import { installedFor } from "../lib/appview";
   import { ui } from "../lib/ui.svelte";
-  import { installApp, openApp } from "../lib/actions";
+  import { installApp, openApp, updateOne } from "../lib/actions";
   import { bytes } from "../lib/format";
   import { canCancel, cancelTip, pct } from "../lib/jobs";
   import type { CatalogEntry } from "../lib/types";
@@ -29,6 +30,10 @@
     const j = store.jobByApp.get(c.id);
     return j && j.kind === "install" ? j : undefined;
   });
+  /** the installed app behind this entry (it can be a side-by-side one such as "tools:godot:4.7.2") */
+  const have = $derived(installedFor(c));
+  const isIn = $derived(c.installed || !!have);
+  const canUpdate = $derived(have?.status === "update");
   const busy = $derived(!!job && job.state !== "waiting" && job.state !== "paused");
   const progress = $derived(job ? job.progress : 0);
   /** "Choose a version" entries have no concrete newest version, so the main button opens the list. */
@@ -37,6 +42,7 @@
 
   let hover = $state(false);
   const level = $derived(job && job.state !== "waiting" ? 0.3 + 0.7 * progress : hover ? 0.5 : 0.4);
+  const openId = $derived(have?.id ?? c.id);
 
   function open(e: MouseEvent) {
     if ((e.target as HTMLElement).closest("button, a")) return;
@@ -111,14 +117,27 @@
       <span class="note">
         {#if job}
           {job.state === "waiting" ? `Queued, ${queuePos}${["st", "nd", "rd"][queuePos - 1] ?? "th"}` : job.state === "paused" ? "Paused" : `Installing, ${pct(job)}%`}
-        {:else if c.installed}
-          <span class="ok"><Dab color="var(--ok)" />Installed</span>
+        {:else if isIn}
+          {#if have}
+            <a class="ok inst" href={appHref(have.id)} title="Installed {have.version}. Show in Installed" onclick={(e) => { e.preventDefault(); router.go(appHref(have.id)); }}>
+              <Dab color="var(--ok)" /><span class="ellipsis">{canUpdate ? have.version : `Installed ${have.version}`}</span>
+            </a>
+          {:else}
+            <span class="ok"><Dab color="var(--ok)" />Installed</span>
+          {/if}
         {/if}
       </span>
       {#if job}
         <button class="ib" aria-label="Cancel install of {c.name}" title={cancelTip(job)} disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })}><Icon d={I.close} /></button>
-      {:else if c.installed}
-        <Btn variant="raised" size="sm" title="Open {c.name}" onclick={() => openApp(c.id)}>Open<Icon d={I.external} size={13} width={2.5} /></Btn>
+      {:else if isIn}
+        <div class="acts">
+          {#if canUpdate && have}
+            <Btn variant="raised" size="sm" title="Update {c.name} to {have.latest}" onclick={() => updateOne(have.id)}>Update</Btn>
+            <button class="ib" aria-label="Open {c.name}" title="Open {c.name}" onclick={() => openApp(openId)}><Icon d={I.external} size={14} width={2.5} /></button>
+          {:else}
+            <Btn variant="raised" size="sm" title="Open {c.name}" onclick={() => openApp(openId)}>Open<Icon d={I.external} size={13} width={2.5} /></Btn>
+          {/if}
+        </div>
       {:else if c.pickVersion}
         <SplitBtn
           title={chooseOnly ? `Choose a version of ${c.name}` : `Install ${c.name} ${c.version}`}
@@ -206,9 +225,24 @@
     height: 28px;
   }
   .note {
+    min-width: 0;
     font-size: 12px;
     color: var(--text-2);
     white-space: nowrap;
+  }
+  .acts {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .ok.inst {
+    max-width: 100%;
+    min-width: 0;
+    transition: color var(--t-fast);
+  }
+  .ok.inst:hover {
+    color: var(--text);
   }
   .ok {
     display: inline-flex;
