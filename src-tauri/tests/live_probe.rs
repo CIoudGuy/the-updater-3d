@@ -384,7 +384,9 @@ async fn other_apps_coverage_and_changelogs() {
         let with_lines = list.iter().filter(|v| v.notes.first().is_some_and(|n| n != other::NO_NOTES && n != other::SEE_NOTES)).count();
         all_versions += list.len();
         all_with_lines += with_lines;
-        println!("{:<36} {:<10} {:<9} {:<9} {}/{} versions with lines  {:?} {:?}", man.id, man.version, key, shown_key, with_lines, list.len(), lines.first().map(|s| s.chars().take(50).collect::<String>()), url);
+        let newest = list.first().map(|v| v.notes.clone()).unwrap_or_default();
+        let heads = newest.iter().filter(|l| l.starts_with('#')).count();
+        println!("{:<36} {:<10} {:<9} {:<9} {}/{} versions with lines, newest {} lines {} headings  {:?} {:?}", man.id, man.version, key, shown_key, with_lines, list.len(), newest.len(), heads, lines.first().map(|s| s.chars().take(50).collect::<String>()), url);
     }
 
     println!("
@@ -417,4 +419,19 @@ async fn other_apps_coverage_and_changelogs() {
     println!("newest version as shown in the version list: {shown_counts:?}");
     println!("all listed versions with a change list: {all_with_lines} of {all_versions}");
     assert!(!rep.matches.is_empty());
+}
+
+/// The first release of a Blender series carries its whole release notes, by topic.
+#[tokio::test]
+#[ignore]
+async fn blender_first_release_has_the_full_notes() {
+    let m = updater_lib::notes::blender_major("5.2").await;
+    let topics: Vec<&String> = m.lines.iter().filter(|l| l.starts_with("# ")).collect();
+    let items = m.lines.iter().filter(|l| !l.starts_with('#')).count();
+    println!("Blender 5.2.0: {} topics, {} items, date {:?}", topics.len(), items, m.date);
+    for l in m.lines.iter().take(14) {
+        println!("  {l}");
+    }
+    assert!(topics.len() >= 10 && items >= 100, "{} topics {} items", topics.len(), items);
+    assert!(m.date.is_some());
 }

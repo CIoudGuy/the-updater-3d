@@ -838,6 +838,13 @@ impl Core {
 
     // ------------------------------------------------------------ catalog and versions
 
+    /// The Get apps list: what is not installed yet, or everything when the setting asks for it.
+    /// `catalog()` stays complete for naming and labelling jobs.
+    pub fn get_apps(&self) -> Vec<CatalogEntry> {
+        let show_installed = self.settings.read().show_installed_in_get_apps;
+        self.catalog().into_iter().filter(|e| show_installed || !e.installed).collect()
+    }
+
     pub fn catalog(&self) -> Vec<CatalogEntry> {
         let st = self.st.lock();
         let s = self.settings.read().clone();
@@ -898,7 +905,10 @@ impl Core {
             return vec![];
         }
         let installed = self.st.lock().installed.clone();
-        tokio::task::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default()
+        let show_installed = self.settings.read().show_installed_in_get_apps;
+        let found = tokio::task::spawn_blocking(move || other::search(&q, &installed, 40)).await.unwrap_or_default();
+        // Like the rest of Get apps: installed apps only when the setting asks for them.
+        found.into_iter().filter(|e| show_installed || !e.installed).collect()
     }
 
     /// Get apps version list: the saved copy at once when there is one (refreshed in the
