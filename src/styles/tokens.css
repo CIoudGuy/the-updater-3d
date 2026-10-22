@@ -1,0 +1,98 @@
+/* Design tokens. Neutral greys only, no tint. */
+:root {
+  /* Color: ground and surfaces */
+  --bg: #141414;            /* app background */
+  --bar: #1A1A1A;           /* top bar, tray */
+  --surface: #202020;       /* cards, tiles, inputs */
+  --surface-2: #242424;     /* tile and row hover */
+  --raised: #262626;        /* menus, dialogs, secondary buttons */
+  --raised-2: #2E2E2E;      /* hover on raised, active segment */
+  --fill: #2A2A2A;          /* progress fill inside a tile */
+  --sep: #2C2C2C;           /* 1px separators in dense lists */
+  --sep-raised: #333333;    /* separators inside menus and dialogs */
+  --skeleton: #1F1F1F;      /* loading placeholders */
+  --scrim: rgba(10, 10, 10, 0.72);
+
+  /* Color: text */
+  --text: #EDEDED;          /* primary */
+  --text-2: #A0A0A0;        /* secondary */
+  --text-3: #858585;        /* muted, lifted from #6E6E6E to pass 4.5:1 on surfaces */
+  --text-4: #6E6E6E;        /* disabled and decorative only */
+
+  /* Color: actions and status */
+  --primary: #EDEDED;
+  --primary-hover: #FFFFFF;
+  --on-primary: #141414;
+  --on-primary-2: #5A5A5A;  /* shortcut hint inside a primary button */
+  --ok: #7FB77E;
+  --warn: #D9B26A;
+  --err: #D9706A;
+
+  /* Paint: pigments for brush strokes and washes (decoration only, never body text) */
+  --ochre: #D9B26A;
+  --sage: #7FB77E;
+  --madder: #D9706A;
+  --cobalt: #7C93D6;
+  --violet: #A98BD8;
+  --rose: #D98BA6;
+  --paint-swatch: #262626;  /* active nav, selected segment: a painted grey swatch */
+  --paint-bristle: #303030; /* dry-brush streaks inside swatches */
+  --wash: 0.14;             /* opacity of a colour wash behind content */
+  --wash-strong: 0.26;      /* tile fill while an app updates */
+  --stroke-under: 0.5;      /* opacity of the brush underline under a statement */
+
+  /* Type */
+  --font: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+  --fs-20: 20px;
+  --fs-28: 28px;
+  --fs-40: 40px;
+  --fs-64: 64px;
+  --lh-tight: 1;
+  --lh-snug: 1.25;
+  --lh-body: 1.5;
+  --track-display: -0.04em; /* 40 and up */
+  --track-heading: -0.02em; /* 20 and 28 */
+  --track-body: -0.005em;
+  --w-regular: 400;
+  --w-medium: 500;
+  --w-semibold: 600;
+
+  /* Space: 4px base */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  /* Radius */
+  --r-ctl: 6px;
+  --r-menu: 8px;
+  --r-card: 10px;
+  --r-full: 999px;
+
+  /* Size */
+  --topbar-h: 48px;         /* nav, drag area and window controls in one bar */
+  --page-x: 80px;           /* side padding of the content area */
+  --ctl-h-sm: 28px;
+  --ctl-h: 32px;
+  --ctl-h-lg: 36px;
+  --row-h: 52px;
+  --progress-h: 2px;
+  --dot: 6px;
+
+  /* Motion: quick and functional */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --t-fast: 120ms;  /* hover, press */
+  --t-base: 150ms;  /* list changes, menus */
+  --t-slow: 180ms;  /* dialogs, progress steps */
+}
+
