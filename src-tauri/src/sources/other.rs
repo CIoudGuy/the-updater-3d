@@ -32,7 +32,7 @@ pub const SEE_NOTES: &str = "See the full release notes for the changes";
 
 /// Packages another source handles. A package matches its id and the ids below it
 /// ("BlenderFoundation.Blender.LTS.4.5").
-const HANDLED: &[&str] = &["BlenderFoundation.Blender", "OBSProject.OBSStudio", "KDE.Krita", "FreeCAD.FreeCAD", "GodotEngine.GodotEngine", "Unity.Unity", "Adobe.CreativeCloud"];
+const HANDLED: &[&str] = &["BlenderFoundation.Blender", "OBSProject.OBSStudio", "KDE.Krita", "FreeCAD.FreeCAD", "GodotEngine.GodotEngine", "Unity.Unity", "Unity.UnityHub", "Adobe.CreativeCloud"];
 
 /// Packages that update themselves, belong to Windows or are security software, with the reason.
 const EXCLUDED: &[(&str, &str)] = &[
@@ -1350,7 +1350,7 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         kind,
         name: name.clone(),
         to_version: m.version.clone(),
-        downloads: vec![Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()), md5: None, signer: None, headers: vec![] }],
+        downloads: vec![Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()), sha512: None, md5: None, signer: None, headers: vec![] }],
         steps,
         block_dirs: block_dirs.clone(),
         block_names: block_names.clone(),

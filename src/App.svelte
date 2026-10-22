@@ -30,25 +30,57 @@
   let page = $state<HTMLElement>();
   let timer: ReturnType<typeof setTimeout> | undefined;
 
+  // The scroll position of the page on screen is remembered per history entry (see router.svelte.ts).
+  router.scrollSource = () => (phase === "in" && page ? page.scrollTop : null);
+  router.canStep = () => !ui.dialog;
+  let handledNav = router.navId;
+
+  /** Puts the page back where it was. Content can still be loading, so it keeps trying for a moment, and stops when the user scrolls. */
+  function restoreScroll(el: HTMLElement, top: number) {
+    const until = performance.now() + 2000;
+    let timer: ReturnType<typeof setInterval>;
+    const finish = () => {
+      clearInterval(timer);
+      el.removeEventListener("wheel", finish);
+      el.removeEventListener("pointerdown", finish);
+      window.removeEventListener("keydown", finish);
+    };
+    el.addEventListener("wheel", finish, { passive: true });
+    el.addEventListener("pointerdown", finish);
+    window.addEventListener("keydown", finish);
+    const step = () => {
+      el.scrollTop = top;
+      if (Math.abs(el.scrollTop - top) <= 2 || performance.now() > until) finish();
+    };
+    timer = setInterval(step, 30);
+    step();
+  }
+  function settle(top: number | null) {
+    page?.scrollTo({ top: 0 });
+    if (top) tick().then(() => page && restoreScroll(page, top));
+  }
+
   $effect(() => {
     const r = router.route;
     const key = router.key;
+    const nav = router.navId;
+    const top = router.pendingScroll;
+    const fresh = nav !== handledNav;
+    handledNav = nav;
     if (key === shownKey) {
       shown = r;
+      // back or forward between two entries of the same page
+      if (fresh && top != null) tick().then(() => page && restoreScroll(page, top));
       return;
     }
     phase = "out";
     clearTimeout(timer);
-    // Get apps keeps its scroll position while one of its detail pages is open
-    if (shownKey === "get" && r.name === "getdetail") ui.getScroll = page?.scrollTop ?? 0;
-    const leaving = shownKey;
     timer = setTimeout(
       () => {
         shownKey = key;
         shown = r;
         phase = "in";
-        page?.scrollTo({ top: 0 });
-        if (key === "get" && leaving.startsWith("getdetail")) tick().then(() => page?.scrollTo({ top: ui.getScroll }));
+        settle(top);
       },
       reduced() ? 0 : 90,
     );
@@ -161,9 +193,14 @@
       checkNow();
       return;
     }
-    if (e.altKey && e.key === "ArrowLeft") {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "ArrowLeft") {
       e.preventDefault();
       router.back();
+      return;
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === "ArrowRight") {
+      e.preventDefault();
+      router.forward();
       return;
     }
     if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {

@@ -86,7 +86,7 @@ pub struct CatalogEntry {
     pub pick_version: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionInfo {
     pub version: String,

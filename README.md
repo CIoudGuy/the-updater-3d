@@ -5,7 +5,7 @@ A fast Windows app that keeps creative software up to date in one place:
 - **Adobe Creative Cloud apps** (Photoshop, Illustrator, Substance 3D and the rest)
 - **Blender**, every installed version side by side, plus betas
 - **The Craft apps** from ArtCraft (PhotoCraft, VectorCraft, FilmCraft and the others)
-- **More apps**: OBS Studio, Krita, FreeCAD, Godot and Unity Editor
+- **More apps**: OBS Studio, Krita, FreeCAD, Godot, Unity Editor and Unity Hub
 - **Other apps** (off unless turned on): every other app on the PC that Microsoft's public winget
   catalog lists, matched from that catalog and less complete than the apps above
 
@@ -21,9 +21,9 @@ Built with [Tauri 2](https://tauri.app): a Rust backend and a Svelte 5 interface
 (`Common Files\Adobe\caps\hdpim.db`), checked against the files on disk, so leftovers of deleted
 apps are not listed. Latest versions come from the public Creative Cloud product catalog. Updates
 run through Adobe's Remote Update Manager (Adobe's admin updater), and new apps or other versions
-are handed to Creative Cloud. Creative Cloud itself updates with Adobe's public setup, accepted only
-with a valid Adobe Inc. signature since Adobe publishes no checksum for it. Creative Cloud stays
-installed for sign-in and licensing.
+are handed to Creative Cloud. Creative Cloud itself updates with Adobe's offline installer for the
+newest build (the one on Adobe's direct download page), checked against the size and MD5 Adobe's
+server reports. Creative Cloud stays installed for sign-in and licensing.
 
 **Blender.** Each installed release series (4.2, 4.5, 5.2...) is its own entry. New series install
 next to the old ones; bug-fix releases update their series in place, or install as a separate
@@ -38,7 +38,9 @@ release feeds (GitHub Releases, the KDE download index, Unity's release API) and
 their own installers, silently, after the download has been checked (SHA-256, or exact size and MD5
 for Unity). FreeCAD (per release series), Godot and Unity (per version) install next to the
 copies you already have; OBS Studio and Krita update in place. Godot is a portable copy unpacked
-into its own folder with a Start menu shortcut.
+into its own folder with a Start menu shortcut. Unity editors only start with a license from Unity
+Hub, so Unity Hub is handled too (its update feed, SHA-512 checked) and is installed along with
+the first editor when it is missing; signing in to Hub once stays up to you.
 
 **Other apps.** Read straight from Microsoft's public winget catalog; winget itself is never run.
 The package index (`source2.msix`, checked against Microsoft's signature) is kept on disk and

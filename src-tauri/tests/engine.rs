@@ -30,7 +30,7 @@ async fn sha_from_feed() -> String {
 #[ignore]
 async fn download_pauses_resumes_limits_and_verifies() {
     let dir = tmp("dl");
-    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some(sha_from_feed().await), md5: None, signer: None, headers: vec![] };
+    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some(sha_from_feed().await), md5: None, signer: None, sha512: None, headers: vec![] };
     let throttle = Arc::new(Throttle::new());
     throttle.set(3 * 1024 * 1024);
     let (tx, rx) = tokio::sync::watch::channel(Control::Run);
@@ -67,7 +67,7 @@ async fn download_pauses_resumes_limits_and_verifies() {
 #[ignore]
 async fn bad_checksum_is_rejected_and_deleted() {
     let dir = tmp("badsum");
-    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some("00".repeat(32)), md5: None, signer: None, headers: vec![] };
+    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some("00".repeat(32)), md5: None, signer: None, sha512: None, headers: vec![] };
     let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
     let r = download::fetch(&d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await;
     assert!(r.is_err());
@@ -180,7 +180,7 @@ async fn downloader_is_not_the_bottleneck() {
         }
     });
     let dir = tmp("speed");
-    let d = Download { url: format!("http://127.0.0.1:{port}/big.bin"), dest: dir.join("big.bin"), size: Some(N), sha256: None, md5: None, signer: None, headers: vec![] };
+    let d = Download { url: format!("http://127.0.0.1:{port}/big.bin"), dest: dir.join("big.bin"), size: Some(N), sha256: None, md5: None, signer: None, sha512: None, headers: vec![] };
     let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
     let t0 = Instant::now();
     let r = download::fetch(&d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await.unwrap();

@@ -115,6 +115,20 @@ fn sha256_file(p: &std::path::Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+fn sha512_file(p: &std::path::Path) -> Result<String> {
+    let mut f = std::fs::File::open(p)?;
+    let mut h = sha2::Sha512::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn md5_file(p: &std::path::Path) -> Result<String> {
     let mut f = std::fs::File::open(p)?;
     let mut h = Md5::new();
@@ -157,6 +171,12 @@ pub fn verify(d: &Download) -> Result<()> {
             bail!("Checksum mismatch: expected MD5 {want}, got {got}");
         }
     }
+    if let Some(want) = &d.sha512 {
+        let got = sha512_file(&d.dest)?;
+        if !got.eq_ignore_ascii_case(want) {
+            bail!("Checksum mismatch: expected SHA-512 {want}, got {got}");
+        }
+    }
     if let Some(want) = &d.signer {
         match crate::winutil::authenticode_signer(&d.dest) {
             Some(got) if &got == want => {}
@@ -172,7 +192,7 @@ mod tests {
     use super::*;
 
     fn dl(dest: std::path::PathBuf, size: Option<u64>, md5: Option<String>) -> Download {
-        Download { url: String::new(), dest, size, sha256: None, md5, signer: None, headers: vec![] }
+        Download { url: String::new(), dest, size, sha256: None, md5, signer: None, sha512: None, headers: vec![] }
     }
 
     #[test]
