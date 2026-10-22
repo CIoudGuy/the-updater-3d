@@ -100,3 +100,7 @@ artwork, then `npx tauri icon src-tauri/icons/app-icon-1024.png` makes the other
 
 Adobe, Creative Cloud, Photoshop and Substance are trademarks of Adobe. Blender is a trademark of
 the Blender Foundation. This project is not affiliated with either, nor with ArtCraft.
+
+## Made with AI
+
+This project was built with the help of AI coding tools.
