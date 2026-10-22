@@ -19,9 +19,9 @@ Built with [Tauri 2](https://tauri.app): a Rust backend and a Svelte 5 interface
 (`Common Files\Adobe\caps\hdpim.db`), checked against the files on disk, so leftovers of deleted
 apps are not listed. Latest versions come from the public Creative Cloud product catalog. Updates
 run through Adobe's Remote Update Manager (Adobe's admin updater), and new apps or other versions
-are handed to Creative Cloud. Creative Cloud itself updates with Adobe's public setup, accepted only
-with a valid Adobe Inc. signature since Adobe publishes no checksum for it. Creative Cloud stays
-installed for sign-in and licensing.
+are handed to Creative Cloud. Creative Cloud itself updates with Adobe's offline installer for the
+newest build (the one on Adobe's direct download page), checked against the size and MD5 Adobe's
+server reports. Creative Cloud stays installed for sign-in and licensing.
 
 **Blender.** Each installed release series (4.2, 4.5, 5.2...) is its own entry. New series install
 next to the old ones; bug-fix releases update their series in place, or install as a separate
