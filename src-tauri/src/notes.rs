@@ -104,37 +104,138 @@ pub async fn blender(series: &str) -> HashMap<String, Notes> {
     out
 }
 
-/// Adobe notes for one version from the product's release notes page. Adobe uses two layouts:
-/// one page per version (linked from the main page), or one long page with a heading per version.
+/// A page and the address it ended up at after redirects (Adobe's short links redirect to
+/// helpx.adobe.com and then to experienceleague.adobe.com). Cached for the session.
+async fn page_final(url: &str) -> Option<(String, String)> {
+    use once_cell::sync::Lazy;
+    use parking_lot::Mutex;
+    static CACHE: Lazy<Mutex<HashMap<String, (String, String)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = CACHE.lock().get(url).cloned() {
+        return Some(hit);
+    }
+    let resp = http::CLIENT.get(url).timeout(Duration::from_secs(15)).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let final_url = resp.url().to_string();
+    let body = resp.text().await.ok()?;
+    CACHE.lock().insert(url.to_string(), (final_url.clone(), body.clone()));
+    Some((final_url, body))
+}
+
+fn origin(url: &str) -> String {
+    let rest = url.split("//").nth(1).unwrap_or("");
+    format!("https://{}", rest.split('/').next().unwrap_or(""))
+}
+
+/// Headings of a page: (level, text, start, end).
+fn headings(html: &str) -> Vec<(u8, String, usize, usize)> {
+    let re = regex::Regex::new(r"(?s)<h([1-4])[^>]*>(.*?)</h[1-4]>").unwrap();
+    re.captures_iter(html)
+        .map(|c| {
+            let m = c.get(0).unwrap();
+            (c[1].parse().unwrap_or(4), strip_tags(&c[2]), m.start(), m.end())
+        })
+        .collect()
+}
+
+fn is_version(text: &str) -> bool {
+    let t = text.trim();
+    !t.is_empty() && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.contains('.')
+}
+
+/// Shorten a long list item to its first sentence so the version list stays readable.
+fn first_sentence(s: &str) -> String {
+    let cut = s.char_indices().find(|(i, c)| *c == '.' && *i > 15 && s[i + 1..].starts_with(' ')).map(|(i, _)| i);
+    let mut t = match cut {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    };
+    if t.chars().count() > 160 {
+        t = t.chars().take(157).collect::<String>() + "...";
+    }
+    t
+}
+
+/// Notes for one version from an Adobe version page: the list under the heading for that exact
+/// version ("12.2.0" in the Release Notes section); for a first release (x.y.0) without one, the
+/// headlines of its new features.
+fn adobe_from_version_page(html: &str, ver: &str) -> (Vec<String>, Option<String>) {
+    let body = html.find("<main").map(|i| &html[i..]).unwrap_or(html);
+    let heads = headings(body);
+    let full = version::trim_like(&format!("{ver}.0.0"), "1.2.3");
+    let want = |t: &str| {
+        let t = t.trim();
+        t == ver || version::cmp(t, &full).is_eq() && is_version(t)
+    };
+    if let Some(k) = heads.iter().position(|h| is_version(&h.1) && want(&h.1)) {
+        let level = heads[k].0;
+        let stop = heads[k + 1..]
+            .iter()
+            .find(|h| h.0 < level || (h.0 <= level && is_version(&h.1)) || h.1.eq_ignore_ascii_case("known issues"))
+            .map(|h| h.2)
+            .unwrap_or(body.len());
+        let block = &body[heads[k].3..stop];
+        let lines: Vec<String> = items(block).into_iter().map(|l| first_sentence(&l)).collect();
+        // "Release date: 2026/09/15"
+        let date = regex::Regex::new(r"Release date:\s*(\d{4})/(\d{1,2})/(\d{1,2})")
+            .unwrap()
+            .captures(&strip_tags(block))
+            .map(|c| format!("{}-{:0>2}-{:0>2}T00:00:00Z", &c[1], &c[2], &c[3]));
+        if !lines.is_empty() {
+            return (lines, date);
+        }
+    }
+    // First release of a line: the feature headings before the release notes section.
+    if version::parts(ver).get(2).copied().unwrap_or(0) == 0 {
+        let notes_at = heads.iter().position(|h| h.0 == 2 && h.1.to_ascii_lowercase().contains("release notes")).unwrap_or(heads.len());
+        let feats: Vec<String> = heads[..notes_at]
+            .iter()
+            .filter(|h| h.0 == 3 && !is_version(&h.1))
+            .map(|h| h.1.clone())
+            .take(MAX_LINES)
+            .collect();
+        if !feats.is_empty() {
+            return (feats, None);
+        }
+    }
+    (vec![], None)
+}
+
+/// Adobe notes for one version. The catalog's release notes link leads to a product page that
+/// links one page per minor version ("version-12-2"); older products use one long page with a
+/// heading per version.
 pub async fn adobe(notes_url: &str, ver: &str) -> Option<Notes> {
-    let html = page(notes_url).await?;
-    let short = version::trim_like(ver, "1.2");
-    let dashed = short.replace('.', "-");
-    // 1. A link to a page for this version ("version-12-2.html").
-    let link = regex::Regex::new(r#"href="([^"]*version-([0-9-]+)\.html)""#).unwrap();
-    for c in link.captures_iter(&html) {
-        if c[2] == dashed || c[2] == ver.replace('.', "-") {
-            let mut url = c[1].to_string();
-            if url.starts_with('/') {
-                url = format!("https://{}{}", http::host(notes_url), url);
-            }
-            if let Some(vp) = page(&url).await {
-                let body = vp.find("<main").map(|i| &vp[i..]).unwrap_or(&vp);
-                let lines = items(body);
-                if !lines.is_empty() {
-                    return Some(Notes { date: None, lines });
-                }
+    let (final_url, html) = page_final(notes_url).await?;
+    let p = version::parts(ver);
+    let minor = format!("{}-{}", p.first().copied().unwrap_or(0), p.get(1).copied().unwrap_or(0));
+    // 1. The page for this minor version, linked from the product page or next to it.
+    let link = regex::Regex::new(r##"href="([^"#?]*/version-(\d+)-(\d+)(?:\.html)?)""##).unwrap();
+    let mut candidates: Vec<String> = link
+        .captures_iter(&html)
+        .filter(|c| format!("{}-{}", &c[2], &c[3]) == minor)
+        .map(|c| if c[1].starts_with('/') { format!("{}{}", origin(&final_url), &c[1]) } else { c[1].to_string() })
+        .collect();
+    if let Some(i) = final_url.rfind('/') {
+        candidates.push(format!("{}/version-{minor}", &final_url[..i]));
+    }
+    candidates.dedup();
+    for url in candidates {
+        if let Some((_, vp)) = page_final(&url).await {
+            let (lines, date) = adobe_from_version_page(&vp, ver);
+            if !lines.is_empty() {
+                return Some(Notes { date, lines });
             }
         }
     }
-    // 2. A heading that names this version, followed by its lists.
-    let heading = regex::Regex::new(r"(?s)<h([1-4])[^>]*>(.*?)</h[1-4]>").unwrap();
-    let heads: Vec<(usize, usize, String)> = heading.captures_iter(&html).map(|c| (c.get(0).unwrap().start(), c.get(0).unwrap().end(), strip_tags(&c[2]))).collect();
-    for (k, (_, end, text)) in heads.iter().enumerate() {
-        let words: Vec<&str> = text.split(|c: char| !(c.is_ascii_digit() || c == '.')).collect();
+    // 2. One long page: the heading that names this version, followed by its lists.
+    let heads = headings(&html);
+    let short = version::trim_like(ver, "1.2");
+    for (k, h) in heads.iter().enumerate() {
+        let words: Vec<&str> = h.1.split(|c: char| !(c.is_ascii_digit() || c == '.')).collect();
         if words.iter().any(|w| *w == ver || *w == short) {
-            let stop = heads.get(k + 1).map(|h| h.0).unwrap_or(html.len());
-            let lines = items(&html[*end..stop]);
+            let stop = heads.get(k + 1).map(|n| n.2).unwrap_or(html.len());
+            let lines: Vec<String> = items(&html[h.3..stop]).into_iter().map(|l| first_sentence(&l)).collect();
             if !lines.is_empty() {
                 return Some(Notes { date: None, lines });
             }
@@ -151,6 +252,20 @@ mod tests {
     fn reads_list_items_without_refs() {
         let html = r#"<ul> <li>Crash in BLI_mmap.cc on WIN32. (<a href="x">956fd000a2</a>)</li> <li>GLTF export ignores light color. (<a href="y">#156753</a>)</li></ul>"#;
         assert_eq!(items(html), vec!["Crash in BLI_mmap.cc on WIN32", "GLTF export ignores light color"]);
+    }
+
+    #[test]
+    fn adobe_version_page() {
+        let html = r#"<main><h1>Version 12.2</h1><h2>Major features</h2><h3>Improved Polygon Fill</h3><p>x</p>
+<h3>New cage painting in Baking mode</h3><h2>Release Notes</h2><h3>12.2.0</h3><ul><li>Fixed a crash when baking. More words here.</li><li>Faster export</li></ul>
+<h3>12.2.1</h3><ul><li>Fixed the viewport</li></ul><h3>Known issues</h3><ul><li>Not a note</li></ul></main>"#;
+        assert_eq!(adobe_from_version_page(html, "12.2.0").0, vec!["Fixed a crash when baking", "Faster export"]);
+        assert_eq!(adobe_from_version_page(html, "12.2.1").0, vec!["Fixed the viewport"]);
+        let dated = r#"<main><h2>Release Notes</h2><h3>12.1.5</h3><p>Release date: 2026/09/15</p><ul><li>Fixed a crash</li></ul></main>"#;
+        assert_eq!(adobe_from_version_page(dated, "12.1.5").1.as_deref(), Some("2026-09-15T00:00:00Z"));
+        // A first release without its own list falls back to the feature headlines.
+        let no_list = r#"<main><h1>Version 12.2</h1><h2>Major features</h2><h3>Improved Polygon Fill</h3><h3>New cage painting</h3><h2>Release Notes</h2></main>"#;
+        assert_eq!(adobe_from_version_page(no_list, "12.2.0").0, vec!["Improved Polygon Fill", "New cage painting"]);
     }
 
     #[test]

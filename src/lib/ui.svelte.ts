@@ -70,6 +70,8 @@ class Ui {
   maximized = $state(false);
   /** set by the "Install another version" menu item; the detail page then focuses the picker */
   pickVersion = $state(false);
+  /** "Update and restart" was clicked: downloading the new version, the app restarts by itself */
+  selfUpdating = $state(false);
 
   view = $state<"grid" | "list">(load("view", ["grid", "list"] as const, "grid"));
   filter = $state<InstalledFilter>("all");

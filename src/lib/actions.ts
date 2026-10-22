@@ -78,6 +78,20 @@ function guard(items: SpaceItem[], go: () => void) {
 
 const upd = (a: AppEntry): SpaceItem => ({ name: a.name, bytes: a.updateSize ?? 0, dir: a.installDir, source: a.source, relocatable: false });
 
+/** Update The Updater 3D itself. One click is enough: later clicks are ignored until it restarts. */
+export async function updateSelf() {
+  if (ui.selfUpdating) return;
+  ui.selfUpdating = true;
+  const ok = await call("install_self_update", {}).then(
+    () => true,
+    (e) => {
+      store.toast("err", String(e?.message ?? e));
+      return false;
+    },
+  );
+  if (!ok) ui.selfUpdating = false;
+}
+
 export function updateApps(ids: string[]) {
   const list = ids.map((id) => store.app(id)).filter((a): a is AppEntry => !!a && (a.status === "update"));
   if (!list.length) return;

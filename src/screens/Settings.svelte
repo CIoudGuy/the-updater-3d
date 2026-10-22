@@ -15,7 +15,7 @@
   import { ui } from "../lib/ui.svelte";
   import { router, SETTINGS_SECTIONS, type SettingsSection } from "../lib/router.svelte";
   import { bytes, clock, driveOf } from "../lib/format";
-  import { checkNow } from "../lib/actions";
+  import { checkNow, updateSelf } from "../lib/actions";
   import { MARKER_BASE, pageIn, pageOut, place, rise } from "../lib/motion";
   import type { AutoMode } from "../lib/types";
 
@@ -345,7 +345,7 @@
           </SRow>
           <SRow label={st.selfUpdate ? `Version ${st.selfUpdate} is ready` : "You have the latest version"} desc={st.selfUpdate ? "The app restarts itself to finish the update. Running installs are not interrupted." : "The Updater 3D keeps itself up to date."}>
             {#snippet control()}
-              {#if st.selfUpdate}<Btn variant="primary" size="md" onclick={() => send("install_self_update", {})}>Update and restart</Btn>{/if}
+              {#if st.selfUpdate}<Btn variant="primary" size="md" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading" : "Update and restart"}</Btn>{/if}
               <Btn variant="raised" size="md" disabled={st.checking} onclick={checkNow}>{st.checking ? "Checking" : "Check now"}</Btn>
             {/snippet}
           </SRow>

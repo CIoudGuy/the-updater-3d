@@ -441,6 +441,20 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
     out
 }
 
+/// Release notes on Adobe Experience League, which answers apps (adobe.com short links and
+/// helpx.adobe.com reject anything that is not a browser, so those only open in the browser).
+fn release_notes_url(sap: &str) -> Option<String> {
+    let slug = match sap {
+        "SBSTP" => "substance-3d-painter",
+        "SBSTD" => "substance-3d-designer",
+        "SBSTA" => "substance-3d-sampler",
+        "STGR" => "substance-3d-stager",
+        "SHPR" => "substance-3d-modeler",
+        _ => return None,
+    };
+    Some(format!("https://experienceleague.adobe.com/en/docs/{slug}/using/release-notes/release-notes"))
+}
+
 pub fn versions(inst_sap: &str, platform: &str, installed_version: Option<&str>, cat: &Catalog) -> Vec<VersionInfo> {
     let mut list: Vec<&Product> = cat.for_sap(inst_sap).filter(|p| p.platform == platform).collect();
     list.sort_by(|a, b| version::cmp(&b.version, &a.version));
@@ -452,7 +466,7 @@ pub fn versions(inst_sap: &str, platform: &str, installed_version: Option<&str>,
             version: p.version.clone(),
             date: None,
             notes: vec![],
-            notes_url: p.whats_new.clone(),
+            notes_url: release_notes_url(inst_sap).or_else(|| p.whats_new.clone()),
             size: p.size,
             installed: installed_version.is_some_and(|v| version::cmp(v, &p.version).is_eq()),
             latest: newest.as_deref() == Some(p.version.as_str()),
