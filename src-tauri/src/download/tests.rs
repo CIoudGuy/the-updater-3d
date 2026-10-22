@@ -37,6 +37,21 @@ fn unity_integrity_value_becomes_hex() {
 }
 
 #[test]
+fn file_hashes_are_lowercase_hex_of_known_values() {
+    let dir = std::env::temp_dir().join(format!("u3d-hash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("abc.bin");
+    std::fs::write(&f, b"abc").unwrap();
+    assert_eq!(hash_file(&f, Sha256::new()).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(hash_file(&f, Md5::new()).unwrap(), "900150983cd24fb0d6963f7d28e17f72");
+    assert_eq!(
+        hash_file(&f, sha2::Sha512::new()).unwrap(),
+        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn content_ranges_are_read() {
     assert_eq!(parse_content_range("bytes 0-99/1000"), Some((0, 99, Some(1000))));
     assert_eq!(parse_content_range("bytes 500-999/*"), Some((500, 999, None)));
