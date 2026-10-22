@@ -646,13 +646,25 @@ impl Core {
     pub async fn scheduler(self: Arc<Self>) {
         self.preload().await;
         let _ = self.check_now(false).await;
-        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        let mut tick = tokio::time::interval(Duration::from_secs(TICK_SECS));
         let mut n: u64 = 0;
         loop {
             tick.tick().await;
             n += 1;
+            // "Running" flags and disk space: every minute, and every tick while Creative Cloud
+            // is down so the warning goes away as soon as it starts (whatever the check interval).
+            let cc_down = self.st.lock().status.as_ref().is_some_and(|s| s.cc_installed && !s.cc_running);
+            if status_refresh_due(n, cc_down) {
+                let me = self.clone();
+                tokio::task::spawn_blocking(move || me.update_disk_status()).await.ok();
+                self.emit_status();
+            }
+            if n % (60 / TICK_SECS) != 0 {
+                continue;
+            }
+            let minute = n / (60 / TICK_SECS);
             // Pick up installs and updates made outside the app (no network needed).
-            if n % 5 == 0 && !self.jobs.lock().iter().any(|j| j.active) {
+            if minute % 5 == 0 && !self.jobs.lock().iter().any(|j| j.active) {
                 self.rescan().await;
             }
             let hours = self.settings.read().check_interval;
@@ -669,10 +681,6 @@ impl Core {
             if due {
                 let _ = self.check_now(false).await;
             }
-            // Keep "running" flags and disk space fresh.
-            let me = self.clone();
-            tokio::task::spawn_blocking(move || me.update_disk_status()).await.ok();
-            self.emit_status();
         }
     }
 
@@ -1241,12 +1249,18 @@ impl Core {
             }
             JobRequest::Uninstall { app_id } => {
                 let inst = installed.iter().find(|i| &i.id == app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
-                match inst.source {
+                let mut plan = match inst.source {
                     Source::Adobe => adobe::plan_uninstall(inst),
                     Source::Craft => craft::plan_uninstall(inst),
                     Source::Blender => blender::plan_uninstall(inst),
                     Source::Tools => tools::plan_uninstall(inst),
+                }?;
+                // Whatever the vendor's uninstaller leaves in the app's own folder goes too.
+                let others: Vec<PathBuf> = installed.iter().filter(|i| i.id != inst.id).filter_map(|i| i.install_dir.clone()).collect();
+                if let Some(dir) = inst.install_dir.as_deref().and_then(|d| leftover_dir(d, &others)) {
+                    plan.steps.push(sources::Step::RemoveDir { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
                 }
+                Ok(plan)
             }
         }
     }
@@ -1747,6 +1761,57 @@ async fn with_adobe_notes(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
     list
 }
 
+/// The app's install folder when it is safe to delete after its uninstaller ran: a folder of its
+/// own, never a shared parent (Program Files, Adobe, Blender Foundation, Unity Hub, the user's
+/// profile...) and never one that holds another installed app.
+fn leftover_dir(dir: &std::path::Path, other_installs: &[PathBuf]) -> Option<PathBuf> {
+    let norm = |p: &std::path::Path| p.to_string_lossy().trim_end_matches('\\').to_ascii_lowercase();
+    let me = norm(dir);
+    let pf = paths::program_files();
+    let pf86 = paths::program_files_x86();
+    let shared = [
+        pf.clone(),
+        pf86.clone(),
+        pf.join("Common Files"),
+        pf86.join("Common Files"),
+        pf.join("Adobe"),
+        pf86.join("Adobe"),
+        pf.join("Blender Foundation"),
+        pf.join("Unity"),
+        pf.join("Unity").join("Hub"),
+        pf.join("Unity").join("Hub").join("Editor"),
+        paths::local_app_data(),
+        paths::local_app_data().join("Programs"),
+        paths::app_data(),
+        PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()),
+        PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into())),
+    ];
+    if dir.components().count() < 4 || shared.iter().any(|s| norm(s) == me) {
+        return None;
+    }
+    if other_installs.iter().any(|o| {
+        let o = norm(o);
+        o == me || o.starts_with(&format!("{me}\\"))
+    }) {
+        return None;
+    }
+    Some(dir.to_path_buf())
+}
+
+fn under_program_files(p: &std::path::Path) -> bool {
+    let s = p.to_string_lossy().to_ascii_lowercase();
+    [paths::program_files(), paths::program_files_x86()].iter().any(|r| s.starts_with(&format!("{}\\", r.to_string_lossy().to_ascii_lowercase())))
+}
+
+/// The scheduler wakes every few seconds; most ticks do nothing.
+const TICK_SECS: u64 = 5;
+
+/// Refresh the status (Creative Cloud running, disk space) on tick `n`: once a minute, and on
+/// every tick while Creative Cloud is down.
+fn status_refresh_due(n: u64, cc_down: bool) -> bool {
+    cc_down || n % (60 / TICK_SECS) == 0
+}
+
 /// Wait for the one-installer-at-a-time slot, giving up when the job is canceled meanwhile.
 async fn take_turn(lock: &tokio::sync::Mutex<()>, mut ctl: watch::Receiver<Control>) -> Option<tokio::sync::MutexGuard<'_, ()>> {
     let canceled = async {
@@ -1894,7 +1959,7 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_bytes, install_curve, rum_watch, set_control, take_turn, with_version};
+    use super::{folder_bytes, install_curve, leftover_dir, rum_watch, set_control, status_refresh_due, take_turn, under_program_files, with_version, TICK_SECS};
     use crate::download::Control;
 
     #[tokio::test]
@@ -1913,6 +1978,37 @@ mod tests {
         // With nothing else installing, the slot is taken right away.
         let (_tx2, rx2) = tokio::sync::watch::channel(Control::Run);
         assert!(take_turn(&lock, rx2).await.is_some());
+    }
+
+    #[test]
+    fn creative_cloud_status_refreshes_within_seconds_while_it_is_down() {
+        // Creative Cloud was started a moment ago: the next tick (5 s) must look again.
+        assert!(status_refresh_due(1, true));
+        assert!(TICK_SECS <= 10);
+        // Otherwise once a minute is enough.
+        assert!(!status_refresh_due(1, false));
+        assert!(status_refresh_due(60 / TICK_SECS, false));
+    }
+
+    #[test]
+    fn uninstall_removes_only_the_apps_own_leftover_folder() {
+        use std::path::PathBuf;
+        let pf = crate::paths::program_files();
+        let obs = pf.join("obs-studio");
+        let others = vec![pf.join("Blender Foundation").join("Blender 4.5"), pf.join("Adobe").join("Adobe Photoshop 2026")];
+        assert_eq!(leftover_dir(&obs, &others), Some(obs.clone()));
+        assert!(under_program_files(&obs));
+        assert_eq!(leftover_dir(&pf.join("Blender Foundation").join("Blender 5.2"), &others).is_some(), true);
+        // Shared parents are never removed.
+        for shared in [pf.clone(), pf.join("Adobe"), pf.join("Blender Foundation"), pf.join("Unity").join("Hub").join("Editor"), crate::paths::local_app_data().join("Programs")] {
+            assert_eq!(leftover_dir(&shared, &[]), None, "{}", shared.display());
+        }
+        // Nor a folder that holds another installed app.
+        assert_eq!(leftover_dir(&pf.join("Adobe").join("Adobe Photoshop 2026"), &others), None);
+        assert_eq!(leftover_dir(&pf.join("Blender Foundation"), &[]), None);
+        let parent_of_other = pf.join("Suite");
+        assert_eq!(leftover_dir(&parent_of_other, &[parent_of_other.join("App")]), None);
+        assert_eq!(leftover_dir(&PathBuf::from("C:\\"), &[]), None);
     }
 
     #[test]

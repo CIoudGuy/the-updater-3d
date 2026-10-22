@@ -95,7 +95,7 @@ pub async fn check() -> Result<Option<Release>> {
 pub async fn install(r: &Release) -> Result<()> {
     let k = key().ok_or_else(|| anyhow!("No update key"))?;
     let dest = paths::downloads().join("self").join(&r.name);
-    let d = Download { url: r.url.clone(), dest: dest.clone(), size: r.size, sha256: r.sha256.clone(), md5: None, headers: vec![("X-Update-Key".into(), k)] };
+    let d = Download { url: r.url.clone(), dest: dest.clone(), size: r.size, sha256: r.sha256.clone(), md5: None, signer: None, headers: vec![("X-Update-Key".into(), k)] };
     if r.sha256.is_none() {
         bail!("The release has no checksum, so it was not installed");
     }

@@ -17,6 +17,7 @@
   import { NO_STOP_TIP, canCancel, canPause, cancelTip, jobStatus, jobWhat, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced } from "../lib/motion";
   import type { Job } from "../lib/types";
+  import { appHref, getHref } from "../lib/router.svelte";
 
   const s = $derived(store.settings);
   const limitMb = $derived(s.bandwidthLimitEnabled && s.bandwidthLimit > 0 ? Math.round(s.bandwidthLimit / 1e6) : 0);
@@ -29,6 +30,17 @@
     const n = Number(v);
     if (n === 0) store.patchSettings({ bandwidthLimitEnabled: false });
     else store.patchSettings({ bandwidthLimit: n * 1e6, bandwidthLimitEnabled: true });
+  }
+
+  /** Where a click on a job's app goes: its page in Installed, or its Get apps page while it is
+   * still being installed. Nothing for an app that was removed. */
+  function jobHref(j: Job): string | null {
+    if (store.app(j.appId)) return appHref(j.appId);
+    if (j.kind === "install") {
+      const done = store.apps.find((a) => a.id.startsWith(j.appId + ":"));
+      return done ? appHref(done.id) : getHref(j.appId);
+    }
+    return null;
   }
 
   const active = $derived(store.activeJobs);
@@ -141,10 +153,12 @@
     <section aria-label="Active" class="sec">
       <div class="sec-h"><span>Active</span></div>
       {#each active as j, i (j.id)}
-        <div class="arow" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
+        <div class="arow" animate:flip={{ duration: reduced() ? 0 : 140 }} use:enter={i}>
           <svg class="grip dim" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#4a4a4a" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d={I.grip} /></svg>
-          <Mark app={j} size={32} />
-          <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
+          <svelte:element this={jobHref(j) ? "a" : "div"} class="who" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
+            <Mark app={j} size={32} />
+            <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
+          </svelte:element>
           <span class="st ellipsis" style:color={statusColor(j)}>{jobStatus(j, false)}</span>
           <span class="sp">{j.state === "downloading" && j.speed > 0 ? `${Math.round(j.speed / 1e6)} MB/s` : ""}</span>
           <span class="et">{j.eta != null && j.state !== "paused" && j.state !== "blocked" ? approx(j.eta).replace("About ", "") : ""}</span>
@@ -189,8 +203,10 @@
             >
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d={I.grip} /></svg>
             </button>
-            <Mark app={w} size={32} />
-            <div class="nm"><span class="n">{w.name}</span><span class="w">{jobWhat(w)}</span></div>
+            <svelte:element this={jobHref(w) ? "a" : "div"} class="who" href={jobHref(w)} title={jobHref(w) ? `Open ${w.name}` : undefined}>
+              <Mark app={w} size={32} />
+              <div class="nm"><span class="n">{w.name}</span><span class="w">{jobWhat(w)}</span></div>
+            </svelte:element>
             <span class="st mut ellipsis">{dragging ? `Moving to ${ord((drag?.to ?? 0) + 1)}` : `Waiting${i === 0 ? ", next" : ""}`}</span>
             <button class="ib" aria-label="Cancel {w.name}" title="Cancel  Del" onclick={() => send("cancel_job", { jobId: w.id })}><Icon d={I.close} /></button>
           </div>
@@ -206,9 +222,11 @@
         <Btn variant="ghost" size="sm" title="Clear finished jobs" onclick={() => send("clear_finished_jobs", {})}>Clear</Btn>
       </div>
       {#each store.finishedJobs as j, i (j.id)}
-        <div class="frow" animate:flip={{ duration: reduced() ? 0 : 220 }} use:enter={i}>
-          <Mark app={j} size={28} />
-          <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
+        <div class="frow" animate:flip={{ duration: reduced() ? 0 : 140 }} use:enter={i}>
+          <svelte:element this={jobHref(j) ? "a" : "div"} class="who" href={jobHref(j)} title={jobHref(j) ? `Open ${j.name}` : undefined}>
+            <Mark app={j} size={28} />
+            <div class="nm"><span class="n">{j.name}</span><span class="w">{jobWhat(j)}</span></div>
+          </svelte:element>
           <span class="st fin ellipsis" style:color={j.state === "failed" ? "var(--err)" : j.state === "done" ? "var(--ok)" : "var(--text-3)"}>
             <Dab color={j.state === "failed" ? "#D9706A" : j.state === "done" ? "#7FB77E" : "#6E6E6E"} />
             {j.state === "done" ? "Finished" : j.state === "failed" ? (j.error ? `Failed, ${j.error.code}` : "Failed") : "Canceled"}
@@ -266,6 +284,25 @@
     align-items: center;
     gap: 14px;
     border-top: 1px solid var(--sep);
+  }
+  .who {
+    display: flex;
+    align-items: center;
+    gap: inherit;
+    flex: none;
+    color: inherit;
+    text-decoration: none;
+    border-radius: 6px;
+  }
+  a.who .n {
+    transition: color var(--t-fast) ease;
+  }
+  a.who:hover .n,
+  a.who:focus-visible .n {
+    color: var(--accent, #fff);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
   }
   .nm {
     width: 200px;

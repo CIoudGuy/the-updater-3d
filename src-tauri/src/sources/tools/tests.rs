@@ -326,20 +326,20 @@ fn freecad_installs_per_user_into_its_series_folder() {
 
 #[test]
 fn unity_installs_into_a_folder_per_version_with_md5_and_exact_size() {
-    let mut r = rel("6000.3.27f1", false);
-    r.file = "UnitySetup64-6000.3.27f1.exe".into();
+    let mut r = rel("6000.3.999f1", false);
+    r.file = "UnitySetup64-6000.3.999f1.exe".into();
     r.size = Some(4235893440);
     r.md5 = Some("7b9412b4f0970814daf1ab6469944836".into());
     let p = build_plan("unity", &r, JobKind::Install, None, &ctx()).unwrap();
-    assert_eq!(p.app_id, "tools:unity:6000.3.27f1");
-    let dir = paths::program_files().join("Unity").join("Hub").join("Editor").join("6000.3.27f1");
+    assert_eq!(p.app_id, "tools:unity:6000.3.999f1");
+    let dir = paths::program_files().join("Unity").join("Hub").join("Editor").join("6000.3.999f1");
     let (_, args, elevated) = run_of(&p.steps[0]);
     assert_eq!(args, &vec!["/S".to_string(), format!("/D={}", dir.display())]);
     assert!(elevated);
     // The disk space check and the progress bar use the real download size.
     assert_eq!(p.downloads[0].size, Some(4235893440));
     assert_eq!(p.downloads[0].md5.as_deref(), Some("7b9412b4f0970814daf1ab6469944836"));
-    assert!(matches!(&p.verify, Verify::Version { app_id, .. } if app_id == "tools:unity:6000.3.27f1"));
+    assert!(matches!(&p.verify, Verify::Version { app_id, .. } if app_id == "tools:unity:6000.3.999f1"));
 }
 
 #[test]

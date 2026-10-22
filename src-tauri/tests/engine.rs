@@ -30,7 +30,7 @@ async fn sha_from_feed() -> String {
 #[ignore]
 async fn download_pauses_resumes_limits_and_verifies() {
     let dir = tmp("dl");
-    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some(sha_from_feed().await), md5: None, headers: vec![] };
+    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some(sha_from_feed().await), md5: None, signer: None, headers: vec![] };
     let throttle = Arc::new(Throttle::new());
     throttle.set(3 * 1024 * 1024);
     let (tx, rx) = tokio::sync::watch::channel(Control::Run);
@@ -67,7 +67,7 @@ async fn download_pauses_resumes_limits_and_verifies() {
 #[ignore]
 async fn bad_checksum_is_rejected_and_deleted() {
     let dir = tmp("badsum");
-    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some("00".repeat(32)), md5: None, headers: vec![] };
+    let d = Download { url: URL.into(), dest: dir.join("g.msi"), size: Some(SIZE), sha256: Some("00".repeat(32)), md5: None, signer: None, headers: vec![] };
     let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
     let r = download::fetch(&d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await;
     assert!(r.is_err());
@@ -153,4 +153,41 @@ fn shortcut_is_written_without_powershell() {
     let bytes = std::fs::read(&lnk).unwrap();
     assert_eq!(&bytes[..4], &[0x4C, 0, 0, 0], "a .lnk file starts with its header size");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The downloader's own ceiling, with the network out of the way: a local server streams
+/// 512 MB and the download must run far faster than any internet line (hundreds of MB/s).
+#[tokio::test]
+#[ignore]
+async fn downloader_is_not_the_bottleneck() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const N: u64 = 512 * 1024 * 1024;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut req = [0u8; 4096];
+        let _ = s.read(&mut req).await;
+        s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {N}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        let buf = vec![7u8; 256 * 1024];
+        let mut left = N;
+        while left > 0 {
+            let n = left.min(buf.len() as u64) as usize;
+            if s.write_all(&buf[..n]).await.is_err() {
+                return;
+            }
+            left -= n as u64;
+        }
+    });
+    let dir = tmp("speed");
+    let d = Download { url: format!("http://127.0.0.1:{port}/big.bin"), dest: dir.join("big.bin"), size: Some(N), sha256: None, md5: None, signer: None, headers: vec![] };
+    let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
+    let t0 = Instant::now();
+    let r = download::fetch(&d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await.unwrap();
+    let secs = t0.elapsed().as_secs_f64();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(matches!(r, Outcome::Done));
+    let mbps = N as f64 / secs / 1_048_576.0;
+    println!("downloader: {mbps:.0} MB/s");
+    assert!(mbps > 250.0, "only {mbps:.0} MB/s");
 }
