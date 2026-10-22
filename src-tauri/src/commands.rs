@@ -57,6 +57,12 @@ pub fn install_version(core: C<'_>, app_id: String, version: String) -> Res<()> 
     core.inner().enqueue(JobRequest::Update { app_id, version: Some(version) }).map(|_| ()).map_err(err)
 }
 
+/// The window opened: set up "Fewer admin prompts" if it is on but not ready yet.
+#[tauri::command]
+pub fn window_ready(core: C<'_>) {
+    core.inner().ensure_silent_task();
+}
+
 #[tauri::command]
 pub async fn prefs_preview(core: C<'_>, app_id: String) -> Res<Vec<crate::model::PrefsItem>> {
     let c = core.inner().clone();

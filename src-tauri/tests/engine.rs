@@ -142,6 +142,39 @@ async fn helper_runs_steps_over_the_pipe() {
     assert!(r.ok);
     assert!(!dir.exists());
     el.disconnect().await;
+
+    // A long batch: the helper would leave after its idle time (here 1.5 s), but the app keeps it
+    // while updates wait, so one helper (one admin prompt) serves the whole batch.
+    std::env::set_var("UPDATER3D_TEST_IDLE_MS", "1500");
+    let el = Elevator::new();
+    let f = tmp("batch").join("a.txt");
+    assert!(el.run(Step::WriteFile { path: f.clone(), contents: "1".into(), elevated: true }, false).await.unwrap().ok);
+    for _ in 0..5 {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        el.keep_alive().await;
+    }
+    assert!(el.run(Step::WriteFile { path: f.clone(), contents: "2".into(), elevated: true }, false).await.unwrap().ok);
+    assert_eq!(el.connects(), 1, "the same helper served both steps");
+    el.disconnect().await;
+    std::env::remove_var("UPDATER3D_TEST_IDLE_MS");
+}
+
+/// Declining the admin prompt once stops the rest of the batch from asking again and again.
+#[tokio::test]
+async fn a_declined_prompt_is_not_asked_again_in_the_same_batch() {
+    let el = Elevator::declining_for_test();
+    let step = || Step::WriteFile { path: tmp("declined").join("x.txt"), contents: "x".into(), elevated: true };
+    let first = el.run(step(), false).await.unwrap_err().to_string();
+    assert!(first.contains("declined"), "{first}");
+    // The next 29 updates fail at once with the same reason instead of opening 29 prompts.
+    for _ in 0..29 {
+        assert!(el.run(step(), false).await.unwrap_err().to_string().contains("declined"));
+    }
+    assert_eq!(el.prompts(), 1, "one prompt for the whole batch");
+    // A new batch or a retry asks again.
+    el.reset_declined();
+    assert!(el.run(step(), false).await.is_err());
+    assert_eq!(el.prompts(), 2);
 }
 
 #[test]

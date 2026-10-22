@@ -352,7 +352,7 @@ let settings: Settings = {
   showInstalledInGetApps: false,
   sources: { adobe: true, craft: true, blender: true, tools: true, other: true },
   parallelDownloads: 3,
-  silentElevation: false,
+  silentElevation: true,
   uiZoom: 1,
 };
 let status: Status = {
@@ -884,6 +884,7 @@ const handlers: H = {
     return a ? clone(versionsFor(a)) : [];
   },
   get_catalog: () => clone(catalogNow().filter((e) => settings.showInstalledInGetApps || !e.installed)),
+  window_ready: () => {},
   prefs_preview: ({ appId }) =>
     appId.startsWith("blender")
       ? [{ path: String.raw`AppData\Roaming\Blender Foundation\Blender\4.5`, size: 184 * MB, registry: false }]

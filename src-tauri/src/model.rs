@@ -316,7 +316,7 @@ impl Default for Settings {
             show_installed_in_get_apps: false,
             sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true },
             parallel_downloads: 2,
-            silent_elevation: false,
+            silent_elevation: true,
             ui_zoom: 1.0,
         }
     }

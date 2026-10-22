@@ -17,7 +17,7 @@
   import { router, type Route } from "./lib/router.svelte";
   import { store } from "./lib/store.svelte";
   import { ui } from "./lib/ui.svelte";
-  import { windowApi } from "./lib/api";
+  import { send, windowApi } from "./lib/api";
   import { reduced } from "./lib/motion";
   import { checkNow, isPaused, togglePauseAll, updateAll, updateOne } from "./lib/actions";
   import { tick } from "svelte";
@@ -89,6 +89,8 @@
   onMount(() => {
     let off = () => {};
     store.init((route) => router.go(route.replace(/^#?\/?/, ""))).then((u) => (off = u));
+    // "Fewer admin prompts" on but not set up yet: its one admin prompt comes now, not mid-update.
+    send("window_ready", {});
     windowApi.isMaximized().then((m) => (ui.maximized = m));
     const onReject = (e: PromiseRejectionEvent) => {
       e.preventDefault();

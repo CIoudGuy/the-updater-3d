@@ -129,6 +129,9 @@ pub struct Persisted {
     /// Other apps became on by default in 1.1.0; switched on once
     #[serde(default)]
     pub other_apps_default_on: bool,
+    /// Fewer admin prompts became on by default in 1.1.2; switched on once
+    #[serde(default)]
+    pub silent_elevation_default_on: bool,
 }
 
 pub fn load_state() -> Persisted {

@@ -29,7 +29,7 @@ const defaultSettings: Settings = {
   showInstalledInGetApps: false,
   sources: { adobe: true, craft: true, blender: true, tools: true, other: true },
   parallelDownloads: 3,
-  silentElevation: false,
+  silentElevation: true,
   uiZoom: 1,
 };
 const defaultStatus: Status = {
