@@ -223,6 +223,9 @@
           <SRow label="Show installed apps in Get apps" desc="Get apps also lists apps you already have, marked Installed, with Open." id="show-installed">
             {#snippet control()}<Toggle checked={s.showInstalledInGetApps} labelledby="show-installed" onchange={(v) => store.patchSettings({ showInstalledInGetApps: v })} />{/snippet}
           </SRow>
+          <SRow label="Other apps" desc="Every other app on this PC that Microsoft's public winget catalog lists, updated with its publisher's own installer. Matched from the catalog, so less complete than the apps above.">
+            {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}
+          </SRow>
           <SRow label="Blender pre-releases" desc="Alpha, beta and release candidate builds appear in Get apps, marked Pre-release.">
             {#snippet control()}
               <Segmented options={[{ value: "beta", label: "Show" }, { value: "stable", label: "Hide" }]} value={s.blenderChannel} onchange={(v) => store.patchSettings({ blenderChannel: v })} label="Blender pre-releases" />

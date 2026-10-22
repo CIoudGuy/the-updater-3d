@@ -6,6 +6,8 @@ A fast Windows app that keeps creative software up to date in one place:
 - **Blender**, every installed version side by side, plus betas
 - **The Craft apps** from ArtCraft (PhotoCraft, VectorCraft, FilmCraft and the others)
 - **More apps**: OBS Studio, Krita, FreeCAD, Godot, Unity Editor and Unity Hub
+- **Other apps** (off unless turned on): every other app on the PC that Microsoft's public winget
+  catalog lists, matched from that catalog and less complete than the apps above
 
 It finds what is installed, shows what can be updated with release notes, and installs, updates,
 rolls back or removes apps. A tiny background checker starts with Windows and sends a notification
@@ -39,6 +41,18 @@ copies you already have; OBS Studio and Krita update in place. Godot is a portab
 into its own folder with a Start menu shortcut. Unity editors only start with a license from Unity
 Hub, so Unity Hub is handled too (its update feed, SHA-512 checked) and is installed along with
 the first editor when it is missing; signing in to Hub once stays up to you.
+
+**Other apps.** Read straight from Microsoft's public winget catalog; winget itself is never run.
+The package index (`source2.msix`, checked against Microsoft's signature) is kept on disk and
+revalidated with its ETag; each package's version list and manifests are checked against the
+hashes the index gives. Installed apps are matched from the Windows uninstall list by product code,
+MSI upgrade code, then winget's normalized name and publisher, then install folder; ambiguous
+matches are dropped, and apps the sources above handle, drivers, Store apps and apps that update
+themselves are left out. Updates run the publisher's installer silently (MSI, WiX, NSIS, Inno,
+Burn, or an exe with the switches the catalog gives) after the SHA-256 check, with admin rights
+only when the install is for all users. Change lists come from the manifest's release notes, its
+release notes page, or the GitHub release. Uninstall runs the app's own silent uninstaller and
+deletes no settings.
 
 **Admin rights.** The app itself runs without them. When an install needs them, it starts a copy of
 itself elevated (one UAC prompt per batch) and talks to it over a private named pipe. "Fewer admin

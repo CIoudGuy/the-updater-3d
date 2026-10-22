@@ -48,6 +48,11 @@ pub struct UninstallEntry {
     pub url_update_info: String,
     pub estimated_size_kb: u64,
     pub windows_installer: bool,
+    /// Hidden from Add/Remove Programs (`SystemComponent` = 1): parts of other products.
+    pub system_component: bool,
+    /// Set for updates and hotfixes of another entry (`ParentKeyName`, `ReleaseType`).
+    pub parent_key: String,
+    pub release_type: String,
 }
 
 /// Every Add/Remove Programs entry from HKLM (64 and 32 bit views) and HKCU.
@@ -66,6 +71,7 @@ pub fn uninstall_entries() -> Vec<UninstallEntry> {
             let s = |n: &str| k.get_value::<String, _>(n).unwrap_or_default();
             let size: u32 = k.get_value("EstimatedSize").unwrap_or(0);
             let msi: u32 = k.get_value("WindowsInstaller").unwrap_or(0);
+            let system: u32 = k.get_value("SystemComponent").unwrap_or(0);
             out.push(UninstallEntry {
                 key: name.clone(),
                 hive,
@@ -80,10 +86,48 @@ pub fn uninstall_entries() -> Vec<UninstallEntry> {
                 url_update_info: s("URLUpdateInfo"),
                 estimated_size_kb: size as u64,
                 windows_installer: msi == 1,
+                system_component: system == 1,
+                parent_key: s("ParentKeyName"),
+                release_type: s("ReleaseType"),
             });
         }
     }
     out
+}
+
+/// Upgrade code of each installed Windows Installer product, keyed by product code (both
+/// "{GUID}" in upper case). Windows keeps them packed under Installer\UpgradeCodes.
+pub fn msi_upgrade_codes() -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let roots: [(RegKey, &str); 2] = [
+        (RegKey::predef(HKEY_LOCAL_MACHINE), "SOFTWARE\\Classes\\Installer\\UpgradeCodes"),
+        (RegKey::predef(HKEY_CURRENT_USER), "Software\\Microsoft\\Installer\\UpgradeCodes"),
+    ];
+    for (root, path) in roots {
+        let Ok(base) = root.open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) else { continue };
+        for packed_up in base.enum_keys().flatten() {
+            let Some(up) = unpack_guid(&packed_up) else { continue };
+            let Ok(k) = base.open_subkey_with_flags(&packed_up, KEY_READ | KEY_WOW64_64KEY) else { continue };
+            for (packed_prod, _) in k.enum_values().flatten() {
+                if let Some(prod) = unpack_guid(&packed_prod) {
+                    out.insert(prod, up.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Windows Installer's packed form of a GUID ("4B9F...", 32 digits) back to "{GUID}". The
+/// first three groups are stored reversed, every byte after them with its two digits swapped.
+pub fn unpack_guid(p: &str) -> Option<String> {
+    let c: Vec<char> = p.trim().chars().collect();
+    if c.len() != 32 || !c.iter().all(|x| x.is_ascii_hexdigit()) {
+        return None;
+    }
+    let rev = |a: usize, b: usize| c[a..b].iter().rev().collect::<String>();
+    let swapped = |a: usize, b: usize| c[a..b].chunks(2).map(|x| format!("{}{}", x[1], x[0])).collect::<String>();
+    Some(format!("{{{}-{}-{}-{}-{}}}", rev(0, 8), rev(8, 12), rev(12, 16), swapped(16, 20), swapped(20, 32)).to_ascii_uppercase())
 }
 
 /// "20261014" -> "2026-10-14T00:00:00Z"

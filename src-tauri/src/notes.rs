@@ -432,6 +432,226 @@ pub async fn krita(ver: &str, year: i32) -> Option<(String, Vec<String>)> {
     None
 }
 
+// ---------------------------------------------------------------- any publisher's notes
+
+/// Does `text` name version `ver`? "1.2" also counts for "1.2.0". Digits or dots right next to
+/// it make it another version ("11.2.3", "1.2.30").
+pub fn names_version(text: &str, ver: &str) -> bool {
+    let base = ver.trim().trim_start_matches(['v', 'V']).to_string();
+    let mut forms = vec![base.clone()];
+    let mut short = base;
+    while let Some(s) = short.strip_suffix(".0") {
+        short = s.to_string();
+        if short.contains('.') {
+            forms.push(short.clone());
+        }
+    }
+    let edge = |c: Option<char>| c.is_none_or(|c| !(c.is_ascii_digit() || c == '.'));
+    forms.iter().filter(|f| f.len() >= 2).any(|f| {
+        let mut from = 0;
+        while let Some(i) = text[from..].find(f.as_str()) {
+            let (s, e) = (from + i, from + i + f.len());
+            let before = text[..s].chars().last();
+            let mut rest = text[e..].chars();
+            let after = rest.next();
+            // A full stop that ends a sentence ("Version 1.2.") still names 1.2.
+            let after_ok = edge(after) || (after == Some('.') && rest.next().is_none_or(|c| !c.is_ascii_digit()));
+            if edge(before) && after_ok {
+                return true;
+            }
+            from = e;
+        }
+        false
+    })
+}
+
+/// Release notes in markdown or plain text (a GitHub release, a winget manifest's notes), in
+/// full: headings as "## " / "### " lines, every other line (bullets and text) as an item, with
+/// markup, links, images and commit or issue references removed. Boilerplate sections
+/// (contributors, downloads, checksums) and code blocks and tables are left out.
+pub fn text_lines(t: &str) -> Vec<String> {
+    lines_of(t, false)
+}
+
+fn lines_of(t: &str, bullets_only: bool) -> Vec<String> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static IMG: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap());
+    static LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+    static URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(?<?https?://[^\s)>]+>?\)?").unwrap());
+    static NUMBERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\d{1,3}[.)]\s+(.*)$").unwrap());
+    static HANDLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+(by|thanks to)\s+@[\w-]+.*$").unwrap());
+    // Markdown escapes ("async\_hooks"), the commit a line starts with ("[b12bcc9ae1] - ",
+    // "80d23f64 ") and issue or commit references in brackets ("(#123)").
+    static ESCAPED: Lazy<Regex> = Lazy::new(|| Regex::new(r"\\([\[\]_*`#<>()])").unwrap());
+    static COMMIT: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\[[0-9a-f]{7,40}\]|[0-9a-f]{7,40}|#\d+)\s*(-\s*)?").unwrap());
+    static REFS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*[\(\[]\s*(?:(?:#\d+|[0-9a-f]{7,12})\s*,?\s*)+[\)\]]").unwrap());
+    // GitHub emoji codes (":rocket:").
+    static EMOJI: Lazy<Regex> = Lazy::new(|| Regex::new(r":[a-z][a-z0-9_+\-]{1,30}:").unwrap());
+    // A line that is all bold ("**Bug fixes:**") titles what follows.
+    static BOLD: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(?:\*\*|__)([^*_]{2,80}?)(?:\*\*|__):?$").unwrap());
+    let clean = |s: &str| -> String {
+        let s = ESCAPED.replace_all(s, "$1");
+        let s = EMOJI.replace_all(&s, "");
+        let s = IMG.replace_all(&s, "");
+        let s = LINK.replace_all(&s, "$1");
+        let s = URL.replace_all(&s, "");
+        let s = s.replace("**", "").replace("__", "").replace('`', "");
+        let s = COMMIT.replace(s.trim(), "");
+        let s = HANDLE.replace(&s, "");
+        let s = REFS.replace_all(&s, "");
+        let s = strip_tags(&s);
+        s.trim().trim_start_matches(['-', '*', ':', ' ']).trim_end_matches(['.', ',', ';', ':', ' ']).to_string()
+    };
+    let useful = |s: &String| {
+        let low = s.to_lowercase();
+        s.chars().filter(|c| c.is_alphanumeric()).count() >= 3 && !low.starts_with("full changelog") && !low.starts_with('@') && !low.starts_with("new contributors")
+    };
+    let bullet = |l: &str| -> Option<String> {
+        for p in ["- ", "* ", "+ ", "\u{2022} ", "\u{b7} "] {
+            if let Some(r) = l.strip_prefix(p) {
+                return Some(r.to_string());
+            }
+        }
+        NUMBERED.captures(l).map(|c| c[1].to_string())
+    };
+    let mut out: Vec<String> = Vec::new();
+    // Inside a boilerplate section or a code block: skipped.
+    let (mut skipping, mut fence) = (false, false);
+    for raw in t.lines() {
+        let l = raw.trim();
+        if l.starts_with("```") || l.starts_with("~~~") {
+            fence = !fence;
+            continue;
+        }
+        if fence || l.is_empty() || l.starts_with('|') || l.starts_with("<!--") || l.starts_with("===") || l.starts_with("---") || l.starts_with("***") {
+            continue;
+        }
+        let hashes = l.chars().take_while(|c| *c == '#').count();
+        let heading = if hashes > 0 && l.chars().nth(hashes) == Some(' ') {
+            Some(EMOJI.replace_all(&ESCAPED.replace_all(l, "$1"), "").into_owned())
+        } else {
+            BOLD.captures(l).map(|c| format!("### {}", &c[1]))
+        };
+        if let Some(h) = heading {
+            match crate::sources::craft::markdown_heading(&h) {
+                Some(h) => {
+                    skipping = false;
+                    out.push(strip_tags(&h));
+                }
+                None => skipping = true,
+            }
+            continue;
+        }
+        if skipping {
+            continue;
+        }
+        let item = match bullet(l) {
+            Some(b) => b,
+            None if bullets_only => continue,
+            None => l.to_string(),
+        };
+        let c = clean(&item);
+        if useful(&c) && out.last() != Some(&c) {
+            out.push(c);
+        }
+        if out.len() >= MAX_LINES {
+            break;
+        }
+    }
+    tidy_headings(out)
+}
+
+/// The part of a markdown changelog under the heading for version `ver`.
+pub fn md_section(md: &str, ver: &str) -> Option<String> {
+    let lines: Vec<&str> = md.lines().collect();
+    let level = |l: &str| {
+        let t = l.trim_start();
+        let n = t.chars().take_while(|c| *c == '#').count();
+        (n > 0 && n <= 6 && t[n..].starts_with(' ')).then_some(n)
+    };
+    let start = lines.iter().position(|l| level(l).is_some() && names_version(l, ver))?;
+    let lv = level(lines[start]).unwrap_or(1);
+    let end = lines[start + 1..].iter().position(|l| level(l).is_some_and(|n| n <= lv)).map(|i| start + 1 + i).unwrap_or(lines.len());
+    let body = lines[start + 1..end].join("\n");
+    (!body.trim().is_empty()).then_some(body)
+}
+
+/// The lines after a short line that names version `ver` ("6.7.3 (2026-05-26)", "Version 6.7.3"),
+/// up to the next short line that names another version. For changelogs without headings.
+pub fn text_section(text: &str, ver: &str) -> Option<String> {
+    let other = regex::Regex::new(r"(^|[^\d.])v?\d+\.\d+([.\-]\d+)*").unwrap();
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let is_head = |l: &str| !l.is_empty() && l.chars().count() <= 90 && !l.starts_with(['-', '*', '+', '\u{2022}']);
+    let start = lines.iter().position(|l| is_head(l) && names_version(l, ver))?;
+    let end = lines[start + 1..].iter().position(|l| is_head(l) && other.is_match(l) && !names_version(l, ver)).map(|i| start + 1 + i).unwrap_or(lines.len());
+    let body = lines[start + 1..end].join("\n");
+    (!body.trim().is_empty()).then_some(body)
+}
+
+/// HTML as markdown-like text: h2 to h4 as "## " / "### " lines, list items as "- " bullets,
+/// one line per other block.
+fn html_lines(html: &str) -> String {
+    let head = regex::Regex::new(r"(?is)<h([2-4])[^>]*>(.*?)</h[2-4]>").unwrap();
+    let li = regex::Regex::new(r"(?i)<li[^>]*>").unwrap();
+    let block = regex::Regex::new(r"(?i)</?(p|div|br|h[1-6]|tr|dt|dd|ul|ol|summary|details|section|article|pre)[^>]*>").unwrap();
+    let t = head.replace_all(html, |c: &regex::Captures| format!("\n{} {}\n", if &c[1] == "2" { "##" } else { "###" }, strip_tags(&c[2])));
+    let t = li.replace_all(&t, "\n- ");
+    let t = block.replace_all(&t, "\n");
+    t.lines().map(strip_tags).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+/// The change list for version `ver` on a publisher's release notes page, in full with its
+/// sections: what follows the heading or the short paragraph that names the version, or the
+/// page's own content when the whole page is about that version. A markdown or text file gives
+/// the section under its heading for the version.
+pub fn page_notes(body: &str, ver: &str) -> Vec<String> {
+    let head = &body[..body.len().min(2000)].to_ascii_lowercase();
+    if !(head.trim_start().starts_with('<') || head.contains("<html") || head.contains("<body")) {
+        if let Some(s) = md_section(body, ver) {
+            return text_lines(&s);
+        }
+        return text_section(body, ver).map(|s| lines_of(&s, true)).unwrap_or_default();
+    }
+    let mut html = body.to_string();
+    let title = regex::Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap().captures(&html).map(|c| strip_tags(&c[1])).unwrap_or_default();
+    // Not <header>: release pages put each version's heading in one.
+    for tag in ["script", "style", "nav", "svg", "noscript", "title"] {
+        let re = regex::Regex::new(&format!(r"(?is)<{tag}[\s>].*?</{tag}>")).unwrap();
+        html = re.replace_all(&html, "").into_owned();
+    }
+    let heads = headings(&html);
+    if let Some(k) = heads.iter().position(|h| names_version(&h.1, ver)) {
+        let level = heads[k].0;
+        let stop = heads[k + 1..].iter().find(|h| h.0 <= level).map(|h| h.2).unwrap_or(html.len());
+        return outline(&html[heads[k].3..stop]);
+    }
+    // A short paragraph that names the version, then its list.
+    if let Some(s) = text_section(&html_lines(&html), ver) {
+        let lines = lines_of(&s, true);
+        if !lines.is_empty() {
+            return lines;
+        }
+    }
+    let h1 = heads.iter().find(|h| h.0 == 1).map(|h| h.1.clone()).unwrap_or_default();
+    if names_version(&title, ver) || names_version(&h1, ver) {
+        let main = ["<main", "<article"].iter().find_map(|t| html.find(t)).map(|i| &html[i..]).unwrap_or(&html);
+        return outline(main);
+    }
+    vec![]
+}
+
+
+/// A release notes page of any publisher (not cached: the notes read from it are).
+pub async fn fetch_page(url: &str) -> Option<String> {
+    let resp = http::CLIENT.get(url).timeout(Duration::from_secs(12)).send().await.ok()?;
+    if !resp.status().is_success() || resp.content_length().is_some_and(|n| n > 4_000_000) {
+        return None;
+    }
+    let b = resp.bytes().await.ok()?;
+    Some(String::from_utf8_lossy(&b[..b.len().min(4_000_000)]).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,6 +710,60 @@ mod tests {
         // A first release without its own list falls back to the feature headlines.
         let no_list = r#"<main><h1>Version 12.2</h1><h2>Major features</h2><h3>Improved Polygon Fill</h3><h3>New cage painting</h3><h2>Release Notes</h2></main>"#;
         assert_eq!(adobe_from_version_page(no_list, "12.2.0").0, vec!["Improved Polygon Fill", "New cage painting"]);
+    }
+
+    #[test]
+    fn finds_a_version_in_text() {
+        assert!(names_version("Version 1.2.3 (2026-10-01)", "1.2.3"));
+        assert!(names_version("## [v1.2.3] - today", "1.2.3"));
+        assert!(names_version("Released 1.2.", "1.2.0"));
+        assert!(!names_version("Version 11.2.3", "1.2.3"));
+        assert!(!names_version("Version 1.2.30", "1.2.3"));
+        assert!(!names_version("1.2.3.4", "1.2.3"));
+    }
+
+    #[test]
+    fn markdown_and_plain_notes_come_in_full_with_their_sections() {
+        let md = "## What's Changed\n### :rocket: New\n* Fixed the [export](https://x.y/z) crash by @someone in https://github.com/o/r/pull/1\n* **Faster** start up. It now opens in half the time, even with many files.\n\n**Bug fixes:**\n* \\[b12bcc9ae1] - async\\_hooks: add a scope\n* 80d23f64 (patch: Restore the entitlements)\n* Fixed saving (#1234)\n```\ncode that is not a note\n```\n| table | row |\n## New Contributors\n* @someone made their first contribution\n\n**Full Changelog**: https://github.com/o/r/compare/a...b";
+        assert_eq!(
+            text_lines(md),
+            vec![
+                "## What's Changed",
+                "### New",
+                "Fixed the export crash",
+                "Faster start up. It now opens in half the time, even with many files",
+                "### Bug fixes",
+                "async_hooks: add a scope",
+                "(patch: Restore the entitlements)",
+                "Fixed saving",
+            ]
+        );
+        let plain = "This release fixes a crash when saving.\nIt also updates translations.";
+        assert_eq!(text_lines(plain), vec!["This release fixes a crash when saving", "It also updates translations"]);
+        assert_eq!(text_lines("1. First fix\n2) Second fix"), vec!["First fix", "Second fix"]);
+        assert!(text_lines("\n\n").is_empty());
+        // No cap: a long list stays whole.
+        let long: String = (0..60).map(|i| format!("- Fixed problem number {i}\n")).collect();
+        assert_eq!(text_lines(&long).len(), 60);
+    }
+
+    #[test]
+    fn notes_for_one_version_from_a_page() {
+        let html = r#"<html><head><title>Changelog</title></head><body><nav><ul><li>Home page link here</li></ul></nav>
+<h2>Version 2.1.0</h2><h3>New</h3><ul><li>New export dialog for images</li></ul><h3>Fixed</h3><ul><li>Fixed a crash when saving. More words here.</li></ul>
+<h2>Version 2.0.9</h2><ul><li>An older fix for loading</li></ul></body></html>"#;
+        assert_eq!(page_notes(html, "2.1.0"), vec!["## New", "New export dialog for images", "## Fixed", "Fixed a crash when saving. More words here"]);
+        assert_eq!(page_notes(html, "2.0.9"), vec!["An older fix for loading"]);
+        assert!(page_notes(html, "3.0").is_empty(), "a page without the version gives nothing");
+        let release = r#"<html><title>App 5.4 released</title><main><p>Intro text that is long enough to count.</p><ul><li>Better colors in dark mode</li></ul></main></html>"#;
+        assert_eq!(page_notes(release, "5.4"), vec!["Intro text that is long enough to count", "Better colors in dark mode"]);
+        let inno = r#"<html><body><details open=""><summary>Tool 6.7</summary><p><a name="6.7.3"></a><span class="ver">6.7.3 </span><span class="date">(2026-05-26)</span></p><p><b>Using it at work?</b> Buy a license.</p><ul><li>Improved the startup</li><li>Fix: the example script</li></ul><p><a name="6.7.2"></a><span class="ver">6.7.2 </span></p><ul><li>Older</li></ul></details></body></html>"#;
+        assert_eq!(page_notes(inno, "6.7.3"), vec!["Improved the startup", "Fix: the example script"]);
+        assert_eq!(page_notes(inno, "6.7.2"), vec!["Older"]);
+        let changelog = "# Changelog\n\n## 1.4.0\n### Added\n- Added dark mode\n### Fixed\n- Fixed login\n\n## 1.3.2\n- Old fix\n";
+        assert_eq!(page_notes(changelog, "1.4.0"), vec!["## Added", "Added dark mode", "## Fixed", "Fixed login"]);
+        assert_eq!(page_notes(changelog, "1.3.2"), vec!["Old fix"]);
+        assert!(page_notes(changelog, "1.5").is_empty());
     }
 
     #[test]

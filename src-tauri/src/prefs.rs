@@ -117,6 +117,9 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
             }
             _ => {}
         },
+        // Matched from the winget catalog: where these apps keep their data is not known, so
+        // nothing of theirs is deleted.
+        SourceData::Other { .. } => {}
     }
     // Never the install folder itself (the uninstall handles that) and nothing that is missing.
     let not_install = |p: &PathBuf| inst.install_dir.as_deref() != Some(p.as_path());

@@ -138,6 +138,7 @@ pub fn run() {
             commands::install_self_update,
             commands::test_notification,
             commands::catalog_versions,
+            commands::search_other_apps,
             commands::quit_app,
         ])
         .build(tauri::generate_context!())

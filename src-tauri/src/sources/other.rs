@@ -1,0 +1,1469 @@
+//! Other apps: general Windows apps matched to Microsoft's public winget catalog, which is read
+//! directly (see `winget`). Opt-in, and kept apart from the fully handled apps: a match is made
+//! only when it is certain, and an app whose catalog entry can not be installed silently over
+//! the copy that is here is left out.
+//!
+//! Each uninstall list entry is matched by, strongest first:
+//! 1. its product code: the uninstall key name (the MSI GUID, or the key any other installer writes)
+//! 2. its MSI upgrade code, which stays the same from version to version
+//! 3. winget's normalized display name and publisher, both equal
+//! 4. its install folder or program name, among the packages of the same publisher
+//!
+//! A product or upgrade code match must also agree on the name or the publisher. When more than
+//! one package is left, the locale and the name decide; when they can not, the entry is dropped.
+
+use super::winget::{self, Index, Installer, Manifest, Pkg, VerRef};
+use super::{Download, Installed, Latest, Plan, SourceData, Step, Verify};
+use crate::model::{CatalogEntry, JobKind, Source, VersionInfo};
+use crate::{http, notes, paths, version, winutil};
+use anyhow::{anyhow, bail, Result};
+use futures_util::StreamExt;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+pub const NO_NOTES: &str = "No change list is published for this release";
+pub const SEE_NOTES: &str = "See the full release notes for the changes";
+
+// ---------------------------------------------------------------- what is left out
+
+/// Packages another source handles. A package matches its id and the ids below it
+/// ("BlenderFoundation.Blender.LTS.4.5").
+const HANDLED: &[&str] = &["BlenderFoundation.Blender", "OBSProject.OBSStudio", "KDE.Krita", "FreeCAD.FreeCAD", "GodotEngine.GodotEngine", "Unity.Unity", "Unity.UnityHub", "Adobe.CreativeCloud"];
+
+/// Packages that update themselves, belong to Windows or are security software, with the reason.
+const EXCLUDED: &[(&str, &str)] = &[
+    ("Microsoft.Edge", "updates itself"),
+    ("Microsoft.EdgeWebView2Runtime", "part of Windows"),
+    ("Microsoft.Office", "updates itself"),
+    ("Microsoft.Teams", "updates itself"),
+    ("Microsoft.VisualStudio", "updated by the Visual Studio Installer"),
+    ("Microsoft.WindowsSDK", "a Windows development kit"),
+    ("Microsoft.WindowsADK", "a Windows development kit"),
+    ("Microsoft.WindowsWDK", "a Windows development kit"),
+    ("Microsoft.AppInstaller", "part of Windows"),
+    ("Kaspersky", "security software"),
+    ("ESET", "security software"),
+    ("Bitdefender", "security software"),
+    ("Avast", "security software"),
+    ("AVG", "security software"),
+    ("McAfee", "security software"),
+    ("Norton", "security software"),
+    ("NortonLifeLock", "security software"),
+    ("Sophos", "security software"),
+    ("TrendMicro", "security software"),
+];
+
+fn under(id: &str, root: &str) -> bool {
+    id.eq_ignore_ascii_case(root) || (id.as_bytes().get(root.len()) == Some(&b'.') && id.get(..root.len()).is_some_and(|h| h.eq_ignore_ascii_case(root)))
+}
+
+pub fn handled_package(id: &str) -> bool {
+    HANDLED.iter().any(|h| under(id, h))
+}
+
+pub fn excluded_package(id: &str) -> Option<&'static str> {
+    EXCLUDED.iter().find(|(p, _)| under(id, p)).map(|(_, why)| *why)
+}
+
+/// Drivers are left to Windows Update and the hardware vendor.
+fn is_driver(e: &winutil::UninstallEntry) -> bool {
+    let pubr = winget::normalize_publisher(&e.publisher);
+    let name = e.display_name.to_lowercase();
+    ["nvidia", "advancedmicrodevices", "amd", "intel", "realtek", "realteksemiconductor"].contains(&pubr.as_str()) && (name.contains("driver") || name.contains("chipset") || name.contains("graphics"))
+}
+
+/// An entry that is an app of its own: shown in Add/Remove Programs, not an update of another
+/// entry, and removable.
+pub fn is_app(e: &winutil::UninstallEntry) -> bool {
+    let rt = e.release_type.to_ascii_lowercase();
+    !e.display_name.trim().is_empty()
+        && !e.system_component
+        && e.parent_key.is_empty()
+        && !["update", "hotfix", "security update", "service pack"].contains(&rt.as_str())
+        && (!e.uninstall_string.trim().is_empty() || !e.quiet_uninstall_string.trim().is_empty())
+}
+
+fn norm_path(p: &str) -> String {
+    p.trim().trim_matches('"').trim_end_matches(['\\', '/']).to_ascii_lowercase()
+}
+
+/// An entry that one of the fully handled sources lists already.
+fn handled_entry(e: &winutil::UninstallEntry, handled: &[Installed]) -> bool {
+    if e.uninstall_string.contains("--sapCode=") {
+        return true;
+    }
+    let loc = norm_path(&e.install_location);
+    let key = e.key.to_ascii_lowercase();
+    handled.iter().any(|i| {
+        let dir = i.install_dir.as_ref().map(|d| norm_path(&d.to_string_lossy())).unwrap_or_default();
+        (!loc.is_empty() && dir == loc)
+            || (key.starts_with('{') && i.uninstall.as_ref().is_some_and(|u| u.iter().any(|a| a.to_ascii_lowercase().contains(&key))))
+            || match &i.data {
+                SourceData::Craft { msi_product_code: Some(c), .. } | SourceData::Blender { msi_product_code: Some(c), .. } => c.eq_ignore_ascii_case(&e.key),
+                _ => false,
+            }
+            || (i.name.eq_ignore_ascii_case(e.display_name.trim()) && i.version == e.display_version)
+    })
+}
+
+// ---------------------------------------------------------------- matching
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum How {
+    /// A distinctive name the app is also published under, in one package only
+    Name,
+    Location,
+    NamePublisher,
+    UpgradeCode,
+    ProductCode,
+}
+
+impl How {
+    pub fn label(self) -> &'static str {
+        match self {
+            How::ProductCode => "product code",
+            How::UpgradeCode => "upgrade code",
+            How::NamePublisher => "name and publisher",
+            How::Location => "install folder",
+            How::Name => "own name",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Match {
+    pub entry: winutil::UninstallEntry,
+    pub pkg: Pkg,
+    pub how: How,
+    pub upgrade_code: Option<String>,
+}
+
+/// Why an entry was not matched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Miss {
+    /// Listed by one of the fully handled sources
+    Handled,
+    /// A package that is left out on purpose ("updates itself")
+    Excluded(&'static str),
+    NotInCatalog,
+    /// Several packages fit and nothing tells them apart
+    Ambiguous(Vec<String>),
+    /// A code matched, but the package's names and publishers are different
+    Unconfirmed(String),
+    NoPublisher,
+    /// No version in the uninstall list, so updates can not be told
+    NoVersion,
+    /// Another entry already matched this package
+    Duplicate(String),
+}
+
+impl Miss {
+    pub fn label(&self) -> String {
+        match self {
+            Miss::Handled => "handled by a fully supported source".into(),
+            Miss::Excluded(w) => format!("left out: {w}"),
+            Miss::NotInCatalog => "not in the winget catalog".into(),
+            Miss::Ambiguous(c) => format!("ambiguous: {}", c.join(", ")),
+            Miss::Unconfirmed(p) => format!("code matches {p} but name and publisher differ"),
+            Miss::NoPublisher => "no publisher to confirm a name match".into(),
+            Miss::NoVersion => "no version in the uninstall list".into(),
+            Miss::Duplicate(p) => format!("another entry already matches {p}"),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Report {
+    pub matches: Vec<Match>,
+    pub misses: Vec<(winutil::UninstallEntry, Miss)>,
+    /// System components, updates and entries without a name, not counted as apps
+    pub hidden: usize,
+}
+
+struct Cand {
+    row: i64,
+    how: How,
+}
+
+/// Does the package agree with the entry on its name or its publisher?
+fn agrees(idx: &Index, row: i64, name: &str, publisher: &str) -> (bool, bool) {
+    let names = idx.names_of(row);
+    let name_ok = !name.is_empty() && names.iter().any(|n| n == name || (name.len() >= 4 && n.len() >= 4 && (n.starts_with(name) || name.starts_with(n.as_str()))));
+    let pub_ok = !publisher.is_empty() && idx.publishers_of(row).iter().any(|p| p == publisher);
+    (name_ok, pub_ok)
+}
+
+/// Program names an entry gives through its install folder and program file.
+fn location_names(e: &winutil::UninstallEntry) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut push = |s: &str| {
+        let n = winget::normalize_name(s).name;
+        if n.len() >= 4 && !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    if let Some(f) = Path::new(e.install_location.trim().trim_matches('"').trim_end_matches('\\')).file_name() {
+        push(&f.to_string_lossy());
+    }
+    let icon = e.display_icon.split(',').next().unwrap_or("").trim().trim_matches('"');
+    if icon.to_ascii_lowercase().ends_with(".exe") {
+        if let Some(s) = Path::new(icon).file_stem() {
+            push(&s.to_string_lossy());
+        }
+    }
+    out
+}
+
+/// The language an app's name carries: a locale winget knows ("en-US"), or a bare language at the
+/// end of the brackets ("Fox Browser (x64 de)").
+fn locale_hint(name: &str, nn: &winget::NormName) -> Option<String> {
+    if let Some(l) = &nn.locale {
+        return Some(l.clone());
+    }
+    static BARE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"\((?:[^()]*\s)?([A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?)\)\s*$").unwrap());
+    BARE.captures(name.trim()).map(|c| c[1].to_ascii_lowercase()).filter(|l| !["tm", "beta", "user", "x64", "x86"].contains(&l.as_str()))
+}
+
+/// Is this the package for that language? Packages per language end in it ("Fox.Browser.de") or
+/// name it ("Fox Browser (en-US)").
+fn locale_fits(p: &Pkg, l: &str) -> bool {
+    let id = p.id.to_ascii_lowercase();
+    let name = p.name.to_ascii_lowercase();
+    id.ends_with(&format!(".{l}")) || name.contains(&format!("({l})")) || name.contains(&format!(" {l})"))
+}
+
+const CHANNELS: &[&str] = &["beta", "nightly", "dev", "canary", "preview", "insiders", "alpha", "ptb", "rc", "prerelease", "pre-release", "weekly"];
+
+/// How well a package id fits the entry, from the parts of the id that name a release channel
+/// ("Brave.Brave.Beta"), an architecture ("Discord.Discord.arm64") or a version series
+/// ("Python.Python.3.12", "Maxon.ZBrush.2024"). None rules the package out.
+fn id_fit(id: &str, e: &winutil::UninstallEntry, nn: &winget::NormName, publisher: &str) -> Option<i32> {
+    let mut segs: Vec<String> = id.split('.').map(|s| s.to_ascii_lowercase()).collect();
+    let name = e.display_name.to_ascii_lowercase();
+    let mut fit = 0;
+    if segs.first().is_some_and(|s| !publisher.is_empty() && winget::normalize_publisher(s) == publisher) {
+        fit += 1;
+    }
+    // Channel: a beta package is not the stable app.
+    if segs.iter().skip(1).any(|s| CHANNELS.contains(&s.as_str()) && !name.split(|c: char| !c.is_alphanumeric() && c != '-').any(|w| w == s)) {
+        return None;
+    }
+    // Architecture.
+    if let Some(last) = segs.last().cloned() {
+        let entry_arch = match nn.arch {
+            Some("X64") => Some("x64"),
+            Some(_) => Some("x86"),
+            None => None,
+        };
+        let arch = match last.as_str() {
+            "x64" | "amd64" => Some("x64"),
+            "x86" | "x32" | "32-bit" => Some("x86"),
+            "arm64" | "arm" => Some("arm64"),
+            _ => None,
+        };
+        if let Some(a) = arch {
+            if a == "arm64" && machine_arch() != "arm64" {
+                return None;
+            }
+            if let Some(ea) = entry_arch {
+                if a != ea && a != "arm64" {
+                    return None;
+                }
+                fit += 2;
+            }
+            segs.pop();
+        }
+    }
+    // Version series: the trailing numbers of the id against the start of the installed version,
+    // when they are the same kind of number (a year 2010 is not version 10).
+    let mut nums: Vec<String> = Vec::new();
+    while let Some(s) = segs.last() {
+        if nums.len() < 2 && !s.is_empty() && s.replace('_', "").chars().all(|c| c.is_ascii_digit()) && segs.len() > 2 {
+            nums.insert(0, segs.pop().unwrap_or_default());
+        } else {
+            break;
+        }
+    }
+    if !nums.is_empty() {
+        let series: Vec<u64> = nums.iter().flat_map(|s| s.split('_')).filter_map(|x| x.parse().ok()).collect();
+        let have = version::parts(&e.display_version);
+        let digits = |n: u64| n.to_string().len();
+        if let (Some(s0), Some(h0)) = (series.first(), have.first()) {
+            if digits(*s0) == digits(*h0) {
+                if have.len() < series.len() || have[..series.len()] != series[..] {
+                    return None;
+                }
+                fit += 3;
+            }
+        }
+    }
+    Some(fit)
+}
+
+fn is_guid(s: &str) -> bool {
+    let t = s.trim();
+    t.len() == 38 && t.starts_with('{') && t.ends_with('}')
+}
+
+/// The package row an entry matched, how, and its MSI upgrade code; or why it did not match.
+type Matched = std::result::Result<(i64, How, Option<String>), Miss>;
+
+/// Match one entry.
+fn match_entry(e: &winutil::UninstallEntry, idx: &Index, upgrade_codes: &HashMap<String, String>) -> Matched {
+    let nn = winget::normalize_name(&e.display_name);
+    let publisher = winget::normalize_publisher(&e.publisher);
+    let upgrade = if is_guid(&e.key) { upgrade_codes.get(&e.key.to_ascii_uppercase()).cloned() } else { None };
+    let locale = locale_hint(&e.display_name, &nn);
+
+    let mut tiers: Vec<Vec<Cand>> = Vec::new();
+    tiers.push(idx.by_product_code(&e.key).into_iter().map(|row| Cand { row, how: How::ProductCode }).collect());
+    if let Some(u) = &upgrade {
+        tiers.push(idx.by_upgrade_code(u).into_iter().map(|row| Cand { row, how: How::UpgradeCode }).collect());
+    }
+    if !publisher.is_empty() {
+        let by_pub = idx.by_publisher(&publisher);
+        tiers.push(idx.by_name(&nn.name).into_iter().filter(|r| by_pub.binary_search(r).is_ok()).map(|row| Cand { row, how: How::NamePublisher }).collect());
+        // Install folder and program name, among this publisher's packages (a publisher with a
+        // few hundred packages is too broad for a guess like this).
+        if by_pub.len() <= 300 {
+            let names = location_names(e);
+            if !names.is_empty() {
+                tiers.push(by_pub.iter().copied().filter(|r| idx.names_of(*r).iter().any(|n| names.contains(n))).map(|row| Cand { row, how: How::Location }).collect());
+            }
+        }
+        // An app published under its own name ("Bloxstrap" by "Bloxstrap") whose distinctive name
+        // only one package has, and that package is named after it too.
+        if publisher == nn.name && nn.name.len() >= 6 {
+            let rows = idx.by_name(&nn.name);
+            if let [row] = rows.as_slice() {
+                let own = idx.by_row(*row).is_some_and(|p| p.id.rsplit('.').next().is_some_and(|last| winget::normalize_name(last).name == nn.name));
+                if own {
+                    tiers.push(vec![Cand { row: *row, how: How::Name }]);
+                }
+            }
+        }
+    } else {
+        // No publisher to confirm the name: only a name one package has, which the install
+        // folder or program file confirms.
+        let rows = idx.by_name(&nn.name);
+        if let [row] = rows.as_slice() {
+            let names = location_names(e);
+            if nn.name.len() >= 5 && idx.names_of(*row).iter().any(|n| names.contains(n)) {
+                tiers.push(vec![Cand { row: *row, how: How::Location }]);
+            }
+        }
+    }
+    let mut unconfirmed = None;
+    for tier in tiers {
+        if tier.is_empty() {
+            continue;
+        }
+        // Score what is left: the name counts most, then the publisher and the locale.
+        let mut scored: Vec<(i32, &Cand)> = Vec::new();
+        for c in &tier {
+            let (name_ok, pub_ok) = agrees(idx, c.row, &nn.name, &publisher);
+            if !name_ok && !pub_ok {
+                if unconfirmed.is_none() {
+                    unconfirmed = idx.by_row(c.row).map(|p| p.id);
+                }
+                continue;
+            }
+            let Some(p) = idx.by_row(c.row) else { continue };
+            let Some(fit) = id_fit(&p.id, e, &nn, &publisher) else { continue };
+            let mut s = if name_ok { 2 } else { 0 } + if pub_ok { 1 } else { 0 } + fit;
+            if locale.as_deref().is_some_and(|l| locale_fits(&p, l)) {
+                s += 4;
+            }
+            scored.push((s, c));
+        }
+        if scored.is_empty() {
+            continue;
+        }
+        let top = scored.iter().map(|x| x.0).max().unwrap_or(0);
+        let best: Vec<&Cand> = scored.iter().filter(|x| x.0 == top).map(|x| x.1).collect();
+        if best.len() == 1 {
+            return Ok((best[0].row, best[0].how, upgrade));
+        }
+        let ids: Vec<String> = best.iter().take(4).filter_map(|c| idx.by_row(c.row)).map(|p| p.id).collect();
+        return Err(Miss::Ambiguous(ids));
+    }
+    if let Some(p) = unconfirmed {
+        return Err(Miss::Unconfirmed(p));
+    }
+    if publisher.is_empty() && !idx.by_name(&nn.name).is_empty() {
+        return Err(Miss::NoPublisher);
+    }
+    Err(Miss::NotInCatalog)
+}
+
+/// Match every app in the uninstall list against the index.
+pub fn match_all(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[Installed], upgrade_codes: &HashMap<String, String>) -> Report {
+    match_all_with(entries, idx, handled, |e| match_entry(e, idx, upgrade_codes))
+}
+
+/// Matches already made against one copy of the index on disk, per uninstall list entry: a
+/// rescan only matches what is new or changed.
+type Memo = (Option<std::time::SystemTime>, HashMap<String, Matched>);
+static MEMO: Lazy<Mutex<Memo>> = Lazy::new(|| Mutex::new((None, HashMap::new())));
+
+/// `match_all` against the index file at `path`, remembering each entry's match.
+pub fn match_on_disk(entries: &[winutil::UninstallEntry], idx: &Index, path: &Path, handled: &[Installed]) -> Report {
+    let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mut memo = MEMO.lock();
+    if memo.0 != stamp {
+        *memo = (stamp, HashMap::new());
+    }
+    // Reading the MSI upgrade codes walks a big part of the registry: only when needed.
+    let mut ups: Option<HashMap<String, String>> = None;
+    match_all_with(entries, idx, handled, |e| {
+        let key = format!("{}|{}|{}|{}|{}|{}|{}|{}", e.hive, e.key, e.display_name, e.publisher, e.display_version, e.install_location, e.display_icon, e.windows_installer);
+        if let Some(hit) = memo.1.get(&key) {
+            return hit.clone();
+        }
+        let r = match_entry(e, idx, ups.get_or_insert_with(winutil::msi_upgrade_codes));
+        memo.1.insert(key, r.clone());
+        r
+    })
+}
+
+fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[Installed], mut find: impl FnMut(&winutil::UninstallEntry) -> Matched) -> Report {
+    let mut r = Report::default();
+    for e in entries {
+        if !is_app(e) {
+            r.hidden += 1;
+            continue;
+        }
+        if handled_entry(e, handled) {
+            r.misses.push((e.clone(), Miss::Handled));
+            continue;
+        }
+        if is_driver(e) {
+            r.misses.push((e.clone(), Miss::Excluded("a driver")));
+            continue;
+        }
+        match find(e) {
+            Ok((row, how, upgrade_code)) => {
+                let Some(pkg) = idx.by_row(row) else { continue };
+                if handled_package(&pkg.id) {
+                    r.misses.push((e.clone(), Miss::Handled));
+                } else if let Some(why) = excluded_package(&pkg.id) {
+                    r.misses.push((e.clone(), Miss::Excluded(why)));
+                } else if e.display_version.trim().is_empty() {
+                    // No version in the list: the program file's own version, when it has one.
+                    match program_file(e).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))).and_then(|p| winutil::exe_version(&p)).filter(|v| v != "0.0.0.0") {
+                        Some(v) => {
+                            let mut e2 = e.clone();
+                            e2.display_version = v;
+                            r.matches.push(Match { entry: e2, pkg, how, upgrade_code });
+                        }
+                        None => r.misses.push((e.clone(), Miss::NoVersion)),
+                    }
+                } else {
+                    r.matches.push(Match { entry: e.clone(), pkg, how, upgrade_code });
+                }
+            }
+            Err(m) => r.misses.push((e.clone(), m)),
+        }
+    }
+    // One entry per package: the strongest match, then the newest version.
+    r.matches.sort_by(|a, b| a.pkg.id.cmp(&b.pkg.id).then(b.how.cmp(&a.how)).then_with(|| version::cmp(&b.entry.display_version, &a.entry.display_version)));
+    let mut kept: Vec<Match> = Vec::new();
+    for m in std::mem::take(&mut r.matches) {
+        if kept.last().is_some_and(|k| k.pkg.id == m.pkg.id) {
+            let id = m.pkg.id.clone();
+            r.misses.push((m.entry, Miss::Duplicate(id)));
+        } else {
+            kept.push(m);
+        }
+    }
+    r.matches = kept;
+    r
+}
+
+// ---------------------------------------------------------------- choosing an installer
+
+/// What kind of installer an update has to be to replace the copy that is here.
+#[derive(Clone, Debug)]
+pub struct Want {
+    /// x64 or arm64
+    pub machine: &'static str,
+    /// x64 or x86 when the installed copy tells
+    pub arch: Option<&'static str>,
+    /// user or machine for an installed copy; None for a new install
+    pub scope: Option<&'static str>,
+    pub msi: bool,
+    pub product_code: Option<String>,
+    pub upgrade_code: Option<String>,
+    pub locale: Option<String>,
+}
+
+pub fn machine_arch() -> &'static str {
+    let a = std::env::var("PROCESSOR_ARCHITEW6432").or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE")).unwrap_or_default();
+    if a.eq_ignore_ascii_case("ARM64") {
+        "arm64"
+    } else {
+        "x64"
+    }
+}
+
+fn starts_dir(p: &str, root: &Path) -> bool {
+    let r = format!("{}\\", norm_path(&root.to_string_lossy()));
+    format!("{}\\", norm_path(p)).starts_with(&r)
+}
+
+impl Want {
+    pub fn for_entry(e: &winutil::UninstallEntry, upgrade_code: Option<&str>) -> Want {
+        let nn = winget::normalize_name(&e.display_name);
+        let loc = if e.install_location.trim().is_empty() { e.display_icon.split(',').next().unwrap_or("").to_string() } else { e.install_location.clone() };
+        let arch = match nn.arch {
+            Some("X64") => Some("x64"),
+            Some(_) => Some("x86"),
+            None if starts_dir(&loc, &paths::program_files_x86()) => Some("x86"),
+            None if starts_dir(&loc, &paths::program_files()) && !paths::program_files().to_string_lossy().contains("(x86)") => Some("x64"),
+            None => None,
+        };
+        Want {
+            machine: machine_arch(),
+            arch,
+            scope: Some(if e.hive == "HKCU" { "user" } else { "machine" }),
+            msi: e.windows_installer,
+            product_code: Some(e.key.clone()),
+            upgrade_code: upgrade_code.map(String::from),
+            locale: nn.locale,
+        }
+    }
+
+    pub fn for_installed(i: &Installed) -> Want {
+        match &i.data {
+            SourceData::Other { entry, upgrade_code, .. } => Want::for_entry(entry, upgrade_code.as_deref()),
+            _ => Want::fresh(),
+        }
+    }
+
+    /// A new install: the computer's own architecture is preferred, any scope.
+    pub fn fresh() -> Want {
+        Want { machine: machine_arch(), arch: None, scope: None, msi: false, product_code: None, upgrade_code: None, locale: None }
+    }
+}
+
+/// The installer type that actually runs (a zip holds another installer).
+pub fn kind_of(i: &Installer) -> &str {
+    if i.kind == "zip" {
+        i.nested_kind.as_deref().unwrap_or("zip")
+    } else {
+        &i.kind
+    }
+}
+
+fn msi_family(k: &str) -> bool {
+    k == "msi" || k == "wix"
+}
+
+const OTHER_CPU: &str = "only for another kind of processor";
+
+/// Can this installer run here, silently? `Err` says why not.
+pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static str> {
+    match i.arch.as_str() {
+        "x64" | "x86" | "neutral" => {}
+        "arm64" if machine == "arm64" => {}
+        _ => return Err(OTHER_CPU),
+    }
+    match kind_of(i) {
+        "msix" | "appx" | "msstore" => return Err("only a Store or MSIX package"),
+        "portable" => return Err("only a portable copy"),
+        "pwa" | "font" => return Err("not a desktop app installer"),
+        "zip" => return Err("a zip without an installer in it"),
+        // An exe without switches that the manifest says installs silently is silent by itself.
+        "exe" if i.silent.is_none() && i.silent_progress.is_none() && !i.install_modes.iter().any(|m| m.eq_ignore_ascii_case("silent")) => return Err("its installer has no silent mode"),
+        "msi" | "wix" | "nsis" | "inno" | "burn" | "exe" => {}
+        _ => return Err("an installer type that is not supported"),
+    }
+    if i.kind == "zip" && i.nested_path.is_none() {
+        return Err("a zip without an installer in it");
+    }
+    if i.sha256.len() != 64 || !i.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("no checksum");
+    }
+    if !(i.url.starts_with("https://") || i.url.starts_with("http://")) {
+        return Err("no download address");
+    }
+    Ok(())
+}
+
+/// The installer that updates the copy described by `w` (or installs a new one). Only installers
+/// that replace that copy are considered: same scope, same kind (MSI or not), same architecture,
+/// unless the installer names the installed product or upgrade code.
+pub fn choose<'a>(m: &'a Manifest, w: &Want) -> std::result::Result<&'a Installer, String> {
+    // Why nothing fits: a reason about this copy (scope, kind, architecture) says more than one
+    // about installers that can not run here at all.
+    let mut why: (u8, &str) = (0, "no installer for Windows");
+    let mut best: Option<(i32, &Installer)> = None;
+    let same = |a: &Option<String>, b: &Option<String>| matches!((a, b), (Some(x), Some(y)) if x.eq_ignore_ascii_case(y.trim()));
+    for i in &m.installers {
+        if let Err(r) = usable(i, w.machine) {
+            let level = if r == OTHER_CPU { 1 } else { 2 };
+            if level >= why.0 {
+                why = (level, r);
+            }
+            continue;
+        }
+        let pc = same(&w.product_code, &i.product_code) || i.arp.iter().any(|a| same(&w.product_code, &a.product_code));
+        let uc = w.upgrade_code.is_some() && i.arp.iter().any(|a| same(&w.upgrade_code, &a.upgrade_code));
+        let k = kind_of(i);
+        // A key name such as "7-Zip" is the same for every architecture; a GUID is not.
+        let named = uc || (pc && w.product_code.as_deref().is_some_and(is_guid));
+        if let (Some(ws), Some(is)) = (w.scope, i.scope.as_deref()) {
+            if ws != is && !named {
+                why = (3, if ws == "user" { "only an installer for all users, this copy is per user" } else { "only a per-user installer, this copy is for all users" });
+                continue;
+            }
+        }
+        if w.product_code.is_some() && !named && w.msi != msi_family(k) && k != "burn" {
+            why = (3, if w.msi { "no MSI installer, this copy came from one" } else { "only an MSI installer, this copy did not come from one" });
+            continue;
+        }
+        if let Some(a) = w.arch {
+            if !named && i.arch != a && i.arch != "neutral" && (a == "x86" || a == "x64") && (i.arch == "x86" || i.arch == "x64") {
+                why = (3, "only for another architecture than this copy");
+                continue;
+            }
+        }
+        let mut s = 0;
+        if pc {
+            s += 100;
+        }
+        if uc {
+            s += 90;
+        }
+        if w.msi == msi_family(k) {
+            s += 30;
+        }
+        s += match w.arch {
+            Some(a) if a == i.arch => 20,
+            _ if i.arch == w.machine => 15,
+            _ if i.arch == "neutral" => 10,
+            _ => 0,
+        };
+        s += match (w.scope, i.scope.as_deref()) {
+            (Some(a), Some(b)) if a == b => 10,
+            (_, None) => 5,
+            (None, Some("machine")) => 6,
+            _ => 0,
+        };
+        s += match (&w.locale, &i.locale) {
+            (Some(l), Some(il)) if il.eq_ignore_ascii_case(l) => 8,
+            (_, None) => 3,
+            (_, Some(il)) if il.eq_ignore_ascii_case("en-US") => 2,
+            _ => 0,
+        };
+        if best.is_none_or(|(b, _)| s > b) {
+            best = Some((s, i));
+        }
+    }
+    best.map(|b| b.1).ok_or_else(|| why.1.to_string())
+}
+
+/// The version the app will show in the uninstall list after this installer: what the manifest
+/// says it writes there, else the package version.
+pub fn expected_version(m: &Manifest, i: &Installer) -> String {
+    i.arp.iter().find_map(|a| a.display_version.clone()).unwrap_or_else(|| m.version.clone())
+}
+
+/// Is `offered` an update for `installed`? Only when both are plain version numbers of the same
+/// kind (a year version "2026.1" is never compared with "8.3").
+pub fn is_newer(offered: &str, installed: &str) -> bool {
+    let plain = |v: &str| v.trim().trim_start_matches(['v', 'V']).chars().next().is_some_and(|c| c.is_ascii_digit());
+    if !plain(offered) || !plain(installed) {
+        return false;
+    }
+    let year = |v: &str| (1990..=2100).contains(&version::major(v));
+    if year(offered) != year(installed) {
+        return false;
+    }
+    super::tools::cmp_ver(offered, installed) == std::cmp::Ordering::Greater
+}
+
+// ---------------------------------------------------------------- feed
+
+#[derive(Clone, Debug)]
+pub struct PkgFeed {
+    pub pkg: Pkg,
+    /// Newest first
+    pub versions: Vec<VerRef>,
+    /// Manifest of the newest version
+    pub latest: Option<Manifest>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Feed {
+    /// Lowercase package id -> what the catalog has for it
+    pub pkgs: HashMap<String, PkgFeed>,
+}
+
+impl Feed {
+    pub fn get(&self, id: &str) -> Option<&PkgFeed> {
+        self.pkgs.get(&id.to_ascii_lowercase())
+    }
+}
+
+fn pkg_of(i: &Installed) -> &str {
+    match &i.data {
+        SourceData::Other { pkg, .. } => pkg,
+        _ => "",
+    }
+}
+
+type Loaded = (Pkg, Result<(Vec<VerRef>, Manifest)>);
+
+async fn load_pkg(p: Pkg) -> Loaded {
+    let r = async {
+        let v = winget::versions(&p).await?;
+        let first = v.first().ok_or_else(|| anyhow!("{} has no versions", p.id))?;
+        let m = winget::manifest(first).await?;
+        Ok((v, m))
+    }
+    .await;
+    (p, r)
+}
+
+/// Refresh the index, match what is installed and read the version list and newest manifest of
+/// every matched package. `installed` are the apps the other sources found.
+pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
+    let path = winget::refresh_index(Duration::from_secs(30 * 60)).await?;
+    let handled: Vec<Installed> = installed.iter().filter(|i| i.source != Source::Other).cloned().collect();
+    let pkgs: Vec<Pkg> = tokio::task::spawn_blocking(move || -> Result<Vec<Pkg>> {
+        let idx = Index::open(&path)?;
+        let r = match_on_disk(&winutil::uninstall_entries(), &idx, &path, &handled);
+        Ok(r.matches.into_iter().map(|m| m.pkg).collect())
+    })
+    .await
+    .map_err(|e| anyhow!("{e}"))??;
+    let got: Vec<Loaded> = futures_util::stream::iter(pkgs).map(load_pkg).buffer_unordered(8).collect().await;
+    let mut feed = Feed::default();
+    let mut failed = 0;
+    for (pkg, r) in got {
+        match r {
+            Ok((versions, m)) => {
+                feed.pkgs.insert(pkg.id.to_ascii_lowercase(), PkgFeed { pkg, versions, latest: Some(m) });
+            }
+            Err(e) => {
+                failed += 1;
+                log::warn!("winget {}: {e:#}", pkg.id);
+            }
+        }
+    }
+    if failed > 0 && feed.pkgs.is_empty() {
+        bail!("Could not read the winget catalog");
+    }
+    tokio::task::spawn_blocking(|| winget::prune_files(Duration::from_secs(60 * 24 * 3600))).await.ok();
+    Ok(feed)
+}
+
+// ---------------------------------------------------------------- installed apps
+
+const MARKS: &[(&str, &str)] = &[("#E4E4EC", "#24242C"), ("#E38BC4", "#2A1222"), ("#E8736A", "#2C1311"), ("#6FB1E3", "#0F2131"), ("#9FD69B", "#14261A"), ("#E3C26F", "#2B2311"), ("#B49BE8", "#1E1530"), ("#7FD1C7", "#10262A")];
+
+/// Two letters and colors for the app's mark until its icon is known.
+fn mark_for(name: &str, id: &str) -> (String, String, String) {
+    let letters: Vec<char> = name.chars().filter(|c| c.is_alphanumeric()).collect();
+    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let code = if words.len() >= 2 {
+        format!("{}{}", words[0].chars().next().unwrap_or('A').to_ascii_uppercase(), words[1].chars().next().unwrap_or('p').to_ascii_lowercase())
+    } else {
+        let mut s = String::new();
+        s.extend(letters.first().map(|c| c.to_ascii_uppercase()));
+        s.extend(letters.get(1).map(|c| c.to_ascii_lowercase()));
+        s
+    };
+    let h = id.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) as usize;
+    let (fg, bg) = MARKS[h % MARKS.len()];
+    (if code.is_empty() { "Ap".into() } else { code }, fg.into(), bg.into())
+}
+
+/// A program file named by the entry, outside Windows Installer's and bundles' caches.
+fn program_file(e: &winutil::UninstallEntry) -> Option<PathBuf> {
+    let icon = e.display_icon.split(',').next().unwrap_or("").trim().trim_matches('"');
+    let low = icon.to_ascii_lowercase();
+    if !(low.ends_with(".exe") || low.ends_with(".ico")) || low.contains("\\installer\\") || low.contains("package cache") {
+        return None;
+    }
+    let p = PathBuf::from(icon);
+    p.exists().then_some(p)
+}
+
+fn install_dir(e: &winutil::UninstallEntry) -> Option<PathBuf> {
+    if !e.install_location.trim().is_empty() {
+        let d = winutil::pathbuf(&e.install_location);
+        if d.is_dir() && d.components().count() >= 3 {
+            return Some(d);
+        }
+    }
+    program_file(e).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))).and_then(|p| p.parent().map(Path::to_path_buf)).filter(|d| d.components().count() >= 3)
+}
+
+/// The command that removes the app without questions: the one the entry gives, Windows
+/// Installer's for MSI products, or the uninstaller with the silent switch its type takes.
+pub fn uninstall_cmd(e: &winutil::UninstallEntry, kind: Option<&str>) -> Option<Vec<String>> {
+    let has = |v: &[String], s: &str| v.iter().any(|a| a.eq_ignore_ascii_case(s));
+    if !e.quiet_uninstall_string.trim().is_empty() {
+        let mut v = winutil::split_program_line(&e.quiet_uninstall_string);
+        // Inno Setup registers "/SILENT", which still shows a progress window.
+        if e.key.to_ascii_lowercase().ends_with("_is1") && has(&v, "/SILENT") {
+            v.retain(|a| !a.eq_ignore_ascii_case("/SILENT"));
+            for s in ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] {
+                if !has(&v, s) {
+                    v.push(s.into());
+                }
+            }
+        }
+        return Some(v).filter(|v| !v.is_empty());
+    }
+    let u = e.uninstall_string.trim();
+    if u.is_empty() {
+        return None;
+    }
+    if (e.windows_installer || u.to_ascii_lowercase().contains("msiexec")) && is_guid(&e.key) {
+        return Some(vec!["msiexec.exe".into(), "/x".into(), e.key.clone(), "/qn".into(), "/norestart".into()]);
+    }
+    let mut v = winutil::split_program_line(u);
+    if v.is_empty() {
+        return None;
+    }
+    if e.key.to_ascii_lowercase().ends_with("_is1") || kind == Some("inno") {
+        for s in ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"] {
+            if !has(&v, s) {
+                v.push(s.into());
+            }
+        }
+        return Some(v);
+    }
+    if kind == Some("nsis") {
+        if !has(&v, "/S") {
+            v.push("/S".into());
+        }
+        // Run in place, so it returns when it is done instead of handing off to a copy of itself.
+        if let Some(dir) = Path::new(&v[0]).parent() {
+            if !v.iter().any(|a| a.starts_with("_?=")) {
+                v.push(format!("_?={}", dir.display()));
+            }
+        }
+        return Some(v);
+    }
+    None
+}
+
+fn make(m: &Match, feed: Option<&Feed>) -> Option<Installed> {
+    let e = &m.entry;
+    let pf = feed.and_then(|f| f.get(&m.pkg.id));
+    let man = pf.and_then(|p| p.latest.as_ref());
+    let want = Want::for_entry(e, m.upgrade_code.as_deref());
+    // Once the catalog is read: an app it can not update silently is not listed.
+    let kind = match man {
+        Some(man) => Some(kind_of(choose(man, &want).ok()?).to_string()),
+        None => None,
+    };
+    let name = man.map(|x| x.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| m.pkg.name.clone());
+    let (code, fg, bg) = mark_for(&name, &m.pkg.id);
+    let exe = program_file(e);
+    Some(Installed {
+        id: format!("other:{}", m.pkg.id),
+        source: Source::Other,
+        name,
+        code,
+        fg,
+        bg,
+        version: e.display_version.trim().to_string(),
+        install_dir: install_dir(e),
+        exe,
+        uninstall: uninstall_cmd(e, kind.as_deref()),
+        updated_at: winutil::install_date_iso(&e.install_date),
+        size_hint: Some(e.estimated_size_kb * 1024).filter(|s| *s > 0),
+        tagline: man.and_then(|x| x.description.clone()).or_else(|| Some(e.publisher.clone()).filter(|p| !p.is_empty())),
+        channel: None,
+        missing: false,
+        read_only: false,
+        icon_remote: None,
+        data: SourceData::Other { pkg: m.pkg.id.clone(), how: m.how, entry: Box::new(e.clone()), upgrade_code: m.upgrade_code.clone() },
+    })
+}
+
+/// Installed apps matched to the catalog (no network: the index on disk, if there is one yet).
+pub fn scan(entries: &[winutil::UninstallEntry], handled: &[Installed], feed: Option<&Feed>) -> Vec<Installed> {
+    let path = winget::index_path();
+    if !path.is_file() {
+        return vec![];
+    }
+    let idx = match Index::open(&path) {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!("winget index: {e:#}");
+            return vec![];
+        }
+    };
+    let r = match_on_disk(entries, &idx, &path, handled);
+    r.matches.iter().filter_map(|m| make(m, feed)).collect()
+}
+
+pub fn latest(inst: &Installed, feed: &Feed) -> Option<Latest> {
+    let m = feed.get(pkg_of(inst))?.latest.as_ref()?;
+    let i = choose(m, &Want::for_installed(inst)).ok()?;
+    let offered = expected_version(m, i);
+    if is_newer(&offered, &inst.version) {
+        Some(Latest { version: offered, size: None, note: None })
+    } else {
+        Some(Latest { version: inst.version.clone(), size: None, note: None })
+    }
+}
+
+// ---------------------------------------------------------------- Get apps
+
+fn entry(p: &Pkg, version: String, tagline: Option<String>, installed: bool) -> CatalogEntry {
+    let (code, fg, bg) = mark_for(&p.name, &p.id);
+    CatalogEntry {
+        id: format!("other:{}", p.id),
+        source: Source::Other,
+        name: p.name.clone(),
+        code,
+        fg,
+        bg,
+        icon_url: None,
+        version,
+        size: None,
+        tagline,
+        group: Source::Other.group().into(),
+        prerelease: false,
+        installed,
+        pick_version: true,
+    }
+}
+
+/// The installed apps the catalog matched, so their pages and versions can be opened.
+pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry> {
+    installed
+        .iter()
+        .filter(|i| i.source == Source::Other)
+        .filter_map(|i| {
+            let pf = feed.get(pkg_of(i))?;
+            let m = pf.latest.as_ref();
+            let mut e = entry(&pf.pkg, m.map(|m| m.version.clone()).unwrap_or_else(|| pf.pkg.latest.clone()), m.and_then(|m| m.description.clone()), true);
+            e.name = i.name.clone();
+            Some(e)
+        })
+        .collect()
+}
+
+/// Packages of the catalog for a search in Get apps.
+pub fn search(q: &str, installed: &[Installed], limit: usize) -> Vec<CatalogEntry> {
+    if q.trim().chars().count() < 2 {
+        return vec![];
+    }
+    let Ok(idx) = Index::open(&winget::index_path()) else { return vec![] };
+    idx.search(q, limit * 2)
+        .into_iter()
+        .filter(|p| !handled_package(&p.id) && excluded_package(&p.id).is_none() && !idx.is_msix(p.row))
+        .take(limit)
+        .map(|p| {
+            let have = installed.iter().any(|i| pkg_of(i).eq_ignore_ascii_case(&p.id));
+            let latest = p.latest.clone();
+            let tag = p.id.clone();
+            entry(&p, latest, Some(tag), have)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------- versions and change lists
+
+struct GhRel {
+    tag: String,
+    name: String,
+    body: String,
+    url: String,
+}
+
+/// "owner/repo" of a github.com address.
+pub fn github_repo(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://github.com/").or_else(|| url.strip_prefix("http://github.com/")).or_else(|| url.strip_prefix("https://www.github.com/"))?;
+    let mut it = rest.split(['/', '?', '#']);
+    let owner = it.next().filter(|s| !s.is_empty())?;
+    let repo = it.next().filter(|s| !s.is_empty())?.trim_end_matches(".git");
+    if ["orgs", "sponsors", "topics", "users", "apps", "marketplace", "settings"].contains(&owner) {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+/// The release tag in a GitHub download or release page address.
+pub fn github_tag(url: &str) -> Option<String> {
+    for mark in ["/releases/download/", "/releases/tag/"] {
+        if let Some(i) = url.find(mark) {
+            let t = url[i + mark.len()..].split(['/', '?', '#']).next()?;
+            if !t.is_empty() {
+                return Some(percent_decode(t));
+            }
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn github_releases(owner: &str, repo: &str) -> Vec<GhRel> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=50");
+    let Ok(Ok(f)) = tokio::time::timeout(Duration::from_secs(15), http::get_cached(&url, &[("Accept", "application/vnd.github+json")], Duration::from_secs(3600))).await else { return vec![] };
+    let v: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["draft"].as_bool() != Some(true))
+        .map(|r| GhRel {
+            tag: r["tag_name"].as_str().unwrap_or("").to_string(),
+            name: r["name"].as_str().unwrap_or("").to_string(),
+            body: r["body"].as_str().unwrap_or("").to_string(),
+            url: r["html_url"].as_str().unwrap_or("").to_string(),
+        })
+        .collect()
+}
+
+fn find_release<'a>(rels: &'a [GhRel], ver: &str, tag: Option<&str>) -> Option<&'a GhRel> {
+    if let Some(t) = tag {
+        if let Some(r) = rels.iter().find(|r| r.tag == t) {
+            return Some(r);
+        }
+    }
+    rels.iter().find(|r| notes::names_version(&r.tag, ver)).or_else(|| rels.iter().find(|r| notes::names_version(&r.name, ver)))
+}
+
+/// What the versions of a package share: its GitHub releases (read at most once per version
+/// list) and a release notes page that covers every version.
+struct Gh {
+    repo: Option<(String, String)>,
+    rels: tokio::sync::OnceCell<Vec<GhRel>>,
+    page: Option<String>,
+}
+
+impl Gh {
+    async fn get(&self) -> &[GhRel] {
+        match &self.repo {
+            Some((o, r)) => self.rels.get_or_init(|| github_releases(o, r)).await,
+            None => &[],
+        }
+    }
+}
+
+/// The GitHub repository a package comes from: where its installers are downloaded from, else
+/// its release notes or home page.
+fn repo_of(m: &Manifest) -> Option<(String, String)> {
+    m.installers.iter().find_map(|i| github_repo(&i.url).filter(|_| i.url.contains("/releases/download/"))).or_else(|| {
+        [&m.release_notes_url, &m.package_url, &m.publisher_url].into_iter().flatten().find_map(|u| github_repo(u))
+    })
+}
+
+/// "https://github.com/o/r/blob/main/CHANGELOG.md" -> the raw file.
+fn github_raw(url: &str) -> Option<String> {
+    let (o, r) = github_repo(url)?;
+    let i = url.find("/blob/")?;
+    Some(format!("https://raw.githubusercontent.com/{o}/{r}/{}", &url[i + 6..]))
+}
+
+/// A change list and the page with the full notes.
+type Notes = (Vec<String>, Option<String>);
+
+static NOTES_CACHE: Lazy<Mutex<HashMap<String, Notes>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// The change list of one version and the page with the full notes, from the best source there
+/// is: the manifest's own release notes, its release notes page, or the GitHub release.
+async fn notes_for(m: &Manifest, gh: &Gh) -> Notes {
+    let key = format!("{}@{}", m.id, m.version);
+    if let Some(hit) = NOTES_CACHE.lock().get(&key).cloned() {
+        return hit;
+    }
+    let r = notes_uncached(m, gh).await;
+    NOTES_CACHE.lock().insert(key, r.clone());
+    r
+}
+
+async fn notes_uncached(m: &Manifest, gh: &Gh) -> Notes {
+    let (lines, url, _) = notes_detail(m, gh).await;
+    (lines, url)
+}
+
+/// Change list, notes page and where the list came from (manifest, page, github, or 
+/// when there is none).
+async fn notes_detail(m: &Manifest, gh: &Gh) -> (Vec<String>, Option<String>, &'static str) {
+    let ver = &m.version;
+    let tag = m.installers.iter().find_map(|i| github_tag(&i.url)).or_else(|| m.release_notes_url.as_deref().and_then(github_tag));
+    let mut link = m.release_notes_url.clone().or_else(|| gh.page.clone());
+    // 1. The manifest's own notes.
+    if let Some(t) = &m.release_notes {
+        let lines = notes::text_lines(t);
+        if !lines.is_empty() {
+            if link.is_none() {
+                link = find_release(gh.get().await, ver, tag.as_deref()).map(|r| r.url.clone());
+            }
+            return (lines, link, "manifest");
+        }
+    }
+    // 2. The release notes page, or the one page another version names (GitHub release pages
+    // are read through the API below).
+    if let Some(u) = m.release_notes_url.as_ref().or(gh.page.as_ref()) {
+        let src = if github_repo(u).is_some() { github_raw(u) } else { Some(u.clone()) };
+        if let Some(src) = src {
+            if let Some(body) = notes::fetch_page(&src).await {
+                let lines = notes::page_notes(&body, ver);
+                if !lines.is_empty() {
+                    return (lines, link, "page");
+                }
+            }
+        }
+    }
+    // 3. The GitHub release.
+    if let Some(rel) = find_release(gh.get().await, ver, tag.as_deref()) {
+        let lines = notes::text_lines(&rel.body);
+        let url = Some(rel.url.clone()).filter(|u| !u.is_empty());
+        if !lines.is_empty() {
+            return (lines, url, "github");
+        }
+        link = link.or(url);
+    }
+    (vec![], link, "")
+}
+
+/// For the live probe: the change list of one manifest and where it came from.
+pub async fn probe_notes(m: &Manifest) -> (Vec<String>, Option<String>, &'static str) {
+    let gh = Gh { repo: repo_of(m), rels: tokio::sync::OnceCell::new(), page: None };
+    notes_detail(m, &gh).await
+}
+
+fn iso_date(d: &Option<String>) -> Option<String> {
+    let d = d.as_deref()?.trim();
+    (d.len() == 10 && d.as_bytes()[4] == b'-').then(|| format!("{d}T00:00:00Z")).or_else(|| Some(d.to_string()))
+}
+
+/// Version list with change lists for a package. `installed` is the version in the uninstall list.
+async fn version_infos(list: &[VerRef], installed: Option<&str>, want: &Want, latest_manifest: Option<&Manifest>) -> Vec<VersionInfo> {
+    let top: Vec<VerRef> = list.iter().take(15).cloned().collect();
+    let manifests: Vec<Option<Manifest>> = futures_util::stream::iter(top.iter().cloned())
+        .map(|r| {
+            let cached = latest_manifest.filter(|m| m.version == r.version).cloned();
+            async move {
+                match cached {
+                    Some(m) => Some(m),
+                    None => winget::manifest(&r).await.ok(),
+                }
+            }
+        })
+        .buffered(6)
+        .collect()
+        .await;
+    // A notes page that is not about one version (no version or GitHub tag in its address).
+    let page = manifests.iter().flatten().filter_map(|m| m.release_notes_url.as_ref().map(|u| (m, u))).find(|(m, u)| github_tag(u).is_none() && !notes::names_version(u, &m.version) && !u.contains(&m.version.replace('.', "_"))).map(|(_, u)| u.clone());
+    let gh = Gh { repo: manifests.iter().flatten().find_map(repo_of), rels: tokio::sync::OnceCell::new(), page };
+    let mut out = Vec::new();
+    for (k, (r, m)) in top.iter().zip(manifests.iter()).enumerate() {
+        let (mut lines, url) = match m {
+            Some(m) => notes_for(m, &gh).await,
+            None => (vec![], None),
+        };
+        if lines.is_empty() {
+            lines.push(if url.is_some() { SEE_NOTES.to_string() } else { NO_NOTES.to_string() });
+        }
+        let shows = m.as_ref().and_then(|m| choose(m, want).ok().map(|i| expected_version(m, i)));
+        let is_installed = installed.is_some_and(|iv| version::cmp(iv, &r.version).is_eq() || shows.as_deref().is_some_and(|s| version::cmp(iv, s).is_eq()));
+        out.push(VersionInfo {
+            version: r.version.clone(),
+            date: m.as_ref().and_then(|m| iso_date(&m.release_date)),
+            notes: lines,
+            notes_url: url.or_else(|| m.as_ref().and_then(|m| m.package_url.clone())),
+            size: None,
+            installed: is_installed,
+            latest: k == 0,
+            prerelease: super::tools::is_pre(&r.version),
+        });
+    }
+    out
+}
+
+async fn pkg_and_versions(id: &str, feed: Option<&Feed>) -> Result<(Pkg, Vec<VerRef>, Option<Manifest>)> {
+    if let Some(pf) = feed.and_then(|f| f.get(id)) {
+        return Ok((pf.pkg.clone(), pf.versions.clone(), pf.latest.clone()));
+    }
+    let path = winget::refresh_index(Duration::from_secs(6 * 3600)).await?;
+    let id2 = id.to_string();
+    let p = tokio::task::spawn_blocking(move || Index::open(&path).ok().and_then(|i| i.by_id(&id2))).await.ok().flatten().ok_or_else(|| anyhow!("{id} is not in the winget catalog"))?;
+    let v = winget::versions(&p).await?;
+    Ok((p, v, None))
+}
+
+/// Versions an installed app can be set to, newest first, with their change lists.
+pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>> {
+    let (_, list, latest) = pkg_and_versions(pkg_of(inst), Some(feed)).await?;
+    if list.is_empty() {
+        bail!("{} has no versions in the winget catalog", inst.name);
+    }
+    Ok(version_infos(&list, Some(&inst.version), &Want::for_installed(inst), latest.as_ref()).await)
+}
+
+/// Versions offered on a Get apps page ("other:<package id>").
+pub async fn catalog_versions(id: &str, feed: Option<&Feed>, installed: &[Installed]) -> Result<Vec<VersionInfo>> {
+    let pkg_id = id.strip_prefix("other:").unwrap_or(id);
+    let (_, list, latest) = pkg_and_versions(pkg_id, feed).await?;
+    let here = installed.iter().find(|i| pkg_of(i).eq_ignore_ascii_case(pkg_id));
+    let want = here.map(Want::for_installed).unwrap_or_else(Want::fresh);
+    Ok(version_infos(&list, here.map(|i| i.version.as_str()), &want, latest.as_ref()).await)
+}
+
+// ---------------------------------------------------------------- plans
+
+fn safe_name(s: &str) -> String {
+    s.chars().map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
+}
+
+/// File name for a download: the one in the address when it has a usable extension.
+fn file_name(i: &Installer, pkg: &str, ver: &str) -> String {
+    let last = i.url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("");
+    let last = safe_name(&percent_decode(last));
+    let ext = match i.kind.as_str() {
+        "msi" | "wix" => "msi",
+        "zip" => "zip",
+        _ => "exe",
+    };
+    if last.to_ascii_lowercase().ends_with(&format!(".{ext}")) && last.len() > 4 {
+        last
+    } else {
+        format!("{}-{}.{ext}", safe_name(pkg), safe_name(ver))
+    }
+}
+
+fn args_of(s: &Option<String>) -> Vec<String> {
+    s.as_deref().map(winutil::split_command_line).unwrap_or_default()
+}
+
+/// Does installing need admin rights? The manifest's scope and elevation say so, else the copy
+/// that is here (per user or for all users).
+fn needs_admin(i: &Installer, w: &Want) -> bool {
+    match i.elevation.as_deref() {
+        Some("elevationRequired") | Some("elevatesSelf") => return true,
+        Some("elevationProhibited") => return false,
+        _ => {}
+    }
+    match i.scope.as_deref() {
+        Some("machine") => true,
+        Some("user") => false,
+        _ => w.scope != Some("user"),
+    }
+}
+
+/// Arguments that make an installer of type `kind` run silently.
+fn silent_args(i: &Installer, kind: &str, file: &Path, log: &Path, update: bool) -> (PathBuf, Vec<String>) {
+    let mut extra = args_of(&i.custom);
+    if update {
+        extra.extend(args_of(&i.upgrade));
+    }
+    match kind {
+        "msi" | "wix" => {
+            let mut a = vec!["/i".into(), file.to_string_lossy().to_string(), "/qn".into(), "/norestart".into(), "/l*v".into(), log.to_string_lossy().to_string()];
+            a.extend(extra);
+            (PathBuf::from("msiexec.exe"), a)
+        }
+        _ => {
+            let mut a = match (&i.silent, kind) {
+                (Some(_), _) => args_of(&i.silent),
+                (None, "nsis") => vec!["/S".into()],
+                (None, "inno") => vec!["/VERYSILENT".into(), "/SUPPRESSMSGBOXES".into(), "/NORESTART".into(), "/SP-".into()],
+                (None, "burn") => vec!["/quiet".into(), "/norestart".into()],
+                (None, _) => args_of(&i.silent_progress),
+            };
+            a.extend(extra);
+            (file.to_path_buf(), a)
+        }
+    }
+}
+
+/// A folder the job may watch for running programs: a real app folder, not a shared root.
+fn own_dir(d: &Path) -> bool {
+    let me = norm_path(&d.to_string_lossy());
+    d.components().count() >= 3 && ![paths::program_files(), paths::program_files_x86(), paths::local_app_data(), paths::local_app_data().join("Programs"), paths::app_data()].iter().any(|r| norm_path(&r.to_string_lossy()) == me)
+}
+
+/// Everything an install needs once the manifest and installer are known. No network.
+pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: Option<&Installed>, size: Option<u64>) -> Result<Plan> {
+    let w = current.map(Want::for_installed).unwrap_or_else(Want::fresh);
+    let name = current.map(|c| c.name.clone()).unwrap_or_else(|| if m.name.is_empty() { p.name.clone() } else { m.name.clone() });
+    let base = paths::downloads().join("other").join(safe_name(&p.id));
+    let dest = base.join(file_name(i, &p.id, &m.version));
+    let log = paths::logs().join(format!("other-{}-{}.log", safe_name(&p.id), safe_name(&m.version)));
+    let update = current.is_some() && kind != JobKind::Install;
+    let admin = needs_admin(i, &w);
+    let label = format!("Installing {} {}", name, m.version);
+    let mut steps = Vec::new();
+    let mut cleanup = vec![dest.clone()];
+    if update && i.upgrade_behavior.as_deref() == Some("uninstallPrevious") {
+        if let Some(u) = current.and_then(|c| c.uninstall.clone()).filter(|u| !u.is_empty()) {
+            steps.push(Step::Run { exe: PathBuf::from(&u[0]), args: u[1..].to_vec(), cwd: None, ok_codes: vec![0, 3010, 1641, 1605], elevated: admin || w.scope == Some("machine"), label: format!("Removing the old {name}"), log: None });
+        }
+    }
+    let (file, run_kind) = if i.kind == "zip" {
+        let dir = base.join(format!("unpacked-{}", safe_name(&m.version)));
+        let inner = i.nested_path.clone().ok_or_else(|| anyhow!("{name}: the zip has no installer named"))?;
+        if inner.contains("..") {
+            bail!("{name}: the installer path in the zip leaves the zip");
+        }
+        steps.push(Step::ExtractZip { zip: dest.clone(), dest: dir.clone(), strip_root: false, elevated: false, label: format!("Unpacking {name}") });
+        cleanup.push(dir.clone());
+        (dir.join(inner.replace('/', "\\")), kind_of(i).to_string())
+    } else {
+        (dest.clone(), i.kind.clone())
+    };
+    let (exe, args) = silent_args(i, &run_kind, &file, &log, update);
+    let mut ok_codes = vec![0];
+    ok_codes.extend(i.success_codes.iter().copied());
+    if msi_family(&run_kind) {
+        ok_codes.extend([3010, 1641]);
+    }
+    let is_msi = msi_family(&run_kind);
+    let run = |elevated: bool| Step::Run { exe: exe.clone(), args: args.clone(), cwd: None, ok_codes: ok_codes.clone(), elevated, label: label.clone(), log: is_msi.then(|| log.clone()) };
+    let app_id = format!("other:{}", p.id);
+    let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
+    let block_names: Vec<String> = if block_dirs.is_empty() { current.and_then(|c| c.exe.as_ref()).and_then(|e| e.file_name()).map(|n| n.to_string_lossy().to_ascii_lowercase()).filter(|n| n.ends_with(".exe")).into_iter().collect() } else { vec![] };
+    let make = |steps: Vec<Step>| Plan {
+        app_id: app_id.clone(),
+        kind,
+        name: name.clone(),
+        to_version: m.version.clone(),
+        downloads: vec![Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()), sha512: None, md5: None, signer: None, headers: vec![] }],
+        steps,
+        block_dirs: block_dirs.clone(),
+        block_names: block_names.clone(),
+        verify: Verify::Version { app_id: app_id.clone(), version: expected_version(m, i) },
+        fallback: None,
+        cleanup: cleanup.clone(),
+    };
+    let mut first = steps.clone();
+    first.push(run(admin));
+    let mut plan = make(first);
+    // A per-user installer that Windows will only start with admin rights gets them on a second
+    // try (see `needs_elevation`).
+    if !admin {
+        let mut again = steps;
+        again.push(run(true));
+        plan.fallback = Some(Box::new(make(again)));
+    }
+    Ok(plan)
+}
+
+/// Did Windows refuse to start an installer because it asks for admin rights (error 740)?
+pub fn needs_elevation(error: &str) -> bool {
+    error.contains("os error 740") || error.contains("requires elevation")
+}
+
+/// Size of the installer at its address, when the server says.
+async fn remote_size(url: &str) -> Option<u64> {
+    let r = http::CLIENT.head(url).timeout(Duration::from_secs(15)).send().await.ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    r.headers().get(reqwest::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0)
+}
+
+/// `id` is "other:<package id>"; `ver` a package version, or None for the newest.
+pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: Option<&Installed>, feed: Option<&Feed>) -> Result<Plan> {
+    let pkg_id = id.strip_prefix("other:").unwrap_or(id);
+    let (p, list, latest) = pkg_and_versions(pkg_id, feed).await?;
+    let label = current.map(|c| c.name.clone()).unwrap_or_else(|| p.name.clone());
+    let w = current.map(Want::for_installed).unwrap_or_else(Want::fresh);
+    let m = match (kind, ver, current) {
+        // The installed version again: the package version that writes it to the uninstall list.
+        (JobKind::Repair, _, Some(c)) => {
+            let mut found = None;
+            for r in list.iter().take(15) {
+                let m = match latest.as_ref().filter(|m| m.version == r.version) {
+                    Some(m) => m.clone(),
+                    None => winget::manifest(r).await?,
+                };
+                let shows = choose(&m, &w).ok().map(|i| expected_version(&m, i));
+                if version::cmp(&r.version, &c.version).is_eq() || shows.is_some_and(|s| version::cmp(&s, &c.version).is_eq()) {
+                    found = Some(m);
+                    break;
+                }
+            }
+            found.ok_or_else(|| anyhow!("{label} {} is not in the winget catalog any more", c.version))?
+        }
+        _ => {
+            let r = match ver {
+                Some(v) => list.iter().find(|r| r.version == v).or_else(|| list.iter().find(|r| version::cmp(&r.version, v).is_eq())),
+                None => list.first(),
+            }
+            .ok_or_else(|| anyhow!("{label} {} is not in the winget catalog", ver.unwrap_or_default()))?;
+            match latest.filter(|m| m.version == r.version) {
+                Some(m) => m,
+                None => winget::manifest(r).await?,
+            }
+        }
+    };
+    let i = choose(&m, &w).map_err(|why| anyhow!("{label} {} can not be installed here: {why}", m.version))?;
+    if current.is_some() && kind != JobKind::Repair && i.upgrade_behavior.as_deref() == Some("deny") {
+        bail!("The catalog says {label} can not be installed over the copy that is here. Uninstall it first.");
+    }
+    // An older version than the one here is a roll back, told by what the uninstall list will show.
+    let kind = match (kind, current) {
+        (JobKind::Update | JobKind::Rollback, Some(c)) => {
+            if is_newer(&c.version, &expected_version(&m, i)) {
+                JobKind::Rollback
+            } else {
+                JobKind::Update
+            }
+        }
+        (k, _) => k,
+    };
+    let size = remote_size(&i.url).await;
+    build_plan(&p, &m, i, kind, current, size)
+}
+
+pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
+    let u = inst.uninstall.clone().filter(|u| !u.is_empty()).ok_or_else(|| anyhow!("{} has no silent uninstaller registered", inst.name))?;
+    let user = matches!(&inst.data, SourceData::Other { entry, .. } if entry.hive == "HKCU");
+    let exe = PathBuf::from(&u[0]);
+    let in_pf = starts_dir(&u[0], &paths::program_files()) || starts_dir(&u[0], &paths::program_files_x86());
+    let elevated = !user || in_pf;
+    Ok(Plan {
+        app_id: inst.id.clone(),
+        kind: JobKind::Uninstall,
+        name: inst.name.clone(),
+        to_version: inst.version.clone(),
+        downloads: vec![],
+        steps: vec![Step::Run { exe, args: u[1..].to_vec(), cwd: None, ok_codes: vec![0, 3010, 1641, 1605], elevated, label: format!("Uninstalling {}", inst.name), log: None }],
+        block_dirs: inst.install_dir.iter().filter(|d| own_dir(d)).cloned().collect(),
+        block_names: vec![],
+        verify: Verify::Removed { app_id: inst.id.clone() },
+        fallback: None,
+        cleanup: vec![],
+    })
+}
+
+/// Guess of how long an install takes, in seconds, before it has been learned.
+pub fn install_seconds(mb: f64) -> f64 {
+    25.0 + mb / 25.0
+}
+
+#[cfg(test)]
+mod tests;

@@ -27,7 +27,7 @@ const defaultSettings: Settings = {
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   showInstalledInGetApps: false,
-  sources: { adobe: true, craft: true, blender: true, tools: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true, other: false },
   parallelDownloads: 3,
   silentElevation: false,
   uiZoom: 1,
@@ -77,7 +77,10 @@ function syncList<T extends { id: string }>(cur: T[], next: T[]): T[] {
   return cur;
 }
 
-export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps"] as const;
+export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps", "Other apps"] as const;
+
+/** Shown wherever Other apps are listed. */
+export const OTHER_NOTE = "Matched from Microsoft's public winget catalog. Less complete than the fully handled apps.";
 
 export function isOpenState(s: Job["state"]) {
   return s === "waiting" || s === "paused" || s === "blocked" || s === "downloading" || s === "installing" || s === "verifying";

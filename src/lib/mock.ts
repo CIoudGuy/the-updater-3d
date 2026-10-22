@@ -124,6 +124,16 @@ function seedApps(): AppEntry[] {
       installDir: "C:\\Program Files\\obs-studio", updatedAt: iso(26 * DAY), tagline: "Recording and live streaming",
     }),
     app({
+      id: "other:7zip.7zip", source: "other", group: "Other apps", name: "7-Zip", code: "7z", fg: "#E4E4EC", bg: "#24242C",
+      version: "26.04", latest: "26.05", status: "update", sizeOnDisk: 6 * MB,
+      installDir: "C:\\Program Files\\7-Zip", updatedAt: iso(40 * DAY), tagline: "A file archiver with a high compression ratio.",
+    }),
+    app({
+      id: "other:VideoLAN.VLC", source: "other", group: "Other apps", name: "VLC media player", code: "Vm", fg: "#E3C26F", bg: "#2B2311",
+      version: "3.0.24", latest: "3.0.24", status: "current", sizeOnDisk: 180 * MB, canRollback: true,
+      installDir: "C:\\Program Files\\VideoLAN\\VLC", updatedAt: iso(90 * DAY), tagline: "A free and open source multimedia player",
+    }),
+    app({
       id: "tools:krita", source: "tools", group: "More apps", name: "Krita", code: "Kr", fg: "#E38BC4", bg: "#2A1222",
       version: "6.0.4.1", latest: "6.0.4.1", status: "current", sizeOnDisk: 1.1 * GB,
       installDir: "C:\\Program Files\\Krita (x64)", updatedAt: iso(12 * DAY), tagline: "Digital painting and illustration",
@@ -205,10 +215,18 @@ const CATALOG: CatalogEntry[] = [
   c("tools:freecad", "tools", "FreeCAD", "Fc", "#E8736A", "#2C1311", "1.1.4", 495 * MB, "Parametric 3D CAD modeler", "More apps", AD),
   c("tools:godot", "tools", "Godot", "Gd", "#6FB1E3", "#0F2131", "4.7.2", 82 * MB, "Game engine and editor", "More apps", AD),
   c("tools:unity", "tools", "Unity Editor", "Un", "#F0F0F2", "#2A2F36", "6000.3.27f1", 3.94 * GB, "Game engine and real-time 3D", "More apps", AD),
+  c("other:7zip.7zip", "other", "7-Zip", "7z", "#E4E4EC", "#24242C", "26.05", null, "A file archiver with a high compression ratio.", "Other apps", AD),
+  c("other:VideoLAN.VLC", "other", "VLC media player", "Vm", "#E3C26F", "#2B2311", "3.0.24", null, "A free and open source multimedia player", "Other apps", AD),
   c("blender:5.2", "blender", "Blender 5.2", "Bl", "#EA7600", "#2A1500", "5.2.2", 390 * MB, "Latest stable release", "Blender"),
   c("blender:5.3-beta", "blender", "Blender 5.3", "Bl", "#EA7600", "#2A1500", "5.3.0 Beta 873fa96", 392 * MB, "Alpha, beta and release candidate builds", "Blender", { prerelease: true, pickVersion: true }),
   c("blender:3.6", "blender", "Blender 3.6 LTS", "Bl", "#EA7600", "#2A1500", "3.6.23", 318 * MB, "Long-term support release", "Blender"),
   c("blender:older", "blender", "Older Blender versions", "Bl", "#EA7600", "#2A1500", "Choose a version", null, "Any release back to 2.93", "Blender", { pickVersion: true }),
+];
+/** Winget catalog packages a Get apps search finds (Other apps). */
+const OTHER_SEARCH: CatalogEntry[] = [
+  c("other:Notepad++.Notepad++", "other", "Notepad++", "No", "#9FD69B", "#14261A", "8.9.8.1", null, "Notepad++.Notepad++", "Other apps", AD),
+  c("other:Mozilla.Firefox", "other", "Mozilla Firefox (en-US)", "Mf", "#E8736A", "#2C1311", "157.0.1", null, "Mozilla.Firefox", "Other apps", AD),
+  c("other:7zip.7zip", "other", "7-Zip", "7z", "#E4E4EC", "#24242C", "26.05", null, "7zip.7zip", "Other apps", AD),
 ];
 /** Releases of the "More apps" entries (newest first), as the backend lists them. */
 const TOOLS_RELEASES: Record<string, { v: string; pre?: boolean; size: number; notes: string[] }[]> = {
@@ -332,7 +350,7 @@ let settings: Settings = {
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   showInstalledInGetApps: false,
-  sources: { adobe: true, craft: true, blender: true, tools: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true, other: true },
   parallelDownloads: 3,
   silentElevation: false,
   uiZoom: 1,
@@ -678,8 +696,25 @@ const NOTES = [
   ["Stability fixes"],
 ];
 
+/** Versions of an Other apps package: one change list from its manifest, one from its notes page, one with none. */
+function otherVersions(id: string): VersionInfo[] {
+  const have = apps.find((a) => a.id === id)?.version;
+  const vs = id === "other:7zip.7zip" ? ["26.05", "26.04", "26.03"] : ["3.0.24", "3.0.23", "3.0.21"];
+  return vs.map((v, i) => ({
+    version: v,
+    date: iso((i * 30 + 2) * DAY).slice(0, 10),
+    notes: i === 2 ? ["No change list is published for this release"] : i === 1 ? ["See the full release notes for the changes"] : ["Improved code for unpacking archives", "Some bugs were fixed"],
+    notesUrl: i === 2 ? null : "https://example.com/release-notes",
+    size: null,
+    installed: v === have,
+    latest: i === 0,
+    prerelease: false,
+  }));
+}
+
 function versionsFor(a: AppEntry): VersionInfo[] {
   const list: VersionInfo[] = [];
+  if (a.source === "other") return otherVersions(a.id);
   if (a.source === "tools") {
     const key = a.id.split(":")[1];
     return toolsVersions(key, [a.version], key === "freecad" || key === "godot" || key === "unity" ? a.version : undefined);
@@ -849,9 +884,13 @@ const handlers: H = {
     return a ? clone(versionsFor(a)) : [];
   },
   get_catalog: () => clone(catalogNow().filter((e) => settings.showInstalledInGetApps || !e.installed)),
+  search_other_apps: ({ query }) =>
+    OTHER_SEARCH.filter((e) => e.name.toLowerCase().includes(query.toLowerCase()) || e.id.toLowerCase().includes(query.toLowerCase())).map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id) }))
+      .filter((e) => settings.showInstalledInGetApps || !e.installed),
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
     refreshedLater(id);
+    if (id.startsWith("other:")) return otherVersions(id);
     const cat = CATALOG.find((x) => x.id === id);
     if (!cat) return [];
     if (cat.source === "tools") {

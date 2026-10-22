@@ -25,6 +25,8 @@ export interface Commands {
   get_catalog: { args: {}; ret: CatalogEntry[] };
   /** Versions that can be installed for a catalog entry (newest first). */
   catalog_versions: { args: { id: string }; ret: VersionInfo[] };
+  /** Packages of the winget catalog matching a Get apps search (Other apps on only). */
+  search_other_apps: { args: { query: string }; ret: CatalogEntry[] };
 
   pause_job: { args: { jobId: string }; ret: void };
   resume_job: { args: { jobId: string }; ret: void };

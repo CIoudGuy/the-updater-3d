@@ -13,7 +13,7 @@
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
   import { call, on, send } from "../lib/api";
-  import { store, statusLabel } from "../lib/store.svelte";
+  import { OTHER_NOTE, store, statusLabel } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { router, appHref } from "../lib/router.svelte";
   import { installApp, openApp, updateOne } from "../lib/actions";
@@ -25,9 +25,10 @@
 
   let { id }: { id: string } = $props();
 
-  const FROM: Record<string, string> = { Adobe: "from Creative Cloud", "Craft apps": "from ArtCraft", Blender: "from blender.org", "More apps": "from the makers" };
+  const FROM: Record<string, string> = { Adobe: "from Creative Cloud", "Craft apps": "from ArtCraft", Blender: "from blender.org", "More apps": "from the makers", "Other apps": "from Microsoft's winget catalog" };
 
-  const c = $derived(ui.catalog?.find((x) => x.id === id));
+  // a package found by a search is not in the catalog list
+  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? ui.otherFound.find((x) => x.id === id));
   // Only a running install of this entry shows progress, like the card in the list.
   const job = $derived.by(() => {
     const j = store.jobByApp.get(id);
@@ -247,7 +248,7 @@
           {#if c.prerelease}<dt>Release</dt><dd>Pre-release</dd>{/if}
         </dl>
         <span class="hint">
-          {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "tools"}FreeCAD, Godot and Unity install next to your other versions. OBS Studio and Krita are updated in place. Your projects and settings stay as they are.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
+          {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "tools"}FreeCAD, Godot and Unity install next to your other versions. OBS Studio and Krita are updated in place. Your projects and settings stay as they are.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else if c.source === "other"}{OTHER_NOTE} Installed silently with the publisher's own installer, as the catalog lists it. Your settings stay as they are.{:else}Your settings stay as they are.{/if}
           {#if c.prerelease} Pre-release builds can be unstable. Do not rely on them for important work.{/if}
         </span>
       </aside>

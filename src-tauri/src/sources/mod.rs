@@ -4,7 +4,9 @@
 pub mod adobe;
 pub mod blender;
 pub mod craft;
+pub mod other;
 pub mod tools;
+pub mod winget;
 
 use crate::model::{JobKind, Source};
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,9 @@ pub enum SourceData {
     /// OBS Studio, Krita, FreeCAD, Godot, Unity. `series` is what makes an installed copy unique
     /// for apps that install side by side (FreeCAD "1.1", Godot "4.7.2", Unity "6000.3.27f1").
     Tools { key: String, series: String },
+    /// Matched from the winget catalog: the package, how it was matched and the uninstall list
+    /// entry it was matched from.
+    Other { pkg: String, how: other::How, entry: Box<crate::winutil::UninstallEntry>, upgrade_code: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
