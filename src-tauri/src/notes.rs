@@ -14,6 +14,135 @@ pub struct Notes {
     pub lines: Vec<String>,
 }
 
+// Change lists are plain lines. A line starting with "# ", "## " or "### " is a section heading
+// (biggest first); the window shows those as headings and every other line as a bullet.
+
+/// A page fragment in reading order: its h2/h3/h4 headings as "## " / "### " lines and every
+/// list item and paragraph as a line, with commit and issue references removed.
+pub fn outline(fragment: &str) -> Vec<String> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static TOKEN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<(h[2-4]|li|p)\b[^>]*>(.*?)</(?:h[2-4]|li|p)>").unwrap());
+    static REFS: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s*[\(\[]\s*(?:(?:#\d+|[0-9a-f]{7,12})\s*,?\s*)+[\)\]]").unwrap());
+    let mut out: Vec<String> = Vec::new();
+    for c in TOKEN.captures_iter(fragment) {
+        let text = strip_tags(&c[2]);
+        let text = REFS.replace_all(&text, "").trim().trim_end_matches('.').trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let line = match &c[1] {
+            "h2" => format!("## {text}"),
+            "h3" | "h4" => format!("### {text}"),
+            // Image captions ("Before", "After") and other scraps are not notes.
+            _ if text.split_whitespace().count() < 3 => continue,
+            _ => text,
+        };
+        if out.last() != Some(&line) {
+            out.push(line);
+        }
+        if out.len() >= MAX_LINES {
+            break;
+        }
+    }
+    tidy_headings(out)
+}
+
+/// Drops headings with nothing under them (a heading followed by a heading of the same or a
+/// bigger level, or by the end of the list), so empty sections do not show.
+pub fn tidy_headings(lines: Vec<String>) -> Vec<String> {
+    let level = |s: &str| s.chars().take_while(|c| *c == '#').count();
+    let mut keep = vec![true; lines.len()];
+    // From the end, so a section whose subsections were all dropped is dropped too.
+    let mut next_kept: Option<usize> = None;
+    for i in (0..lines.len()).rev() {
+        let l = &lines[i];
+        if level(l) > 0 && l.chars().nth(level(l)) == Some(' ') {
+            let has_body = next_kept.is_some_and(|n| level(&lines[n]) == 0 || level(&lines[n]) > level(l));
+            if !has_body {
+                keep[i] = false;
+                continue;
+            }
+        }
+        next_kept = Some(i);
+    }
+    let mut out: Vec<String> = lines.into_iter().zip(keep).filter(|(_, k)| *k).map(|(l, _)| l).collect();
+    let is_heading = |s: &str| level(s) > 0 && s.chars().nth(level(s)) == Some(' ');
+    // One heading on top of everything ("What's Changed") says nothing.
+    if out.iter().filter(|l| is_heading(l)).count() == 1 && out.first().is_some_and(|l| is_heading(l)) {
+        out.remove(0);
+    }
+    // Top sections show as "## " whatever level the page used ("#### Improvements"); "# " stays
+    // for lists that group whole topics (Blender's release notes).
+    if let Some(min) = out.iter().filter(|l| is_heading(l)).map(|l| level(l)).min().filter(|m| *m > 2) {
+        for l in out.iter_mut().filter(|l| is_heading(l)) {
+            let lv = level(l) - (min - 2);
+            *l = format!("{} {}", "#".repeat(lv.min(3)), l[level(l)..].trim());
+        }
+    }
+    out
+}
+
+/// The full notes of a new Blender series (5.2.0): the release notes page's own lists
+/// (compatibility and the like) and every topic page it links to, as "# Topic" sections.
+pub async fn blender_major(series: &str) -> Notes {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static ARTICLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<article[^>]*>(.*?)</article>").unwrap());
+    static TOPIC: Lazy<Regex> = Lazy::new(|| Regex::new(r#"<a[^>]*href="([a-z_\-]+/)"[^>]*>([^<]{2,80})</a>"#).unwrap());
+    static RELEASED: Lazy<Regex> = Lazy::new(|| Regex::new(r"released on ([A-Z][a-z]+ \d{1,2}(?:st|nd|rd|th)?,? \d{4})").unwrap());
+    let base = format!("https://developer.blender.org/docs/release_notes/{series}/");
+    let Some(html) = page(&base).await else { return Notes { date: None, lines: vec![] } };
+    let article = ARTICLE.captures(&html).map(|c| c[1].to_string()).unwrap_or_default();
+    let date = RELEASED.captures(&strip_tags(&article)).and_then(|c| parse_date(&c[1]));
+    let topics: Vec<(String, String)> = TOPIC
+        .captures_iter(&article)
+        .map(|c| (c[1].to_string(), strip_tags(&c[2])))
+        .filter(|(href, _)| href != "bugfixes/" && href != "corrective_releases/")
+        .fold(Vec::new(), |mut acc, t| {
+            if !acc.iter().any(|(h, _): &(String, String)| *h == t.0) {
+                acc.push(t);
+            }
+            acc
+        });
+    let link_texts: Vec<String> = TOPIC.captures_iter(&article).map(|c| strip_tags(&c[2])).collect();
+    let mut lines: Vec<String> = Vec::new();
+    // The page's own sections (Compatibility...): not its intro ("was released on...", a link to
+    // blender.org) nor its lists of topic links.
+    let mut in_section = false;
+    for l in outline(&article) {
+        if l.starts_with("## ") {
+            in_section = !l.starts_with("## Bugfixes");
+            if in_section {
+                lines.push(l.replacen("## ", "# ", 1));
+            }
+            continue;
+        }
+        if in_section && !link_texts.iter().any(|t| *t == l) {
+            lines.push(l);
+        }
+    }
+    let pages = futures_util::future::join_all(topics.iter().map(|(href, _)| page_owned(format!("{base}{href}")))).await;
+    for ((_, name), html) in topics.iter().zip(pages) {
+        let Some(html) = html else { continue };
+        let body = ARTICLE.captures(&html).map(|c| c[1].to_string()).unwrap_or_default();
+        let items = outline(&body);
+        if items.is_empty() {
+            continue;
+        }
+        lines.push(format!("# {name}"));
+        // A topic's single top heading repeats the topic name ("Modeling" under "Modeling & UV").
+        let one_top = items.iter().filter(|l| l.starts_with("## ")).count() == 1 && items.first().is_some_and(|l| l.starts_with("## "));
+        lines.extend(items.into_iter().filter(|l| !(one_top && l.starts_with("## ") && name.starts_with(l.trim_start_matches("## ")))));
+    }
+    lines.truncate(MAX_LINES * 3);
+    Notes { date, lines }
+}
+
+async fn page_owned(url: String) -> Option<String> {
+    page(&url).await
+}
+
 fn strip_tags(s: &str) -> String {
     let re = regex::Regex::new(r"<[^>]+>").unwrap();
     let t = re.replace_all(s, "");
@@ -73,7 +202,20 @@ async fn page(url: &str) -> Option<String> {
 
 /// Blender bug-fix lists for one series, keyed by full version ("4.5.14").
 /// LTS series: blender.org/download/lts/<x-y>/. Others: the "corrective releases" docs page.
-pub async fn blender(series: &str) -> HashMap<String, Notes> {
+pub async fn blender(series: &str, with_major: bool) -> HashMap<String, Notes> {
+    let mut out = blender_fixes(series).await;
+    // The first release of the series has no fix list: its notes are the whole release notes.
+    let first = format!("{series}.0");
+    if with_major && !out.contains_key(&first) {
+        let m = blender_major(series).await;
+        if !m.lines.is_empty() {
+            out.insert(first, m);
+        }
+    }
+    out
+}
+
+async fn blender_fixes(series: &str) -> HashMap<String, Notes> {
     let mut out = HashMap::new();
     let lts_url = format!("https://www.blender.org/download/lts/{}/", series.replace('.', "-"));
     if let Some(html) = page(&lts_url).await {
@@ -302,6 +444,31 @@ mod tests {
         assert_eq!(krita_changelog(post), vec!["Fix layer thumbnails scaling when using display scaling", "Fix openening large exr files (Bug 525361)"]);
         assert!(krita_changelog("<html><title>404 Page not found | Krita</title><h2>Changelog</h2><ul><li>x</li></ul>").is_empty());
         assert!(krita_changelog("<html><h1>No list here</h1></html>").is_empty());
+    }
+
+    #[test]
+    fn release_pages_keep_their_sections() {
+        // Shape of a Blender topic page.
+        let html = r#"<h1>Blender 5.2 LTS: Modeling &amp; UV&para;</h1><h2>Modeling&para;</h2><h3>General&para;</h3><ul><li>"Circle" from the Loop Tools add-on is now built in as "To Circle".
+(<a href="x">d2fabc952a</a>)</li></ul><h3>3D Text&para;</h3><ul><li><p>Improved support for combining characters (<a>43e52c3892</a>, <a>73fa859c1f</a>).</p></li></ul><p>Before</p><h3>Empty&para;</h3><h2>UV&para;</h2><ul><li>Add Select by Winding operator (<a>1b97e5afe6</a>).</li></ul>"#;
+        assert_eq!(
+            outline(html),
+            vec![
+                "## Modeling",
+                "### General",
+                "\"Circle\" from the Loop Tools add-on is now built in as \"To Circle\"",
+                "### 3D Text",
+                "Improved support for combining characters",
+                "## UV",
+                "Add Select by Winding operator",
+            ]
+        );
+        // Sections left empty go, including a parent whose children all went.
+        let t = tidy_headings(vec!["# A".into(), "## B".into(), "# C".into(), "x".into(), "# D".into(), "y".into()]);
+        assert_eq!(t, vec!["# C", "x", "# D", "y"]);
+        // A lone heading on top of everything goes; deep headings are lifted to "## ".
+        assert_eq!(tidy_headings(vec!["## What's Changed".into(), "x".into()]), vec!["x"]);
+        assert_eq!(tidy_headings(vec!["#### Fixes".into(), "x".into(), "#### Improvements".into(), "y".into()]), vec!["## Fixes", "x", "## Improvements", "y"]);
     }
 
     #[test]

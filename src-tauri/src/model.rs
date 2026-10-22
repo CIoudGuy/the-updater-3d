@@ -263,6 +263,8 @@ pub struct Settings {
     pub blender_channel: String,
     pub blender_keep_patch_versions: bool,
     pub craft_prereleases: bool,
+    /// Get apps also lists apps that are already installed (off: only what you do not have)
+    pub show_installed_in_get_apps: bool,
     pub sources: Sources,
     pub parallel_downloads: u32,
     pub silent_elevation: bool,
@@ -294,6 +296,7 @@ impl Default for Settings {
             blender_channel: "beta".into(),
             blender_keep_patch_versions: false,
             craft_prereleases: false,
+            show_installed_in_get_apps: false,
             sources: Sources { adobe: true, craft: true, blender: true, tools: true },
             parallel_downloads: 2,
             silent_elevation: false,
@@ -359,6 +362,8 @@ mod tests {
         assert!(!s.sources.craft);
         assert!(s.sources.tools);
         assert!(s.godot_install_dir.ends_with("Programs\\Godot"));
+        // Get apps hides installed apps unless switched on.
+        assert!(!s.show_installed_in_get_apps);
         assert_eq!(Source::Tools.group(), "More apps");
         assert_eq!(serde_json::to_string(&Source::Tools).unwrap(), "\"tools\"");
     }

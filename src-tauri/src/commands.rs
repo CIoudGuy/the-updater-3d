@@ -92,7 +92,7 @@ pub async fn get_versions(core: C<'_>, app_id: String) -> Res<Vec<VersionInfo>> 
 
 #[tauri::command]
 pub fn get_catalog(core: C<'_>) -> Vec<CatalogEntry> {
-    core.catalog()
+    core.get_apps()
 }
 
 #[tauri::command]

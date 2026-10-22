@@ -216,7 +216,28 @@ const TOOLS_RELEASES: Record<string, { v: string; pre?: boolean; size: number; n
     { v: "33.0.0-rc3", pre: true, size: 186 * MB, notes: ["Fixed a crash when switching scene collections", "Improved NVENC rate control"] },
     { v: "32.2.2", size: 152 * MB, notes: ["Fixed an issue where plugins might not load properly on the first start after updating OBS on Windows"] },
     { v: "32.2.1", size: 152 * MB, notes: ["Fixed game capture failing after updating OBS if the previous hook was still in use"] },
-    { v: "32.2.0", size: 151 * MB, notes: ["Added a new audio monitoring device selector", "Updated the NVIDIA SDK"] },
+    {
+      v: "32.2.0",
+      size: 151 * MB,
+      notes: [
+        "## New features",
+        "Added a new audio monitoring device selector",
+        "Added per-source audio delay presets",
+        "Added a search box to the filters list",
+        "Added an option to remember the last used scene collection",
+        "### Encoding",
+        "Updated the NVIDIA SDK",
+        "Added AV1 support for AMD encoders",
+        "Improved rate control for HEVC",
+        "## Fixes",
+        "Fixed a crash when closing a projector",
+        "Fixed audio meters freezing after a device change",
+        "Fixed a leak when reloading browser sources",
+        "Fixed hotkeys not saving on some keyboards",
+        "Fixed scene transitions stuttering on high refresh displays",
+        "Fixed a crash on start when the profile folder is read only",
+      ],
+    },
   ],
   krita: [
     { v: "6.0.4.1", size: 167 * MB, notes: ["Fix a crash when opening the brush editor"] },
@@ -310,6 +331,7 @@ let settings: Settings = {
   blenderChannel: "beta",
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
+  showInstalledInGetApps: false,
   sources: { adobe: true, craft: true, blender: true, tools: true },
   parallelDownloads: 3,
   silentElevation: false,
@@ -826,7 +848,7 @@ const handlers: H = {
     refreshedLater(appId);
     return a ? clone(versionsFor(a)) : [];
   },
-  get_catalog: () => clone(catalogNow()),
+  get_catalog: () => clone(catalogNow().filter((e) => settings.showInstalledInGetApps || !e.installed)),
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
     refreshedLater(id);
