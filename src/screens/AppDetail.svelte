@@ -231,7 +231,7 @@
             <Btn variant="raised" size="md" disabled={!pick || !!job} title="{pickBack ? 'Roll back to' : 'Install'} {pick}  Ctrl Enter" onclick={doInstallPick}>{pickBack ? "Roll back" : "Install"}</Btn>
           </div>
           <span class="hint">
-            {#if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else if app.source === "other"}{OTHER_NOTE} Your settings stay as they are.{:else}Your settings stay as they are.{/if}
+            {#if sideBySide && !pickOpts.length}No other version is offered right now.{:else if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else if app.source === "other"}{OTHER_NOTE} Your settings stay as they are.{:else}Your settings stay as they are.{/if}
           </span>
         </div>
 
@@ -253,7 +253,9 @@
           <dd>{app.updatedAt ? dateLong(app.updatedAt) : "Not known"}</dd>
         </dl>
 
-        {#if isBlender}
+        {#if isBlender && app.channel === "beta"}
+          <!-- a pre-release copy has no bug-fix releases to keep -->
+        {:else if isBlender}
           <div class="keep">
             <div class="kt">
               <span id="keep-label" class="kn">Keep bug-fix versions</span>

@@ -58,6 +58,12 @@ pub fn install_version(core: C<'_>, app_id: String, version: String) -> Res<()> 
 }
 
 #[tauri::command]
+pub async fn prefs_preview(core: C<'_>, app_id: String) -> Res<Vec<crate::model::PrefsItem>> {
+    let c = core.inner().clone();
+    tokio::task::spawn_blocking(move || c.prefs_preview(&app_id)).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
 pub fn uninstall_app(core: C<'_>, app_id: String, remove_prefs: Option<bool>) -> Res<()> {
     core.inner().enqueue(JobRequest::Uninstall { app_id, remove_prefs: remove_prefs.unwrap_or(false) }).map(|_| ()).map_err(err)
 }
@@ -93,6 +99,11 @@ pub async fn get_versions(core: C<'_>, app_id: String) -> Res<Vec<VersionInfo>> 
 #[tauri::command]
 pub fn get_catalog(core: C<'_>) -> Vec<CatalogEntry> {
     core.get_apps()
+}
+
+#[tauri::command]
+pub fn get_catalog_entry(core: C<'_>, id: String) -> Option<CatalogEntry> {
+    core.catalog_entry(&id)
 }
 
 #[tauri::command]

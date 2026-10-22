@@ -509,7 +509,8 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool
         }
     }
     if let Some(b) = &feed.beta {
-        let inst = installed.iter().any(|i| i.id == format!("blender:{}-beta", b.series));
+        // The card offers every pre-release build: it counts as installed only when all of them are.
+        let inst = all_builds_installed(feed, installed);
         offer(format!("blender:{}-beta", b.series), format!("Blender {} {}", b.series, b.label), b.display(), b.size, "Pre-release builds for testing: alpha, beta and release candidates", true, inst, true);
     }
     if !feed.all_series.is_empty() {
@@ -531,6 +532,35 @@ fn prerelease_info(b: &Beta, latest: bool, installed: bool) -> VersionInfo {
     }
 }
 
+/// Every pre-release build on offer is installed (each copy's version ends with its build hash).
+fn all_builds_installed(feed: &Feed, installed: &[Installed]) -> bool {
+    !feed.builds.is_empty()
+        && feed.builds.iter().all(|b| {
+            installed.iter().any(|i| {
+                matches!(&i.data, SourceData::Blender { kind: BlenderKind::Beta, .. })
+                    && i.version.split_whitespace().last().is_some_and(|h| !h.is_empty() && b.build.starts_with(h))
+            })
+        })
+}
+
+/// Pre-release builds carry the release notes of their version as written so far (Blender keeps
+/// them for versions still in development), after the line that says which build it is.
+async fn with_notes_so_far(mut list: Vec<VersionInfo>) -> Vec<VersionInfo> {
+    let mut series: Vec<String> = list.iter().map(|v| version::series(v.version.split_whitespace().next().unwrap_or(""))).collect();
+    series.sort();
+    series.dedup();
+    let found = futures_util::future::join_all(series.iter().map(|s| async move { (s.clone(), crate::notes::blender_major(s).await) })).await;
+    for v in &mut list {
+        let s = version::series(v.version.split_whitespace().next().unwrap_or(""));
+        if let Some((_, n)) = found.iter().find(|(x, n)| *x == s && !n.lines.is_empty()) {
+            let head = v.notes.first().cloned().unwrap_or_default();
+            v.notes = vec![format!("{head}, with the release notes written so far")];
+            v.notes.extend(n.lines.iter().cloned());
+        }
+    }
+    list
+}
+
 /// Versions offered by the Get apps version picker for a Blender entry.
 pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>> {
     let key = id.trim_start_matches("blender:");
@@ -538,7 +568,7 @@ pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>>
         if feed.builds.is_empty() {
             return Err(anyhow!("No pre-release builds right now"));
         }
-        return Ok(feed.builds.iter().enumerate().map(|(i, b)| prerelease_info(b, i == 0, false)).collect());
+        return Ok(with_notes_so_far(feed.builds.iter().enumerate().map(|(i, b)| prerelease_info(b, i == 0, false)).collect()).await);
     }
     let to_info = |r: &Release, latest: bool| {
         let mut v = release_info(&version::series(&r.version), r, &HashMap::new());
@@ -578,18 +608,18 @@ pub async fn catalog_versions(id: &str, feed: &Feed) -> Result<Vec<VersionInfo>>
 pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>> {
     let (series, kind) = kind_of(inst);
     if kind == BlenderKind::Beta {
+        // Every pre-release build: one of another series installs next to this copy.
         let hash = inst.version.split_whitespace().last().unwrap_or("").to_string();
         let list: Vec<VersionInfo> = feed
             .builds
             .iter()
-            .filter(|b| b.series == series)
             .enumerate()
             .map(|(i, b)| prerelease_info(b, i == 0, !hash.is_empty() && b.build.starts_with(&hash)))
             .collect();
         if list.is_empty() {
             return Err(anyhow!("No pre-release builds of Blender {series} right now"));
         }
-        return Ok(list);
+        return Ok(with_notes_so_far(list).await);
     }
     let list = match feed.series.get(&series) {
         Some(l) => l.clone(),
@@ -886,6 +916,21 @@ mod tests {
         assert_eq!(l.version, "5.3.0 Beta 873fa96");
         i.version = "5.3.0 Beta 873fa96".into();
         assert_eq!(latest(&i, std::slice::from_ref(&i), &feed).unwrap().version, i.version);
+    }
+
+    #[test]
+    fn the_prerelease_card_stays_while_a_build_is_left_to_install() {
+        let mut feed = Feed::default();
+        feed.builds = vec![build("5.4.0", "Alpha", "9547657aaaaa"), build("5.3.0", "Beta", "1b53729bbbbb")];
+        feed.beta = Some(feed.builds[1].clone());
+        let mut beta53 = inst("5.3", "5.3.0 Beta 1b53729", BlenderKind::Beta);
+        beta53.id = "blender:5.3-beta".into();
+        // 5.3 Beta installed, 5.4 Alpha not: the card is still something to install.
+        let card = |inst: &[Installed]| catalog_entries(&feed, inst, true).into_iter().find(|e| e.id.ends_with("-beta")).unwrap();
+        assert!(!card(std::slice::from_ref(&beta53)).installed);
+        let mut alpha54 = inst("5.4", "5.4.0 Alpha 9547657", BlenderKind::Beta);
+        alpha54.id = "blender:5.4-beta".into();
+        assert!(card(&[beta53.clone(), alpha54]).installed);
     }
 
     #[test]

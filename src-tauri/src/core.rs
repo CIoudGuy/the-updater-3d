@@ -62,6 +62,8 @@ pub struct Core {
     wake: Notify,
     install_lock: tokio::sync::Mutex<()>,
     check_lock: tokio::sync::Mutex<()>,
+    /// A check was asked for while one ran: run once more when it ends
+    check_again: std::sync::atomic::AtomicBool,
     pub persisted: Mutex<Persisted>,
     jobs_dirty: std::sync::atomic::AtomicBool,
     /// "SAP@version" -> download size from the product manifest (the catalog often lacks it)
@@ -118,6 +120,7 @@ impl Core {
             wake: Notify::new(),
             install_lock: tokio::sync::Mutex::new(()),
             check_lock: tokio::sync::Mutex::new(()),
+            check_again: std::sync::atomic::AtomicBool::new(false),
             persisted: Mutex::new(persisted),
             jobs_dirty: std::sync::atomic::AtomicBool::new(false),
             adobe_sizes: Mutex::new(HashMap::new()),
@@ -452,12 +455,13 @@ impl Core {
         }
     }
 
-    /// Full check: refresh catalogs and feeds, rescan, notify about new updates.
+    /// Full check: refresh catalogs and feeds, rescan, notify about new updates. Asked for while
+    /// a check runs (a source was just switched on), it runs again right after that one.
     pub async fn check_now(self: &Arc<Self>, manual: bool) -> Result<()> {
-        let _guard = match self.check_lock.try_lock() {
-            Ok(g) => g,
-            Err(_) => return Ok(()),
-        };
+        coalesced(&self.check_lock, &self.check_again, || self.check_once(manual)).await.unwrap_or(Ok(()))
+    }
+
+    async fn check_once(self: &Arc<Self>, manual: bool) -> Result<()> {
         self.set_status(|s| {
             s.checking = true;
             if s.first_scan {
@@ -843,6 +847,20 @@ impl Core {
     pub fn get_apps(&self) -> Vec<CatalogEntry> {
         let show_installed = self.settings.read().show_installed_in_get_apps;
         self.catalog().into_iter().filter(|e| show_installed || !e.installed).collect()
+    }
+
+    /// What "Also delete settings and add-ons" would remove for this app, with sizes. Reads the
+    /// disk (folder sizes), so call it off the UI thread.
+    pub fn prefs_preview(&self, app_id: &str) -> Result<Vec<crate::model::PrefsItem>> {
+        let installed = self.st.lock().installed.clone();
+        let inst = installed.iter().find(|i| i.id == app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+        let rest: Vec<sources::Installed> = installed.iter().filter(|i| i.id != inst.id).cloned().collect();
+        Ok(crate::prefs::preview(&crate::prefs::steps(inst, &rest, &crate::prefs::Roots::system())))
+    }
+
+    /// One Get apps entry, installed or not (its page stays open after the install finishes).
+    pub fn catalog_entry(&self, id: &str) -> Option<CatalogEntry> {
+        self.catalog().into_iter().find(|e| e.id == id)
     }
 
     pub fn catalog(&self) -> Vec<CatalogEntry> {
@@ -2034,6 +2052,27 @@ mod notes_cache {
     }
 }
 
+/// Runs `f` unless a run is already going. A request that arrives during a run is not dropped:
+/// that run goes once more when it ends (with the settings as they are then), so switching a
+/// source on during a check still shows its apps.
+async fn coalesced<F, Fut, T>(lock: &tokio::sync::Mutex<()>, again: &std::sync::atomic::AtomicBool, f: F) -> Option<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let Ok(_guard) = lock.try_lock() else {
+        again.store(true, Ordering::SeqCst);
+        return None;
+    };
+    loop {
+        again.store(false, Ordering::SeqCst);
+        let r = f().await;
+        if !again.swap(false, Ordering::SeqCst) {
+            return Some(r);
+        }
+    }
+}
+
 /// The scheduler wakes every few seconds; most ticks do nothing.
 const TICK_SECS: u64 = 5;
 
@@ -2265,6 +2304,38 @@ mod tests {
         let parent_of_other = pf.join("Suite");
         assert_eq!(leftover_dir(&parent_of_other, &[parent_of_other.join("App")]), None);
         assert_eq!(leftover_dir(&PathBuf::from("C:\\"), &[]), None);
+    }
+
+    #[tokio::test]
+    async fn a_check_asked_for_during_a_check_runs_after_it() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::Arc;
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let again = Arc::new(AtomicBool::new(false));
+        let runs = Arc::new(AtomicU32::new(0));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        // A check is running (waiting on `gate`)...
+        let first = {
+            let (lock, again, runs, gate) = (lock.clone(), again.clone(), runs.clone(), gate.clone());
+            tokio::spawn(async move {
+                super::coalesced(&lock, &again, || {
+                    let (runs, gate) = (runs.clone(), gate.clone());
+                    async move {
+                        if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                            gate.notified().await;
+                        }
+                    }
+                })
+                .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // ...when Other apps is switched on: that request returns at once...
+        assert!(super::coalesced(&lock, &again, || async {}).await.is_none());
+        gate.notify_one();
+        first.await.unwrap();
+        // ...and the running check goes once more, so the new source is checked.
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]

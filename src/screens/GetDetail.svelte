@@ -21,14 +21,23 @@
   import { bytes, dateLong, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
-  import type { VersionInfo } from "../lib/types";
+  import type { CatalogEntry, VersionInfo } from "../lib/types";
 
   let { id }: { id: string } = $props();
 
   const FROM: Record<string, string> = { Adobe: "from Creative Cloud", "Craft apps": "from ArtCraft", Blender: "from blender.org", "More apps": "from the makers", "Other apps": "from Microsoft's winget catalog" };
 
-  // a package found by a search is not in the catalog list
-  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? ui.otherFound.find((x) => x.id === id));
+  // a package found by a search is not in the catalog list; an entry hidden because it is
+  // installed now (its install just finished on this page) is fetched on its own
+  let single = $state<CatalogEntry | null>(null);
+  const c = $derived(ui.catalog?.find((x) => x.id === id) ?? ui.otherFound.find((x) => x.id === id) ?? (single?.id === id ? single : undefined));
+  $effect(() => {
+    if (ui.catalog && !ui.catalog.some((x) => x.id === id) && !ui.otherFound.some((x) => x.id === id) && single?.id !== id) {
+      call("get_catalog_entry", { id }).then((e) => {
+        if (e) single = e;
+      });
+    }
+  });
   // Only a running install of this entry shows progress, like the card in the list.
   const job = $derived.by(() => {
     const j = store.jobByApp.get(id);

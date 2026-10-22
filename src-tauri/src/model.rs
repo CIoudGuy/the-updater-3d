@@ -86,6 +86,17 @@ pub struct CatalogEntry {
     pub pick_version: bool,
 }
 
+/// One thing "Also delete settings and add-ons" would remove, for the uninstall dialog.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefsItem {
+    /// Shown path: "AppData\Roaming\obs-studio", or a registry key "HKCU\Software\..."
+    pub path: String,
+    /// Bytes on disk (none for a registry key)
+    pub size: Option<u64>,
+    pub registry: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionInfo {
@@ -235,8 +246,8 @@ pub struct Sources {
     /// value for it, and must keep loading: it defaults to on.
     #[serde(default = "yes")]
     pub tools: bool,
-    /// Every other app, matched from the winget catalog. Off unless turned on.
-    #[serde(default)]
+    /// Every other app, matched from the winget catalog. On by default.
+    #[serde(default = "yes")]
     pub other: bool,
 }
 
@@ -303,7 +314,7 @@ impl Default for Settings {
             blender_keep_patch_versions: false,
             craft_prereleases: false,
             show_installed_in_get_apps: false,
-            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: false },
+            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true },
             parallel_downloads: 2,
             silent_elevation: false,
             ui_zoom: 1.0,
@@ -373,8 +384,9 @@ mod tests {
         assert_eq!(Source::Tools.group(), "More apps");
         assert_eq!(serde_json::to_string(&Source::Tools).unwrap(), "\"tools\"");
         // Other apps came later still: off for old settings and for new ones.
-        assert!(!s.sources.other);
-        assert!(!Settings::default().sources.other);
+        // Other apps is on by default.
+        assert!(s.sources.other);
+        assert!(Settings::default().sources.other);
         assert_eq!(Source::Other.group(), "Other apps");
         assert_eq!(serde_json::to_string(&Source::Other).unwrap(), "\"other\"");
     }

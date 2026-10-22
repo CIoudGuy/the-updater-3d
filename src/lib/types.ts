@@ -108,6 +108,15 @@ export interface JobError {
   logPath: string | null;
 }
 
+/** One thing "Also delete settings and add-ons" would remove */
+export interface PrefsItem {
+  /** "AppData\Roaming\obs-studio", or a registry key "HKCU\Software\..." */
+  path: string;
+  /** bytes on disk, null for a registry key */
+  size: number | null;
+  registry: boolean;
+}
+
 export interface Job {
   id: string;
   appId: string;

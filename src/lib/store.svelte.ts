@@ -27,7 +27,7 @@ const defaultSettings: Settings = {
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   showInstalledInGetApps: false,
-  sources: { adobe: true, craft: true, blender: true, tools: true, other: false },
+  sources: { adobe: true, craft: true, blender: true, tools: true, other: true },
   parallelDownloads: 3,
   silentElevation: false,
   uiZoom: 1,

@@ -149,3 +149,22 @@ fn craft_and_obs_settings_and_add_ons() {
     assert!(matches!(&st[1], Step::RemoveDir { elevated: true, .. }));
     cleanup(&r);
 }
+
+#[test]
+fn the_dialog_lists_what_goes_with_sizes() {
+    let r = roots("preview");
+    let cfg = mk(r.roaming.join("obs-studio"));
+    std::fs::write(cfg.join("global.ini"), vec![b'x'; 1000]).unwrap();
+    std::fs::create_dir_all(cfg.join("plugin_config")).unwrap();
+    std::fs::write(cfg.join("plugin_config").join("a.json"), vec![b'x'; 500]).unwrap();
+    let obs = app("tools:obs", "OBS Studio", "32.2.2", None, tools("obs", "32.2.2"));
+    let items = preview(&steps(&obs, &[], &r));
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].size, Some(1500));
+    assert!(items[0].path.ends_with("obs-studio") && !items[0].registry);
+    // A registry key is listed without a size.
+    let reg = preview(&[Step::RemoveUserRegKey { path: r"Software\Unity Technologies\Unity Editor 5.x".into(), label: String::new() }]);
+    assert_eq!(reg[0].path, r"HKCU\Software\Unity Technologies\Unity Editor 5.x");
+    assert!(reg[0].registry && reg[0].size.is_none());
+    cleanup(&r);
+}
