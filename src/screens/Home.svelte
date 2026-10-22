@@ -383,7 +383,7 @@
         {#each svc as s, i (s.name)}
           <div class="srow" use:enter={i}>
             <span class="rcol"><span class="rname">{s.displayName}</span><span class="rsub">{s.description}</span></span>
-            <span class="fres" style="color:var(--err)"><Dab color="#D9706A" />{s.running ? "Running" : "Not running"}</span>
+            <span class="fres" style:color={s.running ? "var(--ok)" : "var(--err)"}><Dab color={s.running ? "var(--ok)" : "#D9706A"} />{s.running ? "Running" : "Not running"}</span>
           </div>
         {/each}
         {#if otherUpdates > 0}

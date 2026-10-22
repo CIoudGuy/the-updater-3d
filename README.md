@@ -17,10 +17,11 @@ Built with [Tauri 2](https://tauri.app): a Rust backend and a Svelte 5 interface
 
 **Adobe.** Installed apps come from Adobe's own install database
 (`Common Files\Adobe\caps\hdpim.db`), checked against the files on disk, so leftovers of deleted
-apps are not listed. Latest versions come from the public Creative Cloud product catalog. Installs
-download the packages from Adobe's CDN and run Adobe's own installer (`HDBox\Setup.exe`) with a
-driver file, the way Adobe's admin packages install. If that fails, updates fall back to Adobe's
-Remote Update Manager. Creative Cloud stays installed for sign-in and licensing.
+apps are not listed. Latest versions come from the public Creative Cloud product catalog. Updates
+run through Adobe's Remote Update Manager (Adobe's admin updater), and new apps or other versions
+are handed to Creative Cloud. Creative Cloud itself updates with Adobe's public setup, accepted only
+with a valid Adobe Inc. signature since Adobe publishes no checksum for it. Creative Cloud stays
+installed for sign-in and licensing.
 
 **Blender.** Each installed release series (4.2, 4.5, 5.2...) is its own entry. New series install
 next to the old ones; bug-fix releases update their series in place, or install as a separate

@@ -1,6 +1,6 @@
 [package]
 name = "the-updater-3d"
-version = "1.0.6"
+version = "1.0.7"
 description = "Updates Adobe apps, Blender and the Craft apps"
 edition = "2021"
 rust-version = "1.90"
@@ -59,6 +59,10 @@ features = [
   "Win32_Security_Authorization",
   "Win32_System_TaskScheduler",
   "Win32_System_Variant",
+  "Win32_Security_Cryptography",
+  "Win32_Security_WinTrust",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
 ]
 
 [profile.release]

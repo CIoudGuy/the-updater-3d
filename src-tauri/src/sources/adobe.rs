@@ -18,6 +18,12 @@ use std::time::Duration;
 
 const CATALOG_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v6/products/all?_type=xml&channel=ccm&channel=sti&platform=win32,win64&productType=Desktop";
 const APP_JSON_URL: &str = "https://cdn-ffc.oobesaas.adobe.com/core/v3/applications";
+/// Adobe's public Creative Cloud setup (the one the website hands out). It always installs the
+/// newest Creative Cloud, over an older one too. Adobe publishes no checksum, so the download must
+/// carry a valid Adobe Inc. signature instead.
+const CC_SETUP_URL: &str = "https://prod-rel-ffc-ccm.oobesaas.adobe.com/adobe-ffc-external/core/v1/wam/download?sapCode=KCCC&productName=Creative%20Cloud&os=win";
+const CC_SIGNER: &str = "Adobe Inc.";
+const CC_NOTES_URL: &str = "https://helpx.adobe.com/creative-cloud/apps/whats-new/release-notes.html";
 const RUM_URL: &str = "https://deploymenttools.acp.adobeoobe.com/RUM/Win/RemoteUpdateManager.zip";
 const APP_ID_HEADER: (&str, &str) = ("x-adobe-app-id", "accc-apps-panel-desktop");
 const API_KEY_HEADER: (&str, &str) = ("x-api-key", "CC_HD_ESD_1_0");
@@ -91,6 +97,7 @@ pub fn known(sap: &str) -> Option<(&'static str, &'static str, &'static str, &'s
         "DRWV" => ("Dw", "#FF61F6", "#2A0028", "Dreamweaver"),
         "CHAR" => ("Ch", "#9999FF", "#00005B", "Character Animator"),
         "SBSTP" => ("Pt", "#FF5C6C", "#2A0A10", "Substance 3D Painter"),
+        "KCCC" => ("Cc", "#FF5A5A", "#2A0A0A", "Creative Cloud"),
         "SBSTD" => ("Ds", "#F0A33A", "#2B1A05", "Substance 3D Designer"),
         "SBSTA" => ("Sa", "#4FD8C4", "#062A26", "Substance 3D Sampler"),
         "STGR" => ("St", "#C08BFF", "#22093D", "Substance 3D Stager"),
@@ -298,7 +305,7 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
         if !e.uninstall_string.contains("--sapCode=") {
             continue;
         }
-        let args = winutil::split_command_line(&e.uninstall_string);
+        let args = winutil::split_program_line(&e.uninstall_string);
         let get = |k: &str| args.iter().find_map(|a| a.strip_prefix(&format!("--{k}="))).map(String::from).unwrap_or_default();
         un.insert((get("sapCode"), get("productVersion")), e);
     }
@@ -354,7 +361,7 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
             version: p.version.clone(),
             install_dir: install_dir.clone(),
             exe,
-            uninstall: entry.map(|e| winutil::split_command_line(&e.uninstall_string)),
+            uninstall: entry.map(|e| winutil::split_program_line(&e.uninstall_string)),
             updated_at,
             size_hint: entry.map(|e| e.estimated_size_kb * 1024).filter(|s| *s > 0),
             tagline,
@@ -370,8 +377,44 @@ pub fn scan(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) ->
             },
         });
     }
+    if let Some(cc) = creative_cloud(catalog, uninstall) {
+        out.push(cc);
+    }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// The Creative Cloud desktop app, so it updates like the apps it manages. It cannot be removed
+/// here (Adobe's uninstaller refuses while Adobe apps are installed).
+fn creative_cloud(catalog: Option<&Catalog>, uninstall: &[winutil::UninstallEntry]) -> Option<Installed> {
+    let e = uninstall.iter().find(|e| e.display_name == "Adobe Creative Cloud" && !e.display_version.is_empty())?;
+    let dir = [paths::program_files(), paths::program_files_x86()]
+        .into_iter()
+        .map(|p| p.join("Adobe\\Adobe Creative Cloud"))
+        .find(|d| d.join("ACC\\Creative Cloud.exe").exists())?;
+    let exe = dir.join("ACC\\Creative Cloud.exe");
+    let (code, fg, bg) = mark_for("KCCC", "Creative Cloud");
+    Some(Installed {
+        id: format!("adobe:KCCC:{}", version::major(&e.display_version)),
+        source: Source::Adobe,
+        name: "Creative Cloud".into(),
+        code,
+        fg,
+        bg,
+        version: e.display_version.clone(),
+        install_dir: Some(dir),
+        updated_at: winutil::install_date_iso(&e.install_date)
+            .or_else(|| exe.metadata().ok().and_then(|m| m.modified().ok()).map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())),
+        exe: Some(exe),
+        uninstall: None,
+        size_hint: Some(e.estimated_size_kb * 1024).filter(|s| *s > 0),
+        tagline: catalog.and_then(|c| c.for_sap("KCCC").find_map(|x| x.tagline.clone())),
+        channel: None,
+        missing: false,
+        read_only: false,
+        icon_remote: catalog.and_then(|c| c.icon("KCCC")).map(String::from),
+        data: SourceData::Adobe { sap: "KCCC".into(), codex: e.display_version.clone(), platform: "win64".into(), product_name: "Adobe Creative Cloud".into() },
+    })
 }
 
 fn sap_of(i: &Installed) -> (&str, &str) {
@@ -465,7 +508,7 @@ pub fn versions(inst_sap: &str, platform: &str, installed_version: Option<&str>,
             version: p.version.clone(),
             date: None,
             notes: vec![],
-            notes_url: release_notes_url(inst_sap).or_else(|| p.whats_new.clone()),
+            notes_url: release_notes_url(inst_sap).or_else(|| p.whats_new.clone()).or_else(|| (inst_sap == "KCCC").then(|| CC_NOTES_URL.to_string())),
             size: p.size,
             installed: installed_version.is_some_and(|v| version::cmp(v, &p.version).is_eq()),
             latest: newest.as_deref() == Some(p.version.as_str()),
@@ -606,6 +649,9 @@ pub async fn plan_install(req: InstallRequest<'_>, cat: &Catalog) -> Result<Plan
         .cloned()
         .ok_or_else(|| anyhow!("Adobe does not offer {} {} any more", req.name, req.version))?;
     let new_id = format!("adobe:{}:{}", product.sap, version::major(&product.version));
+    if product.sap == "KCCC" {
+        return Ok(plan_creative_cloud(&req, &product.version));
+    }
     let block_dirs: Vec<PathBuf> = req.current.and_then(|c| c.install_dir.clone()).into_iter().collect();
     // An update to the newest version of an installed app: Adobe's Remote Update Manager.
     let newest = cat.newest(req.sap, req.platform, None).map(|p| p.version.clone());
@@ -628,6 +674,33 @@ pub async fn plan_install(req: InstallRequest<'_>, cat: &Catalog) -> Result<Plan
     })
 }
 
+/// Update Creative Cloud itself: Adobe's signed setup, run silently through the admin helper.
+fn plan_creative_cloud(req: &InstallRequest<'_>, to_version: &str) -> Plan {
+    let dest = paths::downloads().join("creative-cloud").join(format!("Creative_Cloud_Set-Up_{to_version}.exe"));
+    Plan {
+        app_id: req.app_id.clone(),
+        kind: req.kind,
+        name: req.name.clone(),
+        to_version: to_version.to_string(),
+        downloads: vec![Download { url: CC_SETUP_URL.into(), dest: dest.clone(), size: None, sha256: None, md5: None, signer: Some(CC_SIGNER.into()), headers: vec![] }],
+        steps: vec![Step::Run {
+            exe: dest.clone(),
+            args: vec!["--silent".into()],
+            cwd: None,
+            ok_codes: vec![0],
+            elevated: true,
+            label: "Updating Creative Cloud".into(),
+            log: None,
+        }],
+        block_dirs: vec![],
+        block_names: vec![],
+        // The catalog says "6.11.0"; the installed version reads "6.11.0.478.6".
+        verify: Verify::Version { app_id: format!("adobe:KCCC:{}", version::major(to_version)), version: to_version.to_string() },
+        fallback: None,
+        cleanup: vec![dest],
+    }
+}
+
 /// Update through Adobe's Remote Update Manager (official admin tool, downloads by itself).
 pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dirs: Vec<PathBuf>) -> Plan {
     let dir = paths::downloads().join("rum");
@@ -638,7 +711,7 @@ pub fn plan_rum(sap: &str, app_id: &str, name: &str, to_version: &str, block_dir
         kind: JobKind::Update,
         name: name.to_string(),
         to_version: to_version.to_string(),
-        downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, md5: None, headers: vec![] }],
+        downloads: vec![Download { url: RUM_URL.into(), dest: zip.clone(), size: None, sha256: None, md5: None, signer: None, headers: vec![] }],
         steps: vec![
             Step::ExtractZip { zip, dest: exe_dir.clone(), strip_root: false, elevated: false, label: "Preparing Adobe Remote Update Manager".into() },
             Step::Run {

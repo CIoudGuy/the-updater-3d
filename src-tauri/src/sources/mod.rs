@@ -72,6 +72,9 @@ pub struct Download {
     /// Lowercase hex MD5, for vendors that only publish that (Unity).
     #[serde(default)]
     pub md5: Option<String>,
+    /// Required Authenticode signer ("Adobe Inc."), for vendors that publish no checksum.
+    #[serde(default)]
+    pub signer: Option<String>,
     pub headers: Vec<(String, String)>,
 }
 

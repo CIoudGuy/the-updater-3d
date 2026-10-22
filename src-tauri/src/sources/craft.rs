@@ -257,9 +257,9 @@ pub fn scan(uninstall: &[winutil::UninstallEntry]) -> Vec<Installed> {
         let mut uninstall_cmd = if let Some(code) = &msi_code {
             Some(vec!["msiexec.exe".to_string(), "/x".into(), code.clone(), "/qn".into(), "/norestart".into()])
         } else if !e.quiet_uninstall_string.is_empty() {
-            Some(winutil::split_command_line(&e.quiet_uninstall_string))
+            Some(winutil::split_program_line(&e.quiet_uninstall_string))
         } else if !e.uninstall_string.is_empty() {
-            let mut v = winutil::split_command_line(&e.uninstall_string);
+            let mut v = winutil::split_program_line(&e.uninstall_string);
             v.push("/S".into());
             Some(v)
         } else {
@@ -428,7 +428,7 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
         kind,
         name: a.name.to_string(),
         to_version: r.version.clone(),
-        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, headers: vec![] }],
+        downloads: vec![Download { url: asset.url.clone(), dest: dest.clone(), size: asset.size, sha256: sha, md5: None, signer: None, headers: vec![] }],
         steps,
         block_dirs: current.and_then(|c| c.install_dir.clone()).into_iter().collect(),
         block_names: vec![format!("{}.exe", a.key)],

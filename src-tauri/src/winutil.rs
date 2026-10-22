@@ -334,6 +334,28 @@ pub fn service_running(name: &str) -> Option<bool> {
 }
 
 /// Split a Windows command line into the program and its arguments (CommandLineToArgvW rules).
+/// Split an uninstall command from the registry. Vendors sometimes leave the program path
+/// unquoted even with spaces in it (Unity: `C:\Program Files\Unity\...\Uninstall.exe`); Windows
+/// still runs those, reading the program up to its `.exe`, so do the same.
+pub fn split_program_line(s: &str) -> Vec<String> {
+    let t = s.trim();
+    if t.starts_with('"') {
+        return split_command_line(t);
+    }
+    let low = t.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = low[from..].find(".exe") {
+        let end = from + i + 4;
+        if end == t.len() || matches!(t.as_bytes()[end], b' ' | b'\t' | b',') {
+            let mut v = vec![t[..end].to_string()];
+            v.extend(split_command_line(&t[end..]));
+            return v;
+        }
+        from = end;
+    }
+    split_command_line(t)
+}
+
 pub fn split_command_line(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -511,6 +533,47 @@ pub fn run_task(name: &str) -> bool {
     with_task_service(|svc| unsafe { svc.GetFolder(&windows::core::BSTR::from("\\"))?.GetTask(&windows::core::BSTR::from(name))?.Run(&VARIANT::default()) }).is_ok()
 }
 
+/// The signer's name ("Adobe Inc.") when Windows trusts the file's Authenticode signature (the
+/// check behind "Verified publisher"), for downloads whose vendor publishes no checksum.
+pub fn authenticode_signer(file: &Path) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Security::Cryptography::{CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE};
+    use windows::Win32::Security::WinTrust::*;
+    let path = HSTRING::from(file.as_os_str());
+    let mut info = WINTRUST_FILE_INFO { cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32, pcwszFilePath: PCWSTR(path.as_ptr()), ..Default::default() };
+    let mut data = WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_NONE,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        ..Default::default()
+    };
+    data.Anonymous.pFile = &mut info;
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    unsafe {
+        let trusted = WinVerifyTrust(HWND(-1isize as *mut _), &mut action, (&mut data as *mut WINTRUST_DATA).cast()) == 0;
+        let mut name = None;
+        if trusted {
+            let prov = WTHelperProvDataFromStateData(data.hWVTStateData);
+            if !prov.is_null() {
+                let sgnr = WTHelperGetProvSignerFromChain(prov, 0, false, 0);
+                if !sgnr.is_null() && (*sgnr).csCertChain > 0 && !(*sgnr).pasCertChain.is_null() {
+                    let cert = (*(*sgnr).pasCertChain).pCert;
+                    let mut buf = [0u16; 256];
+                    let n = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, Some(&mut buf));
+                    if n > 1 {
+                        name = Some(String::from_utf16_lossy(&buf[..n as usize - 1]));
+                    }
+                }
+            }
+        }
+        data.dwStateAction = WTD_STATEACTION_CLOSE;
+        let _ = WinVerifyTrust(HWND(-1isize as *mut _), &mut action, (&mut data as *mut WINTRUST_DATA).cast());
+        name
+    }
+}
+
 /// Ask a process to close, like clicking its X: WM_CLOSE to each of its top-level windows.
 pub fn close_process_windows(pid: u32) {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -546,6 +609,10 @@ pub fn kill_process(pid: u32) {
 mod tests {
     use super::*;
 
+    fn paths_x86() -> std::path::PathBuf {
+        crate::paths::program_files_x86()
+    }
+
     #[test]
     fn reads_versions_and_account_without_helper_programs() {
         // notepad.exe always carries a numeric version resource.
@@ -554,6 +621,16 @@ mod tests {
         assert!(v.split('.').count() == 3 && v.split('.').all(|p| p.parse::<u32>().is_ok()), "{v}");
         assert!(current_user_sid().unwrap().starts_with("S-1-5-"));
         assert!(!task_exists("The Updater 3D test task that does not exist"));
+        // Edge carries an embedded Microsoft signature (notepad's is in a Windows catalog, not the
+        // file); an unsigned file has none.
+        let edge = paths_x86().join(r"Microsoft\Edge\Application\msedge.exe");
+        if edge.exists() {
+            assert_eq!(authenticode_signer(&edge).as_deref().map(|n| n.starts_with("Microsoft")), Some(true));
+        }
+        let plain = std::env::temp_dir().join(format!("u3d-unsigned-{}.exe", std::process::id()));
+        std::fs::write(&plain, b"MZ not signed").unwrap();
+        assert_eq!(authenticode_signer(&plain), None);
+        let _ = std::fs::remove_file(&plain);
     }
 
     #[test]
@@ -569,5 +646,19 @@ mod tests {
     fn quotes_round_trip() {
         let args = vec!["--a=1".to_string(), "C:\\Program Files\\x y\\".to_string(), "say \"hi\"".to_string()];
         assert_eq!(split_command_line(&join_args(&args)), args);
+    }
+
+    #[test]
+    fn unquoted_program_paths_with_spaces_stay_whole() {
+        // Unity's uninstall entry, exactly as it is in the registry.
+        let v = split_program_line(r"C:\Program Files\Unity\Hub\Editor\6000.3.27f1\Editor\Uninstall.exe");
+        assert_eq!(v, vec![r"C:\Program Files\Unity\Hub\Editor\6000.3.27f1\Editor\Uninstall.exe".to_string()]);
+        let v = split_program_line(r"C:\Program Files\OBS Studio\uninstall.exe /S");
+        assert_eq!(v, vec![r"C:\Program Files\OBS Studio\uninstall.exe".to_string(), "/S".to_string()]);
+        // Icon paths: "file.exe,0".
+        assert_eq!(split_program_line(r"C:\Program Files\X Y\x.exe,0")[0], r"C:\Program Files\X Y\x.exe");
+        // Quoted lines are unchanged.
+        assert_eq!(split_program_line(r#""C:\Program Files\A\u.exe" --mode=3"#), vec![r"C:\Program Files\A\u.exe".to_string(), "--mode=3".to_string()]);
+        assert_eq!(split_program_line("MsiExec.exe /X{ABC}"), vec!["MsiExec.exe".to_string(), "/X{ABC}".to_string()]);
     }
 }

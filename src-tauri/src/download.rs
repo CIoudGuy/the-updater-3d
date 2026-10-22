@@ -157,6 +157,13 @@ pub fn verify(d: &Download) -> Result<()> {
             bail!("Checksum mismatch: expected MD5 {want}, got {got}");
         }
     }
+    if let Some(want) = &d.signer {
+        match crate::winutil::authenticode_signer(&d.dest) {
+            Some(got) if &got == want => {}
+            Some(got) => bail!("Signature check failed: signed by {got}, not {want}"),
+            None => bail!("Signature check failed: not validly signed by {want}"),
+        }
+    }
     Ok(())
 }
 
@@ -165,7 +172,7 @@ mod tests {
     use super::*;
 
     fn dl(dest: std::path::PathBuf, size: Option<u64>, md5: Option<String>) -> Download {
-        Download { url: String::new(), dest, size, sha256: None, md5, headers: vec![] }
+        Download { url: String::new(), dest, size, sha256: None, md5, signer: None, headers: vec![] }
     }
 
     #[test]

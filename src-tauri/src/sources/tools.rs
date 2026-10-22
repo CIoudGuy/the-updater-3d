@@ -527,7 +527,7 @@ fn needs_admin(p: &Path) -> bool {
 
 /// The folder of the program named first in an uninstall command or icon path.
 fn exe_dir_of(cmd: &str) -> Option<PathBuf> {
-    let first = winutil::split_command_line(cmd).into_iter().next()?;
+    let first = winutil::split_program_line(cmd).into_iter().next()?;
     let first = first.split(',').next().unwrap_or("").trim_matches('"').to_string();
     if !first.to_ascii_lowercase().ends_with(".exe") {
         return None;
@@ -538,9 +538,9 @@ fn exe_dir_of(cmd: &str) -> Option<PathBuf> {
 /// The quiet uninstall command of an uninstall list entry (NSIS style: `/S` is silent).
 fn uninstall_cmd(e: &winutil::UninstallEntry) -> Option<Vec<String>> {
     let v = if !e.quiet_uninstall_string.is_empty() {
-        winutil::split_command_line(&e.quiet_uninstall_string)
+        winutil::split_program_line(&e.quiet_uninstall_string)
     } else if !e.uninstall_string.is_empty() {
-        let mut v = winutil::split_command_line(&e.uninstall_string);
+        let mut v = winutil::split_program_line(&e.uninstall_string);
         if !v.iter().any(|a| a.eq_ignore_ascii_case("/S")) {
             v.push("/S".into());
         }
@@ -1047,7 +1047,7 @@ fn run_installer(dest: &Path, args: Vec<String>, elevated: bool, label: String) 
 pub fn build_plan(key: &str, rel: &Rel, kind: JobKind, current: Option<&Installed>, ctx: &Ctx<'_>) -> Result<Plan> {
     let d = def(key).ok_or_else(|| anyhow!("unknown app {key}"))?;
     let dest = paths::downloads().join("tools").join(&rel.file);
-    let dl = Download { url: rel.url.clone(), dest: dest.clone(), size: rel.size, sha256: rel.sha256.clone(), md5: rel.md5.clone(), headers: vec![] };
+    let dl = Download { url: rel.url.clone(), dest: dest.clone(), size: rel.size, sha256: rel.sha256.clone(), md5: rel.md5.clone(), signer: None, headers: vec![] };
     let label = format!("Installing {} {}", d.name, rel.version);
     let current_dir = current.and_then(|c| c.install_dir.clone());
     let repair = kind == JobKind::Repair;

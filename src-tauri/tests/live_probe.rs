@@ -173,3 +173,44 @@ async fn more_apps_detection_latest_versions_and_catalog_lists() {
     println!("krita plan: size {:?} sha256 {:?}", plan.downloads[0].size, plan.downloads[0].sha256);
     assert!(plan.downloads[0].size.is_some() && plan.downloads[0].sha256.is_some());
 }
+
+/// Creative Cloud itself: found from its uninstall entry, the catalog has a newer version, and the
+/// update plan downloads Adobe's setup and accepts it only with a valid Adobe signature. Nothing
+/// is installed: the setup is downloaded into a temp folder, checked and deleted.
+#[tokio::test]
+#[ignore]
+async fn creative_cloud_updates_with_adobes_signed_setup() {
+    use updater_lib::download::{self, Control, Outcome, Progress, Throttle};
+    let un = winutil::uninstall_entries();
+    let cat = adobe::fetch_catalog().await.unwrap();
+    let all = adobe::scan(Some(&cat), &un);
+    let cc = all.iter().find(|i| i.id.starts_with("adobe:KCCC")).expect("Creative Cloud found");
+    let latest = adobe::latest(cc, &all, &cat).expect("catalog has Creative Cloud");
+    println!("Creative Cloud {} -> {}", cc.version, latest.version);
+    let plan = adobe::plan_install(
+        adobe::InstallRequest {
+            sap: "KCCC",
+            version: &latest.version,
+            platform: "win64",
+            kind: updater_lib::model::JobKind::Update,
+            app_id: cc.id.clone(),
+            name: cc.name.clone(),
+            current: Some(cc),
+            remove_after: None,
+            lang: "en_US",
+            install_root: cc.install_dir.clone().unwrap(),
+        },
+        &cat,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(&plan.steps[0], updater_lib::sources::Step::Run { args, elevated: true, .. } if args == &vec!["--silent".to_string()]));
+    let mut d = plan.downloads[0].clone();
+    assert_eq!(d.signer.as_deref(), Some("Adobe Inc."));
+    let dir = std::env::temp_dir().join(format!("u3d-cc-{}", std::process::id()));
+    d.dest = dir.join("setup.exe");
+    let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
+    let r = download::fetch(&d, std::sync::Arc::new(Progress::new()), std::sync::Arc::new(Throttle::new()), rx).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(matches!(r, Ok(Outcome::Done)), "{:?}", r.err());
+}
