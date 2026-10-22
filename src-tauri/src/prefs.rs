@@ -139,10 +139,24 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
             }
             _ => {}
         },
-        // Matched from the winget catalog: where these apps keep their data is not known, so
-        // nothing of theirs is deleted.
-        SourceData::Other { .. } => {}
+        // Matched from the winget catalog: only folders named exactly after the app, in Roaming
+        // or Local AppData, alone or under its publisher's folder (the window lists them first).
+        SourceData::Other { .. } => {
+            // A folder another installed app maps to as well is shared (Python 3.10, 3.12 and
+            // 3.14 all keep packages in "AppData\Roaming\Python"): neither deletes it.
+            let theirs: Vec<PathBuf> = others.iter().flat_map(|o| other_dirs(o, r)).collect();
+            dirs.extend(other_dirs(inst, r).into_iter().filter(|d| !theirs.iter().any(|t| t.as_os_str().eq_ignore_ascii_case(d.as_os_str()))));
+        }
     }
+    // Never a folder that holds an installed app (its own or another one).
+    let holds_app = |d: &Path| {
+        let me = d.to_string_lossy().to_ascii_lowercase();
+        others.iter().chain(std::iter::once(inst)).filter_map(|o| o.install_dir.as_ref()).any(|o| {
+            let o = o.to_string_lossy().to_ascii_lowercase();
+            o == me || o.starts_with(&format!("{me}\\"))
+        })
+    };
+    let dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| !holds_app(d)).collect();
     // Never the install folder itself (the uninstall handles that) and nothing that is missing.
     let not_install = |p: &PathBuf| inst.install_dir.as_deref() != Some(p.as_path());
     let mut out = Vec::new();
@@ -164,6 +178,64 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
         out.push(Step::RemoveUserRegKey { path: k, label: format!("Deleting {} settings", inst.name) });
     }
     out
+}
+
+/// Names an Other app's own data folders may have: its name without version or architecture
+/// ("7-Zip 26.04 (x64)" is "7-Zip"), the name in its package id ("Anysphere.Cursor" is "Cursor")
+/// and the dashed form Electron apps use ("LM Studio" is "lm-studio"). Generic names that many
+/// programs share are never used.
+pub fn other_names(display: &str, pkg: &str) -> Vec<String> {
+    const SHARED: &[&str] = &[
+        "microsoft", "google", "programs", "packages", "temp", "tmp", "adobe", "nvidia", "intel", "amd", "apple", "windows", "common files",
+        "crashdumps", "cache", "caches", "logs", "app", "apps", "update", "updater", "installer", "setup", "user", "data", "local", "roaming",
+        "exe", "msi", "beta", "preview", "insiders", "x64", "x86", "client", "desktop", "launcher", "tools", "bin", "software",
+    ];
+    let mut cut: Vec<&str> = Vec::new();
+    for w in display.split_whitespace() {
+        let bare = w.trim_matches(|c| c == '(' || c == ')');
+        // "26.04", "0.4.14+4", "v2": a version, though never the first word ("7-Zip").
+        let digits = |t: &str| !t.is_empty() && t.starts_with(|c: char| c.is_ascii_digit()) && t.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '+');
+        let versionish = !cut.is_empty() && (digits(bare) || (bare.len() > 1 && bare.starts_with(['v', 'V']) && digits(&bare[1..])));
+        if versionish || w.starts_with('(') {
+            break;
+        }
+        cut.push(w);
+    }
+    let base = cut.join(" ").trim_end_matches(['-', ':', ',']).trim().to_string();
+    let from_id = pkg.split('.').nth(1).unwrap_or("").to_string();
+    let mut out: Vec<String> = Vec::new();
+    for n in [base.clone(), from_id, base.to_ascii_lowercase().replace(' ', "-")] {
+        let ok = n.chars().count() >= 3 && !SHARED.contains(&n.to_ascii_lowercase().as_str()) && !n.contains(['\\', '/', ':']);
+        if ok && !out.iter().any(|o| o.eq_ignore_ascii_case(&n)) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Folders an Other app's data may be in, named exactly after it, in Roaming or Local AppData,
+/// alone or under its publisher's folder. Nothing for apps of the other sources.
+fn other_dirs(inst: &Installed, r: &Roots) -> Vec<PathBuf> {
+    let SourceData::Other { pkg, entry, .. } = &inst.data else { return vec![] };
+    let publisher = publisher_dir(&entry.publisher);
+    let mut out = Vec::new();
+    for name in other_names(&inst.name, pkg) {
+        for base in [&r.roaming, &r.local] {
+            out.push(base.join(&name));
+            if let Some(p) = &publisher {
+                if !p.eq_ignore_ascii_case(&name) {
+                    out.push(base.join(p).join(&name));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// "Discord Inc." is "Discord": the publisher's own folder under AppData, when that is a name.
+fn publisher_dir(publisher: &str) -> Option<String> {
+    let first = publisher.split([' ', ',']).next()?.trim().trim_end_matches('.');
+    (first.chars().count() >= 3 && !["the", "microsoft", "google"].contains(&first.to_ascii_lowercase().as_str())).then(|| first.to_string())
 }
 
 #[cfg(test)]

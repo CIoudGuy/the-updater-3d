@@ -435,3 +435,82 @@ async fn blender_first_release_has_the_full_notes() {
     assert!(topics.len() >= 10 && items >= 100, "{} topics {} items", topics.len(), items);
     assert!(m.date.is_some());
 }
+
+/// How many listed versions carry a real change list (not a placeholder), per app, for the
+/// release notes sources: Adobe, Blender 5.2 and older, Krita and the Craft apps.
+#[tokio::test]
+#[ignore]
+async fn release_notes_coverage() {
+    use updater_lib::notes;
+    let placeholder = |l: &[String]| {
+        l.is_empty()
+            || l.len() == 1
+                && (l[0].starts_with("No change list") || l[0].starts_with("Bug-fix release") || l[0].starts_with("First release of Blender") || l[0].starts_with("Maintenance release"))
+    };
+    let mut report: Vec<(String, usize, usize)> = Vec::new();
+    // Every line shown, to check that none has a long dash.
+    let mut all: Vec<String> = Vec::new();
+    let cat = adobe::fetch_catalog().await.expect("adobe catalog");
+    let saps = ["PHSP", "ILST", "PPRO", "AEFT", "AME", "AUDT", "IDSN", "KBRG", "LTRM", "LRCC", "ACR", "FRSC", "KCCC", "SBSTA", "SBSTP", "SBSTD", "SHPR", "PHSPBETA", "ILSTPR", "AEFTBETA", "PPROBETA", "AMEBETA"];
+    for sap in saps {
+        let mut list = adobe::versions(sap, "win64", None, &cat);
+        if list.is_empty() {
+            // Shared components such as Camera Raw are listed for win32 only.
+            list = adobe::versions(sap, "win32", None, &cat);
+        }
+        let found = futures_util::future::join_all(list.iter().take(25).map(|v| {
+            let (url, ver) = (v.notes_url.clone(), v.version.clone());
+            async move {
+                match url {
+                    Some(u) => notes::adobe(&u, &ver).await,
+                    None => None,
+                }
+            }
+        }))
+        .await;
+        let with = found.iter().filter(|n| n.as_ref().is_some_and(|n| !n.lines.is_empty())).count();
+        all.extend(found.iter().flatten().flat_map(|n| n.lines.iter().cloned()));
+        if let Some((v, n)) = list.iter().zip(&found).find(|(_, n)| n.as_ref().is_some_and(|n| !n.lines.is_empty())) {
+            let n = n.as_ref().unwrap();
+            println!("  {sap} {} ({:?}): {} lines, first {:?}", v.version, n.date, n.lines.len(), n.lines.first());
+        }
+        report.push((format!("Adobe {sap}"), with, list.len().min(25)));
+    }
+    let bfeed = blender::fetch(&[], false).await.expect("blender feed");
+    for id in ["blender:5.2", "blender:older"] {
+        let list = blender::catalog_versions(id, &bfeed).await.unwrap_or_default();
+        for v in &list {
+            println!("  {id} {:<8} {:<4} lines, first {:?}", v.version, v.notes.len(), v.notes.first().map(|s| s.chars().take(60).collect::<String>()));
+        }
+        report.push((id.to_string(), list.iter().filter(|v| !placeholder(&v.notes)).count(), list.len()));
+        all.extend(list.iter().flat_map(|v| v.notes.iter().cloned()));
+    }
+    let tfeed = tools::fetch(&[]).await.expect("more apps feed");
+    let kr = tools::catalog_versions("krita", &tfeed, &[]).await.unwrap_or_default();
+    for v in &kr {
+        println!("  krita {:<8} {:<4} lines, first {:?} url {:?}", v.version, v.notes.len(), v.notes.first().map(|s| s.chars().take(60).collect::<String>()), v.notes_url);
+    }
+    report.push(("Krita".into(), kr.iter().filter(|v| !placeholder(&v.notes)).count(), kr.len()));
+    all.extend(kr.iter().flat_map(|v| v.notes.iter().cloned()));
+    for a in craft::APPS {
+        match craft::versions(a.key, None, false).await {
+            Ok(list) => {
+                report.push((format!("Craft {}", a.key), list.iter().filter(|v| !placeholder(&v.notes)).count(), list.len()));
+                all.extend(list.iter().flat_map(|v| v.notes.iter().cloned()));
+            }
+            Err(e) => println!("  craft {}: unavailable ({e})", a.key),
+        }
+    }
+    println!("--- versions with real notes, of listed");
+    for (name, with, of) in &report {
+        println!("{name:<24} {with:>3} of {of}");
+    }
+    let dashed: Vec<&String> = all.iter().filter(|l| l.contains(['\u{2013}', '\u{2014}'])).collect();
+    println!("{} lines in all, {} with a long dash", all.len(), dashed.len());
+    assert!(dashed.is_empty(), "long dashes: {:?}", dashed.iter().take(5).collect::<Vec<_>>());
+    let got = |name: &str| report.iter().find(|r| r.0 == name).map_or(0, |r| r.1);
+    // Clear gains over before (Photoshop 0 of 25, Blender 5.2 1 of 3, older Blender 0 of 18, Krita 3 of 25).
+    assert!(got("Adobe PHSP") >= 5 && got("Adobe SHPR") >= 10 && got("Adobe SBSTA") >= 20, "Adobe");
+    assert!(got("blender:5.2") >= 3 && got("blender:older") >= 18, "Blender");
+    assert!(got("Krita") >= 15, "Krita");
+}

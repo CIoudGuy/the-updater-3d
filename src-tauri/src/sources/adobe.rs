@@ -580,18 +580,55 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
     out
 }
 
-/// Release notes on Adobe Experience League, which answers apps (adobe.com short links and
-/// helpx.adobe.com reject anything that is not a browser, so those only open in the browser).
+/// Adobe community announcement categories ("community.adobe.com/announcements-710") per app,
+/// with the names its release posts give it ("Photoshop v27.6 Is Live!").
+const COMMUNITY: &[(&str, u32, &[&str])] = &[
+    ("PHSP", 710, &["Photoshop"]),
+    ("ILST", 651, &["Illustrator"]),
+    ("PPRO", 727, &["Premiere Pro", "Premiere"]),
+    ("AEFT", 527, &["After Effects", "AE"]),
+    ("AME", 504, &["Media Encoder"]),
+    ("AUDT", 542, &["Audition"]),
+    ("IDSN", 670, &["InDesign"]),
+    ("KBRG", 556, &["Bridge"]),
+    ("LTRM", 673, &["Lightroom Classic"]),
+    ("LRCC", 678, &["Lightroom Desktop", "Lightroom"]),
+    ("ACR", 561, &["Camera Raw", "ACR"]),
+    ("FRSC", 645, &["Fresco"]),
+    ("SBSTA", 67, &["Substance 3D Sampler", "Sampler"]),
+    ("KCCC", 600, &["Creative Cloud Desktop", "Creative Cloud"]),
+    ("PHSPBETA", 698, &["Photoshop Beta", "Photoshop"]),
+    ("ILSTPR", 654, &["Beta Build", "Beta", "Illustrator Beta", "Illustrator"]),
+    ("AEFTBETA", 532, &["After Effects Beta", "AE Beta", "After Effects"]),
+    ("PPROBETA", 732, &["Premiere Pro Beta", "Premiere Beta", "Premiere"]),
+    ("AMEBETA", 509, &["Media Encoder Beta", "Media Encoder"]),
+];
+
+/// The app names of a community category and whether its posts are about a beta.
+pub fn community_names(id: u32) -> Option<(&'static [&'static str], bool)> {
+    COMMUNITY.iter().find(|c| c.1 == id).map(|(sap, _, names)| (*names, sap.ends_with("BETA") || *sap == "ILSTPR"))
+}
+
+/// The community category that also announces the releases of an app whose notes come from an
+/// Experience League "All changes" page (Sampler 6.0.0 is only announced there).
+pub fn community_fallback(notes_url: &str) -> Option<u32> {
+    let sap = if notes_url.contains("/substance-3d-sampler/") { "SBSTA" } else { return None };
+    COMMUNITY.iter().find(|c| c.0 == sap).map(|c| c.1)
+}
+
+/// Release notes that answer apps, which `notes::adobe` reads per version: Substance 3D "All
+/// changes" pages on Adobe Experience League, Modeler's Steam news and the community
+/// announcements of the other apps. adobe.com short links and helpx.adobe.com reject anything
+/// that is not a browser, so those only open in the browser.
 fn release_notes_url(sap: &str) -> Option<String> {
     let slug = match sap {
         "SBSTP" => "substance-3d-painter",
         "SBSTD" => "substance-3d-designer",
         "SBSTA" => "substance-3d-sampler",
-        "STGR" => "substance-3d-stager",
-        "SHPR" => "substance-3d-modeler",
-        _ => return None,
+        "SHPR" => return Some("https://store.steampowered.com/news/app/1745780".into()),
+        _ => return COMMUNITY.iter().find(|c| c.0 == sap).map(|c| format!("https://community.adobe.com/announcements-{}", c.1)),
     };
-    Some(format!("https://experienceleague.adobe.com/en/docs/{slug}/using/release-notes/release-notes"))
+    Some(format!("https://experienceleague.adobe.com/en/docs/{slug}/using/release-notes/all-changes"))
 }
 
 /// Release notes pages that only open in the browser (helpx.adobe.com rejects apps).
@@ -922,6 +959,21 @@ mod tests {
         // Photoshop once, CoreSync left to Adobe's installer, the loose pattern skipped.
         assert_eq!(conflicting_names(xml), vec!["afterfx.exe", "photoshop.exe", "animate.exe"]);
         assert!(is_component("ACR") && !is_component("PHSP") && !is_component("KCCC"));
+    }
+
+    #[test]
+    fn release_notes_links_that_answer_apps() {
+        // Stager's and Modeler's Experience League release notes pages do not exist.
+        assert_eq!(release_notes_url("STGR"), None);
+        assert_eq!(release_notes_url("SHPR").as_deref(), Some("https://store.steampowered.com/news/app/1745780"));
+        assert_eq!(release_notes_url("SBSTA").as_deref(), Some("https://experienceleague.adobe.com/en/docs/substance-3d-sampler/using/release-notes/all-changes"));
+        assert_eq!(release_notes_url("PHSP").as_deref(), Some("https://community.adobe.com/announcements-710"));
+        assert_eq!(release_notes_url("PHSPBETA").as_deref(), Some("https://community.adobe.com/announcements-698"));
+        assert_eq!(release_notes_url("APRO"), None);
+        assert_eq!(community_names(654).map(|n| n.1), Some(true));
+        assert_eq!(community_names(673).map(|n| n.1), Some(false));
+        assert_eq!(community_fallback(&release_notes_url("SBSTA").unwrap()), Some(67));
+        assert_eq!(community_fallback(&release_notes_url("SBSTP").unwrap()), None);
     }
 
     #[test]
