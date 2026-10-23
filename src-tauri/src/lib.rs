@@ -4,6 +4,7 @@ pub mod download;
 pub mod elevate;
 pub mod http;
 pub mod install_detail;
+pub mod machine;
 pub mod model;
 pub mod notes;
 pub mod paths;
@@ -14,6 +15,7 @@ pub mod services;
 pub mod sources;
 pub mod store;
 pub mod tray;
+pub mod uninstall;
 pub mod version;
 pub mod winutil;
 
@@ -110,6 +112,17 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
+            // The window is gone: free what only it used.
+            if let tauri::WindowEvent::Destroyed = event {
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if app.get_webview_window("main").is_none() {
+                        app.state::<Arc<core::Core>>().trim_memory();
+                    }
+                });
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let core = app.state::<Arc<core::Core>>();
@@ -169,6 +182,10 @@ pub fn run() {
             commands::catalog_versions,
             commands::browse_other_apps,
             commands::quit_app,
+            commands::leftover_scan,
+            commands::leftover_delete,
+            commands::leftover_restore,
+            commands::leftover_backups,
             commands::get_drivers,
             commands::check_drivers,
             commands::update_drivers,

@@ -170,11 +170,18 @@ fn save_soon(core: &Arc<Core>) {
     });
 }
 
+/// When the popup last closed itself: a click on the tray icon is what took its focus, and that
+/// same click must close it, not open it again.
+static POPUP_CLOSED: parking_lot::Mutex<Option<std::time::Instant>> = parking_lot::Mutex::new(None);
+
 fn toggle_popup(app: &AppHandle, rect: Rect) {
+    if POPUP_CLOSED.lock().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(400)) {
+        return;
+    }
     let w = match app.get_webview_window("tray") {
         Some(w) => {
             if w.is_visible().unwrap_or(false) {
-                let _ = w.hide();
+                let _ = w.close();
                 return;
             }
             w
@@ -196,9 +203,11 @@ fn toggle_popup(app: &AppHandle, rect: Rect) {
             };
             app_like(&w);
             let w2 = w.clone();
+            // Closed, not hidden: a hidden popup keeps a whole web view (and its memory) alive.
             w.on_window_event(move |e| {
                 if let tauri::WindowEvent::Focused(false) = e {
-                    let _ = w2.hide();
+                    *POPUP_CLOSED.lock() = Some(std::time::Instant::now());
+                    let _ = w2.close();
                 }
             });
             w

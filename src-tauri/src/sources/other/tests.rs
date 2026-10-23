@@ -1,7 +1,7 @@
 use super::*;
 use crate::sources::winget::{test_index, ArpEntry};
 
-fn entry(key: &str, hive: &'static str, name: &str, ver: &str, publisher: &str) -> winutil::UninstallEntry {
+pub(super) fn entry(key: &str, hive: &'static str, name: &str, ver: &str, publisher: &str) -> winutil::UninstallEntry {
     winutil::UninstallEntry {
         key: key.into(),
         hive,
@@ -188,8 +188,12 @@ fn leaves_apps_of_the_other_sources_alone() {
     assert_eq!(excluded_package("Microsoft.VisualStudioCode"), None);
 }
 
-fn inst(arch: &str, kind: &str, scope: Option<&str>) -> Installer {
+pub(super) fn inst(arch: &str, kind: &str, scope: Option<&str>) -> Installer {
     Installer { arch: arch.into(), kind: kind.into(), url: format!("https://example.com/{arch}-{kind}"), sha256: "a".repeat(64), scope: scope.map(String::from), ..Default::default() }
+}
+
+fn pkg_inst(arch: &str, kind: &str, family: &str) -> Installer {
+    Installer { family: Some(family.into()), signature_sha256: Some("b".repeat(64)), ..inst(arch, kind, None) }
 }
 
 fn manifest(installers: Vec<Installer>) -> Manifest {
@@ -335,7 +339,7 @@ fn uninstalls_without_questions() {
     assert!(uninstall_cmd(&nsis, None).is_none());
 }
 
-fn installed_from(e: winutil::UninstallEntry, pkg: &str) -> Installed {
+pub(super) fn installed_from(e: winutil::UninstallEntry, pkg: &str) -> Installed {
     Installed {
         id: format!("other:{pkg}"),
         source: Source::Other,
@@ -492,11 +496,16 @@ fn starter_apps_that_are_also_in_the_store_stay() {
     let got: Vec<String> = popular_candidates(&idx).into_iter().map(|(p, _)| p.id).collect();
     assert!(got.contains(&"Mozilla.Firefox".to_string()), "{got:?}");
     assert!(got.contains(&"Microsoft.PowerToys".to_string()), "{got:?}");
-    // The manifest decides: a normal installer next to the MSIX is used, an MSIX alone is not.
-    let m = manifest(vec![inst("x64", "msix", None), inst("x64", "nsis", None)]);
+    // The manifest decides: a normal installer next to the MSIX is used, an MSIX alone is
+    // installed as an app package when the catalog names its family.
+    let m = manifest(vec![pkg_inst("x64", "msix", "Example.Zipper_8a0j1tnjnt4a4"), inst("x64", "nsis", None)]);
     assert_eq!(kind_of(choose(&m, &Want::fresh()).unwrap()), "nsis");
-    let store_only = manifest(vec![inst("x64", "msix", None)]);
-    assert!(choose(&store_only, &Want::fresh()).is_err());
+    let msix_only = manifest(vec![pkg_inst("x64", "msix", "Example.Zipper_8a0j1tnjnt4a4")]);
+    assert_eq!(kind_of(choose(&msix_only, &Want::fresh()).unwrap()), "msix");
+    let no_family = manifest(vec![inst("x64", "msix", None)]);
+    assert_eq!(choose(&no_family, &Want::fresh()).unwrap_err(), "an MSIX package without its package family name");
+    let store_only = manifest(vec![inst("x64", "msstore", None)]);
+    assert_eq!(choose(&store_only, &Want::fresh()).unwrap_err(), STORE_ONLY);
 }
 
 #[test]
@@ -801,4 +810,32 @@ fn inno_installers_write_a_log_the_job_can_read() {
     let plan = build_plan(&p, &manifest(vec![nsis.clone()]), &nsis, JobKind::Install, None, None).unwrap();
     let Step::Run { args, log, .. } = &plan.steps[0] else { panic!() };
     assert!(log.is_none() && !args.iter().any(|a| a.to_ascii_lowercase().starts_with("/log")));
+}
+
+#[test]
+fn a_check_reads_again_only_the_packages_whose_version_list_changed() {
+    let row = |id: &str, hash: &str, latest: &str| Pkg { row: 1, id: id.into(), name: id.into(), moniker: None, latest: latest.into(), arp_min: None, arp_max: None, hash: hash.into() };
+    let read = |p: Pkg, v: &str| PkgFeed { versions: vec![VerRef { version: v.into(), path: format!("manifests/{v}"), sha256: "ab".repeat(32), arp_min: None, arp_max: None }], latest: Some(Manifest { id: p.id.clone(), version: v.into(), ..Default::default() }), pkg: p };
+    let mut prev = Feed::default();
+    prev.pkgs.insert("7zip.7zip".into(), read(row("7zip.7zip", "aaa", "26.0"), "26.0"));
+    prev.popular.push((read(row("Mozilla.Firefox", "fff", "140.0"), "140.0"), "Web browser"));
+    let before = read_before(Some(&prev));
+    // Same version list: kept as read, with the new index row (its name or range may change).
+    let mut now = row("7zip.7zip", "aaa", "26.0");
+    now.name = "7-Zip".into();
+    let (p, r) = reuse(&before, &now).expect("unchanged package is kept");
+    assert_eq!(p.name, "7-Zip");
+    assert_eq!(r.unwrap().1.version, "26.0");
+    // Popular apps are kept too.
+    assert!(reuse(&before, &row("mozilla.firefox", "fff", "140.0")).is_some());
+    // A new version list (a new version came out) or an unknown package: read again.
+    assert!(reuse(&before, &row("7zip.7zip", "bbb", "26.1")).is_none());
+    assert!(reuse(&before, &row("Git.Git", "ggg", "2.0")).is_none());
+    // No checksum, or a package read without its manifest: read again.
+    assert!(reuse(&before, &row("7zip.7zip", "", "26.0")).is_none());
+    let mut half = read(row("Git.Git", "ggg", "2.0"), "2.0");
+    half.latest = None;
+    prev.pkgs.insert("git.git".into(), half);
+    assert!(reuse(&read_before(Some(&prev)), &row("Git.Git", "ggg", "2.0")).is_none());
+    assert!(reuse(&read_before(None), &now).is_none());
 }

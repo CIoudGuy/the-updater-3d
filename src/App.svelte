@@ -6,21 +6,14 @@
   import Toasts from "./components/Toasts.svelte";
   import Home from "./screens/Home.svelte";
   import Installed from "./screens/Installed.svelte";
-  import AppDetail from "./screens/AppDetail.svelte";
-  import GetApps from "./screens/GetApps.svelte";
-  import GetDetail from "./screens/GetDetail.svelte";
-  import Queue from "./screens/Queue.svelte";
-  import Activity from "./screens/Activity.svelte";
-  import Drivers from "./screens/Drivers.svelte";
-  import Services from "./screens/Services.svelte";
-  import Settings from "./screens/Settings.svelte";
+  import type { Component } from "svelte";
   import Skeleton from "./components/Skeleton.svelte";
   import Btn from "./components/Btn.svelte";
   import { router, type Route } from "./lib/router.svelte";
   import { store } from "./lib/store.svelte";
   import { canRepair, ui } from "./lib/ui.svelte";
   import { send, windowApi } from "./lib/api";
-  import { reduced } from "./lib/motion";
+  import { reduced, setLean } from "./lib/motion";
   import { checkNow, modalOpen, openApp, repairApp, togglePauseAll, updateAll, updateOne } from "./lib/actions";
   import { appShortcut } from "./lib/keys";
   import { tick } from "svelte";
@@ -63,6 +56,34 @@
     if (top) tick().then(() => page && restoreScroll(page, top));
   }
 
+  // ----- screens other than the first ones load when they are first opened (less to read at start) -----
+  type Screen = Component<any>;
+  const LAZY: Record<string, () => Promise<{ default: Screen }>> = {
+    detail: () => import("./screens/AppDetail.svelte"),
+    get: () => import("./screens/GetApps.svelte"),
+    getdetail: () => import("./screens/GetDetail.svelte"),
+    queue: () => import("./screens/Queue.svelte"),
+    activity: () => import("./screens/Activity.svelte"),
+    drivers: () => import("./screens/Drivers.svelte"),
+    services: () => import("./screens/Services.svelte"),
+    settings: () => import("./screens/Settings.svelte"),
+  };
+  let screens = $state<Record<string, Screen>>({});
+  const loading: Record<string, Promise<void>> = {};
+  function loadScreen(name: string): Promise<void> {
+    const get = LAZY[name];
+    if (!get || screens[name]) return Promise.resolve();
+    return (loading[name] ??= get()
+      .then((m) => {
+        screens[name] = m.default;
+      })
+      .catch(() => {
+        // Try again on the next visit.
+        delete loading[name];
+      }));
+  }
+  let navSeq = 0;
+
   $effect(() => {
     const r = router.route;
     const key = router.key;
@@ -70,6 +91,8 @@
     const top = router.pendingScroll;
     const fresh = nav !== handledNav;
     handledNav = nav;
+    const seq = ++navSeq;
+    const ready = loadScreen(r.name);
     if (key === shownKey) {
       shown = r;
       // back or forward between two entries of the same page
@@ -80,13 +103,29 @@
     clearTimeout(timer);
     timer = setTimeout(
       () => {
-        shownKey = key;
-        shown = r;
-        phase = "in";
-        settle(top);
+        // The new page's code is there before it replaces the old one (it loads during the fade).
+        void ready.then(() => {
+          if (seq !== navSeq) return;
+          shownKey = key;
+          shown = r;
+          phase = "in";
+          settle(top);
+        });
       },
       reduced() ? 0 : 90,
     );
+  });
+
+  // A low end PC: lighter animations, and other screens load only when opened. Others load them
+  // when the app is idle, so the first visit is as quick as before.
+  $effect(() => {
+    const low = store.status.machineTier === "low";
+    setLean(low);
+    if (low || !store.ready) return;
+    const idle = (cb: () => void) => ("requestIdleCallback" in window ? requestIdleCallback(cb, { timeout: 4000 }) : setTimeout(cb, 1500));
+    idle(() => {
+      for (const name of Object.keys(LAZY)) void loadScreen(name);
+    });
   });
 
   onMount(() => {
@@ -304,26 +343,23 @@
     {:else if !store.ready}
       <Skeleton name={shown.name} />
     {:else}
+      {@const Lazy = screens[shown.name]}
       {#if shown.name === "home"}
         <Home />
       {:else if shown.name === "installed"}
         <Installed />
+      {:else if !Lazy}
+        <Skeleton name={shown.name} />
       {:else if shown.name === "detail" && shown.param}
-        {#key shown.param}<AppDetail id={shown.param} />{/key}
+        {#key shown.param}<Lazy id={shown.param} />{/key}
       {:else if shown.name === "get"}
-        <GetApps />
+        <Lazy />
       {:else if shown.name === "getdetail" && shown.param}
-        {#key shown.param}<GetDetail id={shown.param} />{/key}
-      {:else if shown.name === "queue"}
-        <Queue />
-      {:else if shown.name === "activity"}
-        <Activity />
-      {:else if shown.name === "drivers"}
-        <Drivers />
-      {:else if shown.name === "services"}
-        <Services />
+        {#key shown.param}<Lazy id={shown.param} />{/key}
+      {:else if shown.name === "queue" || shown.name === "activity" || shown.name === "drivers" || shown.name === "services"}
+        <Lazy />
       {:else if shown.name === "settings"}
-        <Settings section={shown.param} />
+        <Lazy section={shown.param} />
       {/if}
     {/if}
   </main>

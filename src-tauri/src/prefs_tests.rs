@@ -387,6 +387,229 @@ fn never_another_apps_folder_a_program_folder_or_a_browser_profile() {
 }
 
 #[test]
+fn opera_keeps_its_profile_in_its_own_folder_and_that_stays() {
+    // Seen in a test install: Opera's passwords and bookmarks are in "Roaming\Opera Software\
+    // Opera Stable" itself (a Chromium profile: "Local State" and "Default"), its cache in Local.
+    let r = roots("opera");
+    let profile = mk(r.roaming.join("Opera Software").join("Opera Stable"));
+    touch(profile.join("Local State"));
+    touch(profile.join("Default").join("Bookmarks"));
+    let cache = mk(r.local.join("Opera Software").join("Opera Stable"));
+    // An Electron app's folder has "Local State" too, but no "Default" profile.
+    let opera = other_app("Opera.Opera", "Opera Stable", "Opera Software", None, None);
+    assert_eq!(targets(&steps(&opera, &[], &r)), vec![s(&cache)]);
+    let electron = mk(r.roaming.join("obsidian"));
+    touch(electron.join("Local State"));
+    mk(electron.join("Local Storage"));
+    let obs = other_app("Obsidian.Obsidian", "Obsidian", "Obsidian", None, None);
+    assert_eq!(targets(&steps(&obs, &[], &r)), vec![s(&electron)]);
+    cleanup(&r);
+}
+
+#[test]
+fn publisher_domains_software_folders_and_id_suffixes_seen_in_test_installs() {
+    let r = roots("seen");
+    // Qt apps name the key after the publisher's web domain.
+    reg_key(&format!("{}\\jellyfin.org\\Jellyfin Media Player", r.reg));
+    reg_key(&format!("{}\\jellyfin.org\\Jellyfin Server", r.reg));
+    let jmp = other_app("Jellyfin.JellyfinMediaPlayer", "Jellyfin Media Player", "Jellyfin Project", None, None);
+    assert_eq!(targets(&steps(&jmp, &[], &r)), vec![format!("HKCU/{}\\jellyfin.org\\Jellyfin Media Player", r.reg)]);
+    // Flutter apps: "io.appflowy\AppFlowy", the app's name as the domain.
+    let flowy = mk(r.roaming.join("io.appflowy").join("AppFlowy"));
+    mk(r.roaming.join("io.appflowy").join("Other"));
+    let af = other_app("AppFlowy.AppFlowy", "AppFlowy", "AppFlowy-IO", None, None);
+    assert_eq!(targets(&steps(&af, &[], &r)), vec![s(&flowy)]);
+    // Never a domain of a generic word, nor a name with dots that is not a domain.
+    reg_key(&format!("{}\\microsoft.com\\Edge", r.reg));
+    let edge = other_app("Contoso.Edge", "Edge", "Microsoft", None, None);
+    assert!(targets(&steps(&edge, &[], &r)).iter().all(|t| !t.contains("microsoft.com")));
+    // "CPUID" keeps its apps in "CPUID Software"; another app of it keeps its own.
+    let cpuz = mk(r.program_data.join("CPUID Software").join("cpu-z"));
+    let hwm = mk(r.program_data.join("CPUID Software").join("hwmonitor"));
+    let z = other_app("CPUID.CPU-Z", "CPUID CPU-Z", "CPUID, Inc.", None, None);
+    assert_eq!(targets(&steps(&z, &[], &r)), vec![s(&cpuz)]);
+    assert!(!targets(&steps(&z, &[], &r)).contains(&s(&hwm)));
+    // Waterfox's update folder: its name with an id after it.
+    let wf = mk(r.program_data.join("Waterfox-1de4eec8-1241-4177-a864-e594e8d1fb38"));
+    mk(r.program_data.join("Waterfoxy-1de4eec8-1241-4177-a864-e594e8d1fb38"));
+    mk(r.program_data.join("Waterfox-notanid"));
+    let w = other_app("Waterfox.Waterfox", "Waterfox", "BrowserWorks", None, None);
+    assert_eq!(targets(&steps(&w, &[], &r)), vec![s(&wf)]);
+    // Where .NET keeps a program's user settings: "<program>.exe_Url_<hash>".
+    let net = mk(r.local.join("Atlassian").join("SourceTree.exe_Url_pvbhzmuknxzic1u2pbbpoooc2yeizzcm"));
+    let own = mk(r.local.join("Atlassian").join("SourceTree"));
+    mk(r.local.join("Atlassian").join("SourceTree.exe_Url_short"));
+    mk(r.local.join("Atlassian").join("Jira.exe_Url_pvbhzmuknxzic1u2pbbpoooc2yeizzcm"));
+    let st = other_app("Atlassian.Sourcetree", "Sourcetree", "Atlassian", None, Some(PathBuf::from("C:\\x\\SourceTree.exe")));
+    let mut t = targets(&steps(&st, &[], &r));
+    t.sort();
+    assert_eq!(t, vec![s(&own), s(&net)]);
+    // "calibre-cache", and a version after the name in the publisher's key.
+    let cc = mk(r.local.join("calibre-cache"));
+    let cal = other_app("calibre.calibre", "calibre 64bit", "Kovid Goyal", None, None);
+    assert_eq!(targets(&steps(&cal, &[], &r)), vec![s(&cc)]);
+    reg_key(&format!("{}\\The Document Foundation\\LibreOffice 26.8", r.reg));
+    reg_key(&format!("{}\\The Document Foundation\\Other 26.8", r.reg));
+    let lo = other_app("TheDocumentFoundation.LibreOffice", "LibreOffice 26.8.1.1", "The Document Foundation", None, None);
+    assert_eq!(targets(&steps(&lo, &[], &r)), vec![format!("HKCU/{}\\The Document Foundation\\LibreOffice 26.8", r.reg)]);
+    // A publisher named by its web site: "MediaArea.net" keeps "MediaArea".
+    reg_key(&format!("{}\\MediaArea\\MediaInfo", r.reg));
+    let mi = other_app("MediaArea.MediaInfo.GUI", "MediaInfo", "MediaArea.net", None, None);
+    assert_eq!(targets(&steps(&mi, &[], &r)), vec![format!("HKCU/{}\\MediaArea\\MediaInfo", r.reg)]);
+    cleanup(&r);
+}
+
+#[test]
+fn more_folder_and_key_names_seen_in_test_installs() {
+    let r = roots("seen2");
+    // "foobar2000-v2": a major version after a "v".
+    let fb = mk(r.roaming.join("foobar2000-v2"));
+    mk(r.roaming.join("foobar2000-vista"));
+    let f = other_app("PeterPawlowski.foobar2000", "foobar2000", "Peter Pawlowski", None, None);
+    assert_eq!(targets(&steps(&f, &[], &r)), vec![s(&fb)]);
+    // A Tauri app id from the app's web domain, and the publisher's whole name as Qt keeps it.
+    let jan = mk(r.local.join("jan.ai.app"));
+    mk(r.local.join("jan.ai.notes"));
+    reg_key(&format!("{}\\Menlo Research Pte. Ltd.\\Jan", r.reg));
+    reg_key(&format!("{}\\Menlo Research Pte. Ltd.\\Other", r.reg));
+    let j = other_app("Jan.Jan", "Jan", "Menlo Research Pte. Ltd.", None, None);
+    assert_eq!(targets(&steps(&j, &[], &r)), vec![s(&jan), format!("HKCU/{}\\Menlo Research Pte. Ltd.\\Jan", r.reg)]);
+    // The maker in the package id: "Perplexity.Comet" of "The Comet Authors".
+    reg_key(&format!("{}\\Perplexity\\Comet", r.reg));
+    reg_key(&format!("{}\\Perplexity\\Update", r.reg));
+    let c = other_app("Perplexity.Comet", "Comet", "The Comet Authors", None, None);
+    assert_eq!(targets(&steps(&c, &[], &r)), vec![format!("HKCU/{}\\Perplexity\\Comet", r.reg)]);
+    // The maker never hides a program of that name: "GeoGebra.exe" keeps "Roaming\GeoGebra".
+    let gg = mk(r.roaming.join("GeoGebra"));
+    let g = other_app("GeoGebra.Classic", "GeoGebra Classic", "International GeoGebra Institute", None, Some(PathBuf::from("C:\\x\\GeoGebra.exe")));
+    assert_eq!(targets(&steps(&g, &[], &r)), vec![s(&gg)]);
+    // An Electron updater with a word after the name, and the Roaming folder of that name.
+    let upd = mk(r.local.join("tutanota-desktop-updater"));
+    let data = mk(r.roaming.join("tutanota-desktop"));
+    mk(r.roaming.join("tutanota-other"));
+    let t = other_app("Tutanota.Tutanota", "Tuta Mail", "Tutao GmbH", None, None);
+    assert_eq!(targets(&steps(&t, &[], &r)), vec![s(&upd), s(&data)]);
+    let ev = mk(r.program_data.join("evernote-client-updater"));
+    mk(r.program_data.join("evernote-thing-updater"));
+    let e = other_app("Evernote.Evernote", "Evernote", "Bending Spoons US Inc.", None, None);
+    assert_eq!(targets(&steps(&e, &[], &r)), vec![s(&ev)]);
+    // More than one id word between the name and "updater".
+    let th = mk(r.local.join("theia-ide-electron-app-updater"));
+    mk(r.local.join("theia-ide-plugin-updater"));
+    let ti = other_app("EclipseFoundation.TheiaIDE", "Theia IDE", "Eclipse Theia", None, None);
+    assert_eq!(targets(&steps(&ti, &[], &r)), vec![s(&th)]);
+    cleanup(&r);
+}
+
+#[test]
+fn an_apps_full_name_in_another_vendors_folder_is_its_own() {
+    let r = roots("fullname");
+    // Seen: Stream Deck (now published by Corsair) keeps "Elgato\StreamDeck", MEGAsync "Mega
+    // Limited\MEGAsync".
+    let sd = mk(r.roaming.join("Elgato").join("StreamDeck"));
+    let vc = mk(r.roaming.join("Elgato").join("Volume Controller"));
+    reg_key(&format!("{}\\Elgato Systems GmbH\\StreamDeck", r.reg));
+    let deck = other_app("Elgato.StreamDeck", "Stream Deck", "Corsair Memory, Inc.", None, None);
+    assert_eq!(targets(&steps(&deck, &[], &r)), vec![s(&sd), format!("HKCU/{}\\Elgato Systems GmbH\\StreamDeck", r.reg)]);
+    assert!(vc.is_dir());
+    // Short or generic names never match in a folder that is not the publisher's.
+    mk(r.local.join("Vendor").join("Steam"));
+    mk(r.local.join("Microsoft").join("MEGAsync"));
+    let mega = mk(r.local.join("Mega Limited").join("MEGAsync"));
+    let m = other_app("Mega.MEGASync", "MEGAsync", "Mega Limited", None, None);
+    assert_eq!(targets(&steps(&m, &[], &r)), vec![s(&mega)]);
+    let steam = other_app("Valve.Steam", "Steam", "Valve Corporation", None, None);
+    assert!(steps(&steam, &[], &r).is_empty());
+    // Nothing inside a folder another installed app takes whole.
+    let deckpro = mk(r.roaming.join("StreamDeckPro"));
+    mk(deckpro.join("StreamDeck"));
+    let pro = other_app("Elgato.StreamDeckPro", "StreamDeckPro", "Elgato", None, None);
+    let t = targets(&steps(&deck, &[pro.clone()], &r));
+    assert!(t.iter().all(|x| !x.contains("StreamDeckPro")), "{t:?}");
+    assert_eq!(targets(&steps(&pro, &[deck], &r)), vec![s(&deckpro)]);
+    cleanup(&r);
+}
+
+#[test]
+fn the_table_of_known_places_adds_what_names_do_not_find() {
+    let r = roots("known");
+    let itunes = mk(r.roaming.join("Apple Computer").join("iTunes"));
+    let shared = mk(r.roaming.join("Apple Computer").join("Preferences"));
+    let local = mk(r.local.join("Apple Computer").join("iTunes"));
+    reg_key(&format!("{}\\Apple Computer, Inc.\\iTunes", r.reg));
+    let a = other_app("Apple.iTunes", "iTunes", "Apple Inc.", None, None);
+    let t = targets(&steps(&a, &[], &r));
+    assert_eq!(t, vec![s(&itunes), s(&local), format!("HKCU/{}\\Apple Computer, Inc.\\iTunes", r.reg)]);
+    assert!(!t.contains(&s(&shared)));
+    // A place in the table that holds a program stays.
+    let mut r2 = roots("known2");
+    let held = mk(r2.local.join("zen"));
+    r2.install_dirs.push(held.join("app"));
+    let z = other_app("Zen-Team.Zen-Browser", "Zen Browser", "Zen Team", None, None);
+    assert!(steps(&z, &[], &r2).is_empty());
+    // "IdeaIC*" is the name with a version after it, and nothing while a second copy is installed.
+    let r3 = roots("known3");
+    let v1 = mk(r3.roaming.join("JetBrains").join("IdeaIC2025.2"));
+    let v2 = mk(r3.local.join("JetBrains").join("IdeaIC2024.3.1"));
+    mk(r3.roaming.join("JetBrains").join("IdeaICx2025"));
+    mk(r3.roaming.join("JetBrains").join("IntelliJIdea2025.2"));
+    let ce = other_app("JetBrains.IntelliJIDEA.Community", "IntelliJ IDEA Community Edition", "JetBrains s.r.o.", None, None);
+    assert_eq!(targets(&steps(&ce, &[], &r3)), vec![s(&v1), s(&v2)]);
+    let mut copy = ce.clone();
+    copy.id = "other:JetBrains.IntelliJIDEA.Community:user".into();
+    assert!(steps(&ce, &[copy], &r3).is_empty());
+    let pce = other_app("JetBrains.PyCharm.Community", "PyCharm Community Edition", "JetBrains s.r.o.", None, None);
+    let own = mk(r3.roaming.join("JetBrains").join("PyCharmCE2025.2"));
+    mk(r3.roaming.join("JetBrains").join("PyCharm2025.2"));
+    assert_eq!(targets(&steps(&pce, &[], &r3)), vec![s(&own)]);
+    cleanup(&r3);
+    // A place may be a file of its own.
+    let r4 = roots("known4");
+    let rc = touch(r4.local.join("kdenliverc"));
+    let kd = other_app("KDE.Kdenlive", "Kdenlive", "KDE e.V.", None, None);
+    assert!(targets(&steps(&kd, &[], &r4)).contains(&s(&rc)));
+    cleanup(&r4);
+    // Every place in the table starts with one of the known roots.
+    for (_, places) in known::KNOWN {
+        for p in *places {
+            let root = p.split('\\').next().unwrap();
+            assert!(["Roaming", "Local", "LocalLow", "ProgramData", "Home", "HKCU"].contains(&root), "{p}");
+            assert!(p.split('\\').count() >= 2, "{p}");
+        }
+    }
+    cleanup(&r);
+    cleanup(&r2);
+}
+
+#[test]
+fn a_dotnet_settings_folder_of_the_program_goes_whatever_company_folder_holds_it() {
+    let r = roots("dotnet");
+    let own = mk(r.local.join("GARMIN_Corp").join("BaseCamp.exe_Url_urbejbdz42c555ix3xqbitecusqt0tuj"));
+    let other = mk(r.local.join("GARMIN_Corp").join("Express.exe_Url_urbejbdz42c555ix3xqbitecusqt0tuj"));
+    let a = other_app("Garmin.BaseCamp", "BaseCamp", "Garmin Ltd or its subsidiaries", None, None);
+    let t = targets(&steps(&a, &[], &r));
+    assert!(t.contains(&s(&own)), "{t:?}");
+    assert!(!t.contains(&s(&other)));
+    assert!(!t.contains(&s(&r.local.join("GARMIN_Corp"))));
+    cleanup(&r);
+}
+
+#[test]
+fn an_edition_year_is_part_of_the_name() {
+    let r = roots("year");
+    let own = format!("{}\\SoftMaker Software GmbH\\SoftMaker FreeOffice 2024", r.reg);
+    let older = format!("{}\\SoftMaker Software GmbH\\SoftMaker FreeOffice 2021", r.reg);
+    reg_key(&own);
+    reg_key(&older);
+    let a = other_app("SoftMaker.FreeOffice.2024", "SoftMaker FreeOffice 2024", "SoftMaker Software GmbH", None, None);
+    assert_eq!(targets(&steps(&a, &[], &r)), vec![format!("HKCU/{own}")]);
+    // A version is not a year.
+    assert_eq!(edition_year("Inno Setup 6.4.3"), None);
+    assert_eq!(edition_year("7-Zip 2600"), None);
+    cleanup(&r);
+}
+
+#[test]
 fn a_home_dot_folder_a_separate_command_line_tool_uses_stays() {
     let mut r = roots("cli");
     mk(r.home.join(".claude"));
@@ -403,6 +626,25 @@ fn a_home_dot_folder_a_separate_command_line_tool_uses_stays() {
     let mut ru = other_app("Rustlang.Rustup", "Rustup: the Rust toolchain installer", "The Rust Project Developers", None, None);
     ru.uninstall = Some(vec![cargo_bin.join("rustup.exe").to_string_lossy().to_string(), "self".into(), "uninstall".into()]);
     assert_eq!(targets(&steps(&ru, &[], &r)), vec![s(&rustup)]);
+    cleanup(&r);
+}
+
+#[test]
+fn a_home_dot_folder_another_installed_app_has_the_command_of_stays() {
+    // Seen: Miniconda's "_conda.exe" finds ".conda", which Anaconda (its "Scripts\conda.exe")
+    // uses as well when both are installed, though neither is on PATH.
+    let r = roots("conda");
+    let dot = mk(r.home.join(".conda"));
+    let mini_dir = mk(r.program_data.join("miniconda3"));
+    let mini = other_app("Anaconda.Miniconda3", "Miniconda3", "Anaconda, Inc.", Some(mini_dir.clone()), Some(mini_dir.join("_conda.exe")));
+    assert_eq!(targets(&steps(&mini, &[], &r)), vec![s(&dot)]);
+    let ana_dir = mk(r.program_data.join("anaconda3"));
+    touch(ana_dir.join("Scripts").join("conda.exe"));
+    let ana = other_app("Anaconda.Anaconda3", "Anaconda3", "Anaconda, Inc.", Some(ana_dir.clone()), Some(ana_dir.join("Scripts").join("anaconda.exe")));
+    assert!(steps(&mini, &[ana], &r).is_empty());
+    // Its own copy of the command does not count.
+    touch(mini_dir.join("Scripts").join("conda.exe"));
+    assert_eq!(targets(&steps(&mini, &[], &r)), vec![s(&dot)]);
     cleanup(&r);
 }
 
@@ -538,140 +780,182 @@ fn sandbox_dump() {
     std::fs::write(std::env::var("U3D_DUMP").unwrap(), serde_json::to_string_pretty(&rows).unwrap()).unwrap();
 }
 
-/// The finder replayed on what test machines recorded. U3D_REPLAY is a folder of batches, each
-/// with "final.json" (every folder and HKCU key two levels down, the uninstall list), the
-/// "installed.json" of `sandbox_dump` and one file per app with what appeared while it was
-/// installed and first run. Prints what was found and missed per app; writes U3D_REPLAY_OUT.
+/// The finder replayed on what test machines recorded. U3D_REPLAY is a folder with one JSON
+/// file per app (any depth): what appeared while it was installed and first run ("new"), every
+/// folder and HKCU key two levels down right after ("snap"), the uninstall list ("arpAll") and
+/// the installed apps as `sandbox_dump` saw them. Prints what was found and missed per app and
+/// writes the list to U3D_REPLAY_OUT.
 /// cargo test --release --lib sandbox_replay -- --ignored --nocapture
 #[test]
 #[ignore]
 fn sandbox_replay() {
     use serde_json::Value;
-    let dir = PathBuf::from(std::env::var("U3D_REPLAY").unwrap());
-    let idx = std::sync::Arc::new(crate::sources::winget::Index::open(&crate::sources::winget::index_path()).ok());
-    let read = |p: &Path| -> Option<Value> { serde_json::from_str(std::fs::read_to_string(p).ok()?.trim_start_matches('\u{feff}')).ok() };
-    let mut batches: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.join("final.json").is_file() && p.join("installed.json").is_file()).collect();
-    batches.sort();
-    let mut per_app: Vec<(PathBuf, Value)> = vec![];
-    for b in &batches {
-        for e in std::fs::read_dir(b).unwrap().flatten() {
-            let n = e.file_name().to_string_lossy().to_string();
-            if n.ends_with(".json") && !["final.json", "installed.json"].contains(&n.as_str()) {
-                if let Some(v) = read(&e.path()) {
-                    per_app.push((b.clone(), v));
-                }
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "json") {
+                out.push(p);
             }
         }
     }
+    let mut files = vec![];
+    walk(&PathBuf::from(std::env::var("U3D_REPLAY").unwrap()), &mut files);
+    let mut groups: BTreeMap<PathBuf, Vec<Value>> = BTreeMap::new();
+    for f in files {
+        let Ok(raw) = std::fs::read_to_string(&f) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(raw.trim_start_matches('\u{feff}')) else { continue };
+        if v.get("snap").is_some() && v.get("id").is_some() {
+            groups.entry(f.parent().unwrap().to_path_buf()).or_default().push(v);
+        }
+    }
+    for g in groups.values_mut() {
+        g.sort_by_key(|v| v["i"].as_u64().unwrap_or(0));
+    }
     // What shows up for many apps is Windows' own doing, not theirs.
-    let mut freq: std::collections::HashMap<String, usize> = Default::default();
-    for (_, v) in &per_app {
+    let mut freq: HashMap<String, usize> = HashMap::new();
+    for v in groups.values().flatten() {
         for x in v["new"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             *freq.entry(x.to_ascii_lowercase()).or_default() += 1;
         }
     }
+    let idx = std::sync::Arc::new(crate::sources::winget::Index::open(&crate::sources::winget::index_path()).ok());
+    let strs = |v: &Value| -> Vec<String> { v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect() };
     let mut report = Vec::new();
     let (mut full, mut part, mut none, mut empty, mut undetected) = (0, 0, 0, 0, 0);
-    for (bi, b) in batches.iter().enumerate() {
-        let (Some(fin), Some(inst)) = (read(&b.join("final.json")), read(&b.join("installed.json"))) else { continue };
-        let r0 = roots(&format!("replay{bi}"));
+    for (gi, recs) in groups.values().enumerate() {
+        let r0 = roots(&format!("replay{gi}"));
         let base = r0.roaming.parent().unwrap().to_path_buf();
-        let tag_dir = |t: &str| match t {
-            "R" => Some(base.join("Roaming")),
-            "L" => Some(base.join("Local")),
-            "LL" => Some(base.join("LocalLow")),
-            "PD" => Some(base.join("ProgramData")),
-            "H" => Some(base.join("Home")),
-            _ => None,
-        };
         let cu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-        // A list, or a list holding the list.
-        let snap: Vec<&Value> = fin["snap"].as_array().unwrap().iter().flat_map(|v| v.as_array().map(|a| a.iter().collect()).unwrap_or_else(|| vec![v])).collect();
-        for x in snap.into_iter().filter_map(Value::as_str) {
-            let Some((tag, rest)) = x.split_once('\\') else { continue };
-            if tag == "HKCU" {
-                let _ = cu.create_subkey(format!("{}\\{rest}", r0.reg));
-            } else if let Some(t) = tag_dir(tag) {
-                if let Some(d) = rest.strip_suffix('\\') {
-                    let _ = std::fs::create_dir_all(t.join(d));
-                } else {
-                    let _ = std::fs::create_dir_all(t.join(rest).parent().unwrap());
-                    let _ = std::fs::write(t.join(rest), b"x");
-                }
-            }
-        }
-        let s = |k: &str| fin[k].as_str().unwrap_or("").to_ascii_lowercase();
-        let home = s("home");
-        let pairs = [(format!("{home}\\appdata\\locallow"), base.join("LocalLow")), (s("roaming"), base.join("Roaming")), (s("local"), base.join("Local")), (s("pd"), base.join("ProgramData")), (home, base.join("Home"))];
-        let map = |p: &str| -> PathBuf {
-            let low = p.to_ascii_lowercase();
-            for (from, to) in &pairs {
-                if low == *from {
-                    return to.clone();
-                }
-                if low.starts_with(&format!("{from}\\")) {
-                    return to.join(&p[from.len() + 1..]);
-                }
-            }
-            PathBuf::from(p)
-        };
-        let mut install_dirs = Vec::new();
-        for e in fin["arp"].as_array().unwrap() {
-            let g = |k: &str| e[k].as_str().unwrap_or("").to_string();
-            if !g("InstallLocation").trim().is_empty() {
-                install_dirs.push(map(g("InstallLocation").trim().trim_end_matches('\\')));
-            }
-            let icon = g("DisplayIcon").split(',').next().unwrap_or("").trim().trim_matches('"').to_string();
-            let un = crate::winutil::split_program_line(&g("UninstallString")).into_iter().next().unwrap_or_default();
-            for prog in [icon, un] {
-                if Path::new(&prog).is_absolute() {
-                    install_dirs.extend(map(&prog).parent().map(Path::to_path_buf));
-                }
-            }
-        }
-        let path_dirs = fin["path"].as_str().unwrap_or("").split(';').filter(|x| !x.is_empty()).map(map).collect();
-        let ix = idx.clone();
-        let r = Roots { install_dirs, path_dirs, moniker: Box::new(move |id: &str| ix.as_ref().as_ref()?.by_id(id)?.moniker.filter(|m| !m.is_empty())), ..r0 };
-        let apps: Vec<Installed> = inst
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| {
-                let g = |k: &str| v[k].as_str().map(str::to_string);
-                let data = match (g("pkg"), g("tool")) {
-                    (_, Some(key)) => SourceData::Tools { key, series: g("series").unwrap_or_default() },
-                    (pkg, None) => {
-                        let mut e = crate::winutil::UninstallEntry::default();
-                        e.display_name = g("display_name").unwrap_or_default();
-                        e.publisher = g("publisher").unwrap_or_default();
-                        SourceData::Other { pkg: pkg.unwrap_or_default(), how: crate::sources::other::How::ProductCode, entry: Box::new(e), upgrade_code: None }
+        let reg = r0.reg.clone();
+        let place = |x: &str, make: bool| {
+            let Some((tag, rest)) = x.split_once('\\') else { return };
+            let dir = match tag {
+                "R" => "Roaming",
+                "L" => "Local",
+                "LL" => "LocalLow",
+                "PD" => "ProgramData",
+                "H" => "Home",
+                "HKCU" => {
+                    if make {
+                        let _ = cu.create_subkey(format!("{reg}\\{rest}"));
+                    } else {
+                        let _ = cu.delete_subkey_all(format!("{reg}\\{rest}"));
                     }
-                };
-                let mut a = app(&g("id").unwrap_or_default(), &g("name").unwrap_or_default(), &g("version").unwrap_or_default(), g("install_dir").map(|d| map(&d)), data);
-                a.source = if g("tool").is_some() { Source::Tools } else { Source::Other };
-                a.exe = g("exe").map(|d| map(&d));
-                a.uninstall = v["uninstall"].as_array().map(|u| u.iter().filter_map(Value::as_str).map(|x| map(x).to_string_lossy().to_string()).collect());
-                a
-            })
-            .collect();
-        let rel = |p: &str| -> String {
-            let low = p.to_ascii_lowercase();
-            for (t, d) in [("R", "Roaming"), ("LL", "LocalLow"), ("L", "Local"), ("PD", "ProgramData"), ("H", "Home")] {
-                let b = base.join(d).to_string_lossy().to_ascii_lowercase();
-                if low.starts_with(&format!("{b}\\")) {
-                    return format!("{t}\\{}", &p[b.len() + 1..]);
+                    return;
+                }
+                _ => return,
+            };
+            let p = base.join(dir).join(rest.trim_end_matches('\\'));
+            match (make, rest.ends_with('\\')) {
+                (true, true) => drop(std::fs::create_dir_all(&p)),
+                (true, false) => {
+                    let _ = std::fs::create_dir_all(p.parent().unwrap());
+                    let _ = std::fs::write(&p, b"x");
+                }
+                (false, true) => drop(std::fs::remove_dir_all(&p)),
+                (false, false) => drop(std::fs::remove_file(&p)),
+            }
+        };
+        let mut prev: HashSet<String> = HashSet::new();
+        for v in recs {
+            let snap: HashSet<String> = strs(&v["snap"]).into_iter().collect();
+            for x in prev.difference(&snap) {
+                place(x, false);
+            }
+            for x in snap.difference(&prev) {
+                place(x, true);
+            }
+            prev = snap;
+            let s = |k: &str| v[k].as_str().unwrap_or("").to_ascii_lowercase();
+            let home = s("home");
+            let pairs = [(format!("{home}\\appdata\\locallow"), base.join("LocalLow")), (s("roaming"), base.join("Roaming")), (s("local"), base.join("Local")), (s("pd"), base.join("ProgramData")), (home, base.join("Home"))];
+            let map = |p: &str| -> PathBuf {
+                let low = p.to_ascii_lowercase();
+                for (from, to) in &pairs {
+                    if low == *from {
+                        return to.clone();
+                    }
+                    if low.starts_with(&format!("{from}\\")) {
+                        return to.join(&p[from.len() + 1..]);
+                    }
+                }
+                PathBuf::from(p)
+            };
+            let mut install_dirs = Vec::new();
+            for e in v["arpAll"].as_array().into_iter().flatten() {
+                let g = |k: &str| e[k].as_str().unwrap_or("").to_string();
+                if !g("InstallLocation").trim().is_empty() {
+                    install_dirs.push(map(g("InstallLocation").trim().trim_matches('"').trim_end_matches('\\')));
+                }
+                let icon = g("DisplayIcon").split(',').next().unwrap_or("").trim().trim_matches('"').to_string();
+                let un = crate::winutil::split_program_line(&g("UninstallString")).into_iter().next().unwrap_or_default();
+                for prog in [icon, un] {
+                    if Path::new(&prog).is_absolute() {
+                        install_dirs.extend(map(&prog).parent().map(Path::to_path_buf));
+                    }
                 }
             }
-            p.to_string()
-        };
-        let inst_rel: Vec<String> = r.install_dirs.iter().chain(apps.iter().filter_map(|a| a.install_dir.as_ref())).map(|d| format!("{}\\", rel(&d.to_string_lossy()).to_ascii_lowercase())).collect();
-        for (_, v) in per_app.iter().filter(|(pb, _)| pb == b) {
+            let ix = idx.clone();
+            let r = Roots {
+                roaming: r0.roaming.clone(),
+                local: r0.local.clone(),
+                program_data: r0.program_data.clone(),
+                local_low: r0.local_low.clone(),
+                home: r0.home.clone(),
+                reg: r0.reg.clone(),
+                install_dirs,
+                path_dirs: v["path"].as_str().unwrap_or("").split(';').filter(|x| !x.is_empty()).map(map).collect(),
+                moniker: Box::new(move |id: &str| ix.as_ref().as_ref()?.by_id(id)?.moniker.filter(|m| !m.is_empty())),
+            };
+            // Windows PowerShell writes a list inside an object as {"value": [...], "Count": n}.
+            let installed: Vec<Value> = match &v["installed"] {
+                Value::Array(a) => a.clone(),
+                Value::Object(o) => match o.get("value") {
+                    Some(Value::Array(a)) => a.clone(),
+                    _ => vec![v["installed"].clone()],
+                },
+                _ => vec![],
+            };
+            let apps: Vec<Installed> = installed
+                .iter()
+                .map(|x| {
+                    let g = |k: &str| x[k].as_str().map(str::to_string);
+                    let data = match g("tool") {
+                        Some(key) => SourceData::Tools { key, series: g("series").unwrap_or_default() },
+                        None => {
+                            let mut e = crate::winutil::UninstallEntry::default();
+                            e.display_name = g("display_name").unwrap_or_default();
+                            e.publisher = g("publisher").unwrap_or_default();
+                            SourceData::Other { pkg: g("pkg").unwrap_or_default(), how: crate::sources::other::How::ProductCode, entry: Box::new(e), upgrade_code: None }
+                        }
+                    };
+                    let mut a = app(&g("id").unwrap_or_default(), &g("name").unwrap_or_default(), &g("version").unwrap_or_default(), g("install_dir").map(|d| map(&d)), data);
+                    a.source = if g("tool").is_some() { Source::Tools } else { Source::Other };
+                    a.exe = g("exe").map(|d| map(&d));
+                    a.uninstall = x["uninstall"].as_array().map(|u| u.iter().filter_map(Value::as_str).map(|y| map(y).to_string_lossy().to_string()).collect());
+                    a
+                })
+                .collect();
+            let rel = |p: &str| -> String {
+                let low = p.to_ascii_lowercase();
+                for (t, d) in [("R", "Roaming"), ("LL", "LocalLow"), ("L", "Local"), ("PD", "ProgramData"), ("H", "Home")] {
+                    let b = base.join(d).to_string_lossy().to_ascii_lowercase();
+                    if low.starts_with(&format!("{b}\\")) {
+                        return format!("{t}\\{}", &p[b.len() + 1..]);
+                    }
+                }
+                p.to_string()
+            };
+            let inst_rel: Vec<String> = r.install_dirs.iter().chain(apps.iter().filter_map(|a| a.install_dir.as_ref())).map(|d| format!("{}\\", rel(&d.to_string_lossy()).to_ascii_lowercase())).collect();
             let id = v["id"].as_str().unwrap_or("").to_string();
             let lid = format!("other:{}", id.to_ascii_lowercase());
             let me = apps.iter().find(|a| a.id.to_ascii_lowercase() == lid || a.id.to_ascii_lowercase().starts_with(&format!("{lid}:")));
             // What the app made: its top-most new folders, files and keys, without install
             // folders, Windows' own changes and the user's own folders.
-            let new: Vec<String> = v["new"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+            let new = strs(&v["new"]);
             let low_new: Vec<String> = new.iter().map(|x| x.to_ascii_lowercase()).collect();
             let mut made: Vec<String> = new
                 .iter()
@@ -682,8 +966,18 @@ fn sandbox_replay() {
                     let keep_tag = matches!(tag, "r" | "l" | "ll" | "pd" | "hkcu") || (tag == "h" && rest.starts_with('.'));
                     let holds = inst_rel.iter().any(|i| i.starts_with(&l) || (l.ends_with('\\') && *i == l));
                     // Windows' own folders and the shader caches of the graphics driver.
-                    let windows = ["microsoft", "packages", "temp", "classes", "policies", "wow6432node", "appdatalow", "nvidia", "amd", "intel", "d3dscache"].iter().any(|w| rest == *w || rest.starts_with(&format!("{w}\\"))) || rest.ends_with("user data\\");
-                    keep_tag && !parent_new && !holds && !windows && freq.get(&l).copied().unwrap_or(0) < 4
+                    // Also what shared frameworks and installers leave (Chromium's and Squirrel's,
+                    // WiX#, the installer's own id key) and folders shared by many programs.
+                    let windows = [
+                        "microsoft", "packages", "temp", "classes", "policies", "wow6432node", "appdatalow", "nvidia", "amd", "intel", "d3dscache", "app.theupdater3d", "chromium",
+                        "registeredapplications", "squirreltemp", "programs\\common", "peerdistrepub", "toastnotificationmanagercompat", "fontconfig", ".dbus-keyrings", "wixsharp",
+                        "branchio", "google\\common", "google\\update", "crashdumps", "programs", "advinst_logs", "caphyon",
+                    ]
+                    .iter()
+                    .any(|w| rest.trim_end_matches('\\') == *w || rest.starts_with(&format!("{w}\\")))
+                        || is_guid(rest.trim_end_matches('\\'));
+                    let marker = ["user data\\", "default\\", "profiles.ini", "local state", "login data", "bookmarks"].iter().any(|m| rest.ends_with(m) && rest.matches('\\').count() >= 2);
+                    keep_tag && !parent_new && !holds && !windows && !marker && freq.get(&l).copied().unwrap_or(0) < 4
                 })
                 .cloned()
                 .collect();
@@ -710,22 +1004,68 @@ fn sandbox_replay() {
                 let m = m.to_ascii_lowercase();
                 low_got.iter().any(|g| m == *g || m.starts_with(g.as_str()) || m.starts_with(&format!("{g}\\")))
             };
-            let missed: Vec<&String> = made.iter().filter(|m| !covered(m)).collect();
-            // Found but not made by this app (made before it, by Windows or by another app).
-            let extra: Vec<&String> = got.iter().filter(|g| {
-                let g = g.to_ascii_lowercase();
-                !low_new.iter().any(|n| *n == g || n.starts_with(&g) || g.starts_with(n.as_str()) || n.starts_with(&format!("{g}\\")))
-            }).collect();
-            match (made.is_empty(), missed.len()) {
-                (true, _) => empty += 1,
-                (false, 0) => full += 1,
-                (false, n) if n == made.len() => none += 1,
-                _ => part += 1,
+            // A new vendor folder or key counts by what is in it (the finder takes the app's own
+            // subfolder only), and a browser profile is kept on purpose.
+            let low_snap: HashSet<String> = prev.iter().map(|x| x.to_ascii_lowercase()).collect();
+            let profile = |m: &str| {
+                let m = m.to_ascii_lowercase();
+                m.ends_with('\\') && ["user data\\", "profiles.ini"].iter().any(|k| low_snap.contains(&format!("{m}{k}"))) || (low_snap.contains(&format!("{m}default\\")) && low_snap.contains(&format!("{m}local state")))
+            };
+            let mut kept: Vec<String> = vec![];
+            let mut missed: Vec<String> = vec![];
+            for m in &made {
+                if covered(m) {
+                    continue;
+                }
+                if profile(m) {
+                    kept.push(m.clone());
+                    continue;
+                }
+                let lm = m.to_ascii_lowercase();
+                let pre = if lm.starts_with("hkcu") { format!("{lm}\\") } else { lm.clone() };
+                let kids: Vec<&String> = new.iter().filter(|n| {
+                    let ln = n.to_ascii_lowercase();
+                    ln.starts_with(&pre) && ln.len() > pre.len() && !ln[pre.len()..].trim_end_matches('\\').contains('\\')
+                }).collect();
+                let kids: Vec<&String> = kids.into_iter().filter(|k| !["user data\\", "default\\", "profiles.ini", "local state", "login data", "bookmarks"].iter().any(|x| k.to_ascii_lowercase().ends_with(x))).collect();
+                if lm.ends_with('\\') && kids.is_empty() || !lm.ends_with('\\') && !lm.starts_with("hkcu") || kids.is_empty() {
+                    missed.push(m.clone());
+                    continue;
+                }
+                for k in kids {
+                    if profile(k) {
+                        kept.push(k.clone());
+                    } else if !covered(k) {
+                        missed.push(k.clone());
+                    }
+                }
             }
-            println!("{id} [{}] made={} found={got:?} missed={missed:?} extra={extra:?}", me.name, made.len());
-            report.push(serde_json::json!({ "id": id, "name": me.name, "detected": true, "made": made, "found": got, "missed": missed, "extra": extra, "exe": me.exe.as_ref().map(|e| e.to_string_lossy().to_string()), "install_dir": me.install_dir.as_ref().map(|e| e.to_string_lossy().to_string()) }));
+            // Found though this app did not make it: made before it, by Windows or another app.
+            let extra: Vec<&String> = got
+                .iter()
+                .filter(|g| {
+                    let g = g.to_ascii_lowercase();
+                    !low_new.iter().any(|n| *n == g || n.starts_with(&g) || g.starts_with(n.as_str()) || n.starts_with(&format!("{g}\\")))
+                })
+                .collect();
+            let hit = low_new.iter().any(|n| covered(n));
+            let status = match (made.len() == kept.len(), missed.is_empty(), hit) {
+                (true, _, _) => "nothing",
+                (_, true, _) => "full",
+                (_, false, true) => "part",
+                _ => "none",
+            };
+            match status {
+                "nothing" => empty += 1,
+                "full" => full += 1,
+                "part" => part += 1,
+                _ => none += 1,
+            }
+            println!("{id} [{}] {status} found={got:?} missed={missed:?} kept={kept:?} extra={extra:?}", me.name);
+            let publisher = installed.iter().find(|x| x["id"].as_str() == Some(me.id.as_str())).map(|x| x["publisher"].clone());
+            report.push(serde_json::json!({ "id": id, "name": me.name, "detected": true, "status": status, "made": made, "found": got, "missed": missed, "kept": kept, "extra": extra, "publisher": publisher, "exe": me.exe.as_ref().map(|e| rel(&e.to_string_lossy())), "install_dir": me.install_dir.as_ref().map(|e| rel(&e.to_string_lossy())) }));
         }
-        cleanup(&r);
+        cleanup(&r0);
     }
     println!("== apps {} | settings fully found {full}, partly {part}, not found {none}, made nothing {empty}, not detected {undetected}", report.len());
     if let Ok(out) = std::env::var("U3D_REPLAY_OUT") {

@@ -274,6 +274,21 @@ impl Index {
         self.conn.query_row("SELECT count(*) FROM pfns2 WHERE package = ?1", [row], |r| r.get::<_, i64>(0)).unwrap_or(0) > 0
     }
 
+    /// Packages offered as this MSIX package family ("Canva.Affinity_8a0j1tnjnt4a4"). The index
+    /// keeps family names in lower case.
+    pub fn by_family(&self, family: &str) -> Vec<i64> {
+        let f = family.trim().to_lowercase();
+        if f.is_empty() {
+            return vec![];
+        }
+        self.rows("SELECT package FROM pfns2 WHERE pfn = ?1", &[&f])
+    }
+
+    /// A package's MSIX family names, lower case.
+    pub fn families_of(&self, row: i64) -> Vec<String> {
+        self.strings("SELECT pfn FROM pfns2 WHERE package = ?1", row)
+    }
+
     /// Every package, for browsing the whole catalog.
     pub fn all(&self) -> Vec<Pkg> {
         let Ok(mut st) = self.conn.prepare(&format!("SELECT {PKG_COLS} FROM packages")) else { return vec![] };
@@ -348,7 +363,7 @@ impl Index {
 
     /// Give a package of a test index a Store package family name.
     pub fn add_test_pfn(&self, row: i64, pfn: &str) {
-        self.conn.execute("INSERT OR IGNORE INTO pfns2 VALUES(?1, ?2)", rusqlite::params![pfn, row]).unwrap();
+        self.conn.execute("INSERT OR IGNORE INTO pfns2 VALUES(?1, ?2)", rusqlite::params![pfn.to_lowercase(), row]).unwrap();
     }
 
     /// Give a package of a test index these tags.
@@ -554,6 +569,11 @@ pub struct Installer {
     pub success_codes: Vec<u32>,
     pub release_date: Option<String>,
     pub default_install_location: Option<String>,
+    /// MSIX and APPX installers: the package family name the package installs as
+    pub family: Option<String>,
+    /// MSIX and APPX installers: SHA-256 of the package's signature file (AppxSignature.p7x),
+    /// lowercase hex
+    pub signature_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -671,6 +691,8 @@ pub fn parse_manifest(yaml: &str) -> Result<Manifest> {
             success_codes: success,
             release_date: text(get("ReleaseDate")),
             default_install_location: text(&get("InstallationMetadata")["DefaultInstallLocation"]),
+            family: text(get("PackageFamilyName")),
+            signature_sha256: text(&inst["SignatureSha256"]).map(|s| s.to_ascii_lowercase()),
         });
     }
     if m.release_date.is_none() {

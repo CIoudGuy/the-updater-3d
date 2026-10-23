@@ -5,6 +5,10 @@ import { matchRank } from "./browse";
 import type {
   ActivityEntry,
   AppEntry,
+  BackupInfo,
+  LeftoverItem,
+  LeftoverResult,
+  LeftoverScan,
   CatalogEntry,
   DriversSnapshot,
   EventMap,
@@ -182,6 +186,20 @@ function seedApps(): AppEntry[] {
       id: "other:Notepad++.Notepad++:user", source: "other", group: "Other apps", name: "Notepad++ (this user)", code: "No", fg: "#9CD67A", bg: "#16240F",
       version: "8.8.6", latest: "8.8.6", status: "current", sizeOnDisk: 14 * MB,
       installDir: "C:\\Users\\Alex\\AppData\\Local\\Programs\\Notepad++", updatedAt: iso(4 * DAY), tagline: "A free source code editor",
+    }),
+    // Other programs: in Windows' list, no catalog matched them; listed to uninstall them.
+    app({
+      id: "prog:hklm64:megasync", source: "programs", group: "Other programs", name: "MEGAsync", code: "ME", fg: "#EDEDED", bg: "#36302B",
+      version: "6.7.0.3", sizeOnDisk: 312 * MB, installDir: "C:\\Users\\Alex\\AppData\\Local\\MEGAsync", updatedAt: iso(70 * DAY), tagline: "Mega Limited",
+    }),
+    app({
+      id: "prog:hklm32:contoso tablet driver", source: "programs", group: "Other programs", name: "Contoso Tablet Driver", code: "Ct", fg: "#EDEDED", bg: "#2B3436",
+      version: "3.4.1", sizeOnDisk: 48 * MB, installDir: "C:\\Program Files (x86)\\Contoso\\Tablet", updatedAt: iso(400 * DAY), tagline: "Contoso Ltd.",
+    }),
+    app({
+      id: "prog:hkcu:oldtool", source: "programs", group: "Other programs", name: "Old Tool", code: "OT", fg: "#EDEDED", bg: "#2F2B36",
+      version: "1.2", status: "missing", installDir: null, updatedAt: iso(900 * DAY), tagline: "Its uninstaller C:\\Program Files\\Old Tool\\uninst.exe is missing",
+      note: "Its uninstaller is missing. Remove from list cleans up what is left.", canRollback: false,
     }),
   );
   if (MODE === "current") {
@@ -531,7 +549,7 @@ let status: Status = {
   scanStep: null,
   firstScan: false,
   appVersion: "1.0.0",
-  selfUpdate: MODE === "ready" ? "1.1.0" : null,
+  selfUpdate: MODE === "selfupdate" ? "1.2.0" : null,
 };
 
 let services: ServiceInfo[] = [
@@ -1005,6 +1023,11 @@ function reorderCmp(a: string, b: string) {
   return 0;
 }
 
+/** Leftover scans shown, cleanups that can be restored, and names of apps being uninstalled. */
+const scans = new Map<string, { appId: string; name: string; items: LeftoverItem[] }>();
+const backups: BackupInfo[] = [];
+const lastNames = new Map<string, string>();
+
 type H = { [K in keyof Commands]: (args: Commands[K]["args"]) => Commands[K]["ret"] | Promise<Commands[K]["ret"]> };
 
 function findApp(id: string) {
@@ -1115,6 +1138,7 @@ const handlers: H = {
   uninstall_app({ appId }) {
     const a = findApp(appId);
     if (!a) return;
+    lastNames.set(a.id, a.name);
     const j = enqueue(a, "uninstall", a.version, 0);
     if (j) j.fromVersion = a.version;
     emit("apps", apps);
@@ -1140,6 +1164,57 @@ const handlers: H = {
   allow_admin: () => {},
   take_route: () => null,
   open_logs_folder: () => {},
+  leftover_scan: ({ appId }) => {
+    if (appId === "system:dead-shortcuts") {
+      const dead: LeftoverItem[] = [
+        { id: "file:mega", kind: "shortcut", label: String.raw`C:\Users\Alex\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\MEGAsync\MEGAsync.lnk`, detail: String.raw`Starts C:\Users\Alex\AppData\Local\MEGAsync\MEGAsync.exe, which is gone`, size: 1500, checked: true, required: false, elevated: false },
+        { id: "file:old", kind: "startup", label: String.raw`C:\Users\Alex\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Old Sync.lnk`, detail: String.raw`Starts C:\Program Files\Old Sync\sync.exe, which is gone`, size: 1300, checked: true, required: false, elevated: false },
+      ];
+      return { scanId: "dead", appId, name: "Dead shortcuts", broken: true, items: dead };
+    }
+    const name = findApp(appId)?.name ?? lastNames.get(appId) ?? appId;
+    const broken = findApp(appId)?.status === "missing";
+    const scanId = "s" + Math.random().toString(36).slice(2, 8);
+    const items: LeftoverItem[] = broken
+      ? [
+          { id: "key:entry", kind: "entry", label: String.raw`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\OldTool`, detail: "Its entry in the list of installed programs", size: null, checked: true, required: true, elevated: false },
+          { id: "file:lnk", kind: "shortcut", label: String.raw`C:\Users\Alex\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Old Tool.lnk`, detail: String.raw`Starts C:\Program Files\Old Tool\oldtool.exe, which is gone`, size: 1200, checked: true, required: false, elevated: false },
+        ]
+      : [
+          { id: "dir:x", kind: "folder", label: `C:\\Users\\Alex\\AppData\\Local\\${name}`, detail: "What is left of its install folder", size: 18 * MB, checked: true, required: false, elevated: false },
+          { id: "file:a", kind: "shortcut", label: `C:\\Users\\Alex\\Desktop\\${name}.lnk`, detail: `Starts ${name}.exe, which is gone`, size: 1400, checked: true, required: false, elevated: false },
+          { id: "file:b", kind: "shortcut", label: `C:\\Users\\Alex\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\${name}\\Uninstall ${name}.lnk`, detail: "Starts uninst.exe, which is gone", size: 1300, checked: true, required: false, elevated: false },
+          { id: "value:run", kind: "startup", label: `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run (${name})`, detail: `Starts ${name}.exe at sign-in, which is gone`, size: null, checked: true, required: false, elevated: false },
+          { id: "key:soft", kind: "registry", label: `HKCU\\Software\\${name}`, detail: "Its own registry key", size: null, checked: true, required: false, elevated: false },
+          { id: "task:upd", kind: "task", label: `\\${name} Update`, detail: "Runs update.exe, which is gone", size: null, checked: true, required: false, elevated: true },
+          { id: "dir:cfg", kind: "settings", label: `C:\\Users\\Alex\\AppData\\Roaming\\${name}`, detail: "Its settings and add-ons", size: 4 * MB, checked: false, required: false, elevated: false },
+        ];
+    scans.set(scanId, { appId, name, items });
+    return new Promise<LeftoverScan>((r) => setTimeout(() => r({ scanId, appId, name, broken, items }), 500));
+  },
+  leftover_delete: ({ scanId, ids }) => {
+    const s = scans.get(scanId);
+    if (!s) throw new Error("That list is out of date. Open it again.");
+    const done = s.items.filter((i) => i.required || ids.includes(i.id));
+    const freed = done.reduce((n, i) => n + (i.kind === "folder" || i.kind === "shortcut" || i.kind === "settings" ? (i.size ?? 0) : 0), 0);
+    const backupId = done.some((i) => i.kind !== "folder" && i.kind !== "shortcut" && i.kind !== "settings") ? "b" + scanId : null;
+    if (backupId) backups.push({ id: backupId, created: new Date().toISOString(), app: s.name, items: 2 });
+    if (findApp(s.appId)?.status === "missing") {
+      apps = apps.filter((a) => a.id !== s.appId);
+      emit("apps", apps);
+    }
+    const e: ActivityEntry = { id: "a" + Math.random().toString(36).slice(2, 8), time: iso(0), kind: "uninstall", title: `Cleaned up after ${s.name}`, meta: `${done.length} removed${freed ? `, ${Math.round(freed / MB)} MB freed` : ""}`, appId: null, error: null, restoreId: backupId };
+    activity.unshift(e);
+    emit("activity", e);
+    return new Promise<LeftoverResult>((r) => setTimeout(() => r({ removed: done.length, failed: [], freed, backupId }), 600));
+  },
+  leftover_restore: ({ backupId }) => {
+    const i = backups.findIndex((b) => b.id === backupId);
+    if (i < 0) throw new Error("That backup is gone");
+    const [b] = backups.splice(i, 1);
+    pushActivity("uninstall", `Restored what was cleaned up after ${b.app}`, "Registry entries and tasks are back. Services return after a restart.", null);
+  },
+  leftover_backups: () => clone(backups),
   prefs_preview: ({ appId }) =>
     appId.startsWith("blender")
       ? [{ path: String.raw`AppData\Roaming\Blender Foundation\Blender\4.5`, size: 184 * MB, registry: false }]

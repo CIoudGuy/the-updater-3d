@@ -16,10 +16,10 @@
   import { store, statusLabel } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { router, appHref } from "../lib/router.svelte";
-  import { installApp, openApp, updateOne } from "../lib/actions";
+  import { installApp, openApp, openStorePage, updateOne } from "../lib/actions";
   import { installedFor } from "../lib/appview";
   import { bytes, dateLong, preParts, shortVersion, splitVersion } from "../lib/format";
-  import { blockedTitle, patchEntries } from "../lib/browse";
+  import { blockedTitle, patchEntries, storeOnly } from "../lib/browse";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import type { CatalogEntry, VersionInfo } from "../lib/types";
@@ -55,6 +55,8 @@
   const chooseOnly = $derived(!!c && c.pickVersion && !/^\d/.test(c.version));
 
   let versions = $state<VersionInfo[] | null>(null);
+  // The catalog may not list a size; the version list asks the download server for the newest one.
+  const size = $derived(c?.size ?? versions?.find((v) => v.latest)?.size ?? null);
   let failed = $state(false);
   let seq = 0;
   function load() {
@@ -173,8 +175,8 @@
             <Dab color={statusColor} pulse={job.state === "downloading" || job.state === "installing"} />{jobStatus(job)}<span class="pc"><Num value={pct(job)} />%</span>
           {:else if isIn}
             <Dab color={statusColor} />{#if installedApp}Installed {installedApp.version}{:else}Installed{/if}{#if canUpdate && installedApp}, {installedApp.latest} available{/if}
-          {:else if c.size}
-            {bytes(c.size)} download
+          {:else if size}
+            {bytes(size)} download
           {/if}
         </span>
         <div class="btns">
@@ -196,7 +198,9 @@
           {:else if chooseOnly}
             <Btn variant="primary" title="Choose a version of {c.name}" onclick={chooseVersion}>Choose a version</Btn>
           {:else}
-            {#if c.blocked}
+            {#if storeOnly(c.blocked)}
+              <Btn variant="primary" title="Open {c.name} in the Microsoft Store" onclick={() => openStorePage(c.id)}>Open in Microsoft Store <Icon d={I.external} size={14} width={2.5} /></Btn>
+            {:else if c.blocked}
               <Btn variant="primary" disabled title={blockedTitle(c.blocked)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(shortVersion(c.version))[0]}</Btn>
             {:else}
               <Btn variant="primary" title="Install {c.name} {c.version}" onclick={() => installApp(c)}><Icon d={I.get} size={16} width={2.5} />Install {preParts(shortVersion(c.version))[0]}</Btn>
@@ -212,7 +216,7 @@
     {#if c.description || (c.blocked && !isIn)}
       <div class="about" in:rise>
         {#if c.description}<p class="desc">{c.description}</p>{/if}
-        {#if c.blocked && !isIn}<p class="blk">{blockedTitle(c.blocked)}. Install it from the publisher's own site.</p>{/if}
+        {#if c.blocked && !isIn}<p class="blk">{storeOnly(c.blocked) ? "Only the Microsoft Store installs this app. Install it from the Microsoft Store." : `${blockedTitle(c.blocked)}. Install it from the publisher's own site.`}</p>{/if}
       </div>
     {/if}
   {/if}
@@ -271,7 +275,7 @@
           <dt>Newest</dt>
           <dd title={c.version}>{chooseOnly ? "Choose a version" : shortVersion(c.version)}</dd>
           <dt>Download</dt>
-          <dd>{c.size ? bytes(c.size) : "Not known"}</dd>
+          <dd>{size ? bytes(size) : versions === null ? "Checking" : "Not known"}</dd>
           {#if c.prerelease}<dt>Release</dt><dd>Pre-release</dd>{/if}
         </dl>
         <span class="hint">

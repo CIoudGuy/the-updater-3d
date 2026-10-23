@@ -11,6 +11,7 @@ pub mod drivers;
 pub mod nvidia;
 pub mod icons;
 pub mod intel;
+pub mod msix;
 pub mod msstore;
 pub mod locate;
 pub mod other;
@@ -146,6 +147,16 @@ pub enum Step {
     /// Stop unless Windows trusts the file's Authenticode signature by exactly `signer`: for a
     /// program unpacked from a download that has no published checksum (Adobe's RUM).
     CheckSigner { path: PathBuf, signer: String, label: String },
+    /// Install an MSIX or APPX package for this user with Windows' package manager, after
+    /// checking that it is package family `family` with a trusted signature (and the signature
+    /// file `signature_sha256`, when the catalog gives one). `update`: Windows closes the app if
+    /// it still runs; `any_version`: an older version may replace a newer one (a roll back).
+    AddPackage { path: PathBuf, family: String, signature_sha256: Option<String>, update: bool, any_version: bool, label: String },
+    /// Remove this user's packages of the family with Windows' package manager.
+    RemovePackage { family: String, label: String },
+    /// Delete one thing an uninstalled program left behind (`uninstall::remove::apply`, which
+    /// checks again that it is safe to delete).
+    Leftover { target: crate::uninstall::Target, elevated: bool, label: String },
 }
 
 impl Step {
@@ -158,14 +169,17 @@ impl Step {
             | Step::OpenUri { label, .. }
             | Step::RemoveUserRegKey { label, .. }
             | Step::RemoveIfOnlyUninstaller { label, .. }
-            | Step::CheckSigner { label, .. } => label,
+            | Step::CheckSigner { label, .. }
+            | Step::AddPackage { label, .. }
+            | Step::RemovePackage { label, .. }
+            | Step::Leftover { label, .. } => label,
             Step::WriteFile { .. } => "Writing settings",
             Step::RemoveFile { .. } => "Cleaning up",
         }
     }
     pub fn elevated(&self) -> bool {
         match self {
-            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } => *elevated,
+            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } | Step::Leftover { elevated, .. } => *elevated,
             _ => false,
         }
     }
@@ -207,7 +221,7 @@ impl Plan {
     /// to another app)? Those clash with each other, so they run one at a time. Plans that only
     /// unpack, copy, move, delete or write files, shortcuts and our own registry entries do not.
     pub fn runs_installer(&self) -> bool {
-        self.steps.iter().any(|s| matches!(s, Step::Run { .. } | Step::OpenUri { .. }))
+        self.steps.iter().any(|s| matches!(s, Step::Run { .. } | Step::OpenUri { .. } | Step::AddPackage { .. } | Step::RemovePackage { .. }))
     }
 
     /// What the plan writes to: the app and the folders it unpacks into or deletes, lowercase.
@@ -325,6 +339,9 @@ mod plan_tests {
         assert!(plan("x", vec![run("C:/Windows/System32/msiexec.exe")]).runs_installer());
         assert!(plan("x", vec![run("C:/dl/setup.exe")]).runs_installer());
         assert!(plan("x", vec![Step::OpenUri { uri: "unityhub://6000.3.27f1".into(), label: "Hub".into() }]).runs_installer());
+        // Windows' package manager installs one package at a time too.
+        assert!(plan("x", vec![Step::AddPackage { path: "C:/dl/a.msix".into(), family: "A_x".into(), signature_sha256: None, update: false, any_version: false, label: "Installing".into() }]).runs_installer());
+        assert!(plan("x", vec![Step::RemovePackage { family: "A_x".into(), label: "Uninstalling".into() }]).runs_installer());
         // An uninstall runs the vendor's uninstaller.
         assert!(plan("x", vec![run("C:/Program Files/App/uninstall.exe"), Step::RemoveDir { path: "C:/Program Files/App".into(), elevated: true, label: "Rest".into() }]).runs_installer());
         assert!(!plan("x", vec![]).runs_installer());

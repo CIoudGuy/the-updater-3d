@@ -128,6 +128,7 @@
   const lang = $derived(({ en_US: "English (US)", en_GB: "English (UK)", de_DE: "German", fr_FR: "French", es_ES: "Spanish", ja_JP: "Japanese" } as Record<string, string>)[store.settings.language] ?? store.settings.language);
   const statusLine = $derived.by(() => {
     if (!app) return "";
+    if (app.source === "programs" && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
     switch (app.status) {
       case "update":
         return `${app.latest} available${app.updateSize ? ", " + bytes(app.updateSize) : ""}`;
@@ -188,7 +189,7 @@
               <Btn variant="secondary" title="Updates and removal happen in the Microsoft Store" onclick={() => openStorePage(app.id)}>Open in Microsoft Store <Icon d={I.external} size={14} width={2.5} /></Btn>
             {/if}
             {#if app.canUninstall}
-              <Btn variant="danger" title="Uninstall {app.name}" onclick={() => askUninstall(app.id)}>Uninstall</Btn>
+              <Btn variant="danger" title="Uninstall {app.name}" onclick={() => askUninstall(app.id)}>{app.source === "programs" && app.status === "missing" ? "Remove from list" : "Uninstall"}</Btn>
             {/if}
           {/if}
         </div>
@@ -200,6 +201,12 @@
     {/if}
 
     <div class="cols">
+      {#if app.source === "programs"}
+      <section aria-label="About this program">
+        <div class="sec-h"><span>About this program</span></div>
+        <p class="gone">No catalog lists {app.name}, so its updates are not checked here. Uninstall runs its own uninstaller and then shows what it left behind, to clean up.</p>
+      </section>
+      {:else}
       <section aria-label="Version history">
         <div class="sec-h">
           <span>Version history</span>
@@ -243,9 +250,10 @@
           {/each}
         {/if}
       </section>
+      {/if}
 
       <aside aria-label="Details">
-        {#if !app.readOnly}
+        {#if !app.readOnly && app.source !== "programs"}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>
           <div class="pk">
@@ -259,6 +267,7 @@
         {/if}
 
         <dl>
+          {#if app.source === "programs" && app.status !== "missing" && app.tagline}<dt>Publisher</dt><dd>{app.tagline}</dd>{/if}
           <dt>Location</dt>
           <dd>
             {#if app.installDir}
@@ -276,8 +285,8 @@
           <dd>{app.updatedAt ? dateLong(app.updatedAt) : "Not known"}</dd>
         </dl>
 
-        {#if app.readOnly}
-          <!-- Steam or the Microsoft Store keeps this copy up to date -->
+        {#if app.readOnly || app.source === "programs"}
+          <!-- Steam or the Microsoft Store keeps this copy up to date; no catalog knows Other programs -->
         {:else if isBlender && app.channel === "beta"}
           <!-- a pre-release copy has no bug-fix releases to keep -->
         {:else if isBlender}

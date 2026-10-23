@@ -40,7 +40,7 @@ async fn first_scan_timing() {
         time!("craft feed", craft::fetch(false)),
         time!("blender feed", blender::fetch(&v, true)),
         time!("tools feed", tools::fetch(&v)),
-        time!("other feed (winget)", other::fetch(&v)),
+        time!("other feed (winget)", other::fetch(&v, None)),
         time!("windows update drivers", drivers::fetch()),
     );
     println!("network checks (parallel)   {:>7} ms", net.elapsed().as_millis());

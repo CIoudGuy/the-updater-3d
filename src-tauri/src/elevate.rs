@@ -441,7 +441,10 @@ pub fn execute_with(step: &Step, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> Ste
         }
         Step::ExtractZip { zip, dest, strip_root, .. } => extract_zip(zip, dest, *strip_root).map(|_| (None, String::new())),
         Step::CheckSigner { path, signer, .. } => crate::sources::check_signer(path, signer, winutil::authenticode_signer(path)).map(|_| (None, String::new())),
+        Step::AddPackage { path, family, signature_sha256, update, any_version, .. } => crate::sources::msix::install(path, family, signature_sha256.as_deref(), *update, *any_version).map(|t| (None, t)),
+        Step::RemovePackage { family, .. } => crate::sources::msix::remove(family).map(|t| (None, t)),
         Step::RemoveDir { path, .. } => remove_dir(path).map(|_| (None, String::new())),
+        Step::Leftover { target, .. } => crate::uninstall::remove::apply(target).map(|_| (None, String::new())),
         Step::WriteFile { path, contents, .. } => {
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;

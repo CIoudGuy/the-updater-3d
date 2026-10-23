@@ -19,6 +19,3 @@ design/
 *.pem
 *.pfx
 
-# Official release feed and key: kept on the build PC only
-src-tauri/.update-key
-src-tauri/.update-feed

@@ -3,7 +3,7 @@ import { send } from "./api";
 import { dateShort, bytes } from "./format";
 import { jobStatus } from "./jobs";
 import { router, appHref } from "./router.svelte";
-import { store } from "./store.svelte";
+import { statusLabel, store } from "./store.svelte";
 import type { AppEntry } from "./types";
 import { menuItemsFor, ui } from "./ui.svelte";
 import { runAppMenu } from "./actions";
@@ -20,9 +20,17 @@ export function openMenuFor(app: AppEntry, anchor: HTMLElement, at?: { x: number
   });
 }
 
+/** The status word on a tile or row. Other programs have no catalog: "Installed", not "Current". */
+export function stateLabel(app: AppEntry, long = false): string {
+  if (app.source === "programs" && app.status === "current") return "Installed";
+  if (app.source === "programs" && app.status === "missing") return long ? "Uninstaller missing" : "Broken";
+  return statusLabel(app.status, long);
+}
+
 /** Subline under the version: "28.0 available", "Up to date", "Downloading 1.3 of 2.9 GB" */
 export function subline(app: AppEntry): string {
   const j = store.jobByApp.get(app.id);
+  if (app.source === "programs" && (app.status === "current" || app.status === "missing")) return app.status === "missing" ? "" : (app.tagline ?? "");
   switch (app.status) {
     case "updating":
       return j ? jobStatus(j, false) : "Updating";

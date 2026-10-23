@@ -107,6 +107,14 @@ impl Default for Tuning {
     }
 }
 
+impl Tuning {
+    /// The default, with as many connections as this PC is tuned for (fewer on a low end PC).
+    pub fn for_this_pc() -> Self {
+        let m = crate::machine::tuned();
+        Tuning { start_conns: m.start_conns, max_conns: m.conns_per_file, ..Tuning::default() }
+    }
+}
+
 /// Connections to one server, over all downloads at once.
 const HOST_MAX: usize = 8;
 /// Received data is written in blocks of this size.
@@ -620,7 +628,7 @@ fn with_headers(mut req: reqwest::RequestBuilder, d: &Download) -> reqwest::Requ
 // ---------------------------------------------------------------- the download
 
 pub async fn fetch(d: &Download, progress: Arc<Progress>, throttle: Arc<Throttle>, ctl: watch::Receiver<Control>) -> Result<Outcome> {
-    fetch_tuned(d, progress, throttle, ctl, Tuning::default()).await
+    fetch_tuned(d, progress, throttle, ctl, Tuning::for_this_pc()).await
 }
 
 pub async fn fetch_tuned(d: &Download, progress: Arc<Progress>, throttle: Arc<Throttle>, mut ctl: watch::Receiver<Control>, t: Tuning) -> Result<Outcome> {

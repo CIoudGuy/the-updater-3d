@@ -13,6 +13,8 @@ pub enum Source {
     Tools,
     /// Any other app, matched from the public winget catalog.
     Other,
+    /// Any other program in Windows' list of installed programs (uninstall only).
+    Programs,
 }
 
 impl Source {
@@ -23,6 +25,7 @@ impl Source {
             Source::Blender => "Blender",
             Source::Tools => "More apps",
             Source::Other => "Other apps",
+            Source::Programs => "Other programs",
         }
     }
 }
@@ -275,6 +278,9 @@ pub struct ActivityEntry {
     pub meta: Option<String>,
     pub app_id: Option<String>,
     pub error: Option<JobError>,
+    /// A cleanup's backup that "Restore" puts back (kept 30 days).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -408,6 +414,11 @@ pub struct Status {
     pub first_scan: bool,
     pub app_version: String,
     pub self_update: Option<String>,
+    /// "16 cores, 32 GB, SSD": the PC the app tuned itself for
+    #[serde(default)]
+    pub machine: String,
+    #[serde(default)]
+    pub machine_tier: crate::machine::Tier,
 }
 
 #[derive(Clone, Debug, Serialize)]

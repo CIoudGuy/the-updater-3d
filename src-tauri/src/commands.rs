@@ -102,11 +102,14 @@ pub fn open_app(core: C<'_>, app_id: String) -> Res<()> {
     winutil::launch(&exe, &[]).map_err(err)
 }
 
-/// Open a Microsoft Store copy's page in the Store app, where it is updated or removed.
+/// Open a Microsoft Store copy's page in the Store app, where it is updated or removed; or the
+/// Store page of a Get apps entry that only the Store installs ("other:<package id>").
 #[tauri::command]
 pub fn open_store_page(core: C<'_>, app_id: String) -> Res<()> {
-    let i = core.installed(&app_id).ok_or("That app is no longer installed")?;
-    let s = i.store.ok_or("This copy is not from the Microsoft Store")?;
+    let s = match core.installed(&app_id) {
+        Some(i) => i.store.ok_or("This copy is not from the Microsoft Store")?,
+        None => crate::sources::other::store_ref_of(&app_id).ok_or("This app is not in the Microsoft Store")?,
+    };
     winutil::shell_open(&s.page_url()).map_err(err)
 }
 
@@ -469,4 +472,29 @@ mod window_tests {
             }
         }
     }
+}
+
+/// What an uninstalled (or broken) program left behind, shown before anything is deleted.
+#[tauri::command]
+pub async fn leftover_scan(core: C<'_>, app_id: String) -> Res<crate::uninstall::run::LeftoverScan> {
+    let c = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::uninstall::run::scan(&c, &app_id)).await.map_err(err)?.map_err(err)
+}
+
+/// Delete the ticked leftovers of a scan (registry keys, services and tasks are saved first).
+#[tauri::command]
+pub async fn leftover_delete(core: C<'_>, scan_id: String, ids: Vec<String>) -> Res<crate::uninstall::run::DeleteResult> {
+    crate::uninstall::run::delete(core.inner().clone(), &scan_id, &ids).await.map_err(err)
+}
+
+/// Put back what a cleanup saved ("Restore" in Activity).
+#[tauri::command]
+pub async fn leftover_restore(core: C<'_>, backup_id: String) -> Res<()> {
+    crate::uninstall::run::restore(core.inner().clone(), &backup_id).await.map_err(err)
+}
+
+/// Cleanups that can still be restored.
+#[tauri::command]
+pub async fn leftover_backups() -> Res<Vec<crate::uninstall::run::BackupInfo>> {
+    tauri::async_runtime::spawn_blocking(crate::uninstall::run::backups).await.map_err(err)
 }

@@ -30,6 +30,9 @@ export interface Popover {
 
 export type DialogState =
   | { type: "uninstall"; appId: string }
+  | { type: "uninstall-many"; appIds: string[] }
+  /** after uninstalling: waits for the uninstalls, then shows what they left behind */
+  | { type: "leftovers"; apps: { id: string; name: string; broken?: boolean }[] }
   | {
       type: "lowdisk";
       name: string;
@@ -48,7 +51,9 @@ export type DialogState =
     };
 
 export type InstalledFilter = "updates" | "all" | "recent";
-export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps";
+export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Other programs";
+/** Installed: every program, or only the apps a catalog updates. */
+export type InstalledScope = "everything" | "catalog";
 export type SortKey = "name" | "size" | "updated" | "status";
 
 function load<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
@@ -82,6 +87,10 @@ class Ui {
   view = $state<"grid" | "list">(load("view", ["grid", "list"] as const, "grid"));
   filter = $state<InstalledFilter>("all");
   group = $state<InstalledGroup>("all");
+  scope = $state<InstalledScope>(load("scope", ["everything", "catalog"] as const, "everything"));
+  /** Installed: picking apps for a batch uninstall, and the ones picked */
+  selecting = $state(false);
+  selected = $state<string[]>([]);
   sort = $state<SortKey>(load("sort", ["name", "size", "updated", "status"] as const, "name"));
   query = $state("");
   getQuery = $state("");
@@ -113,6 +122,17 @@ class Ui {
   setView(v: "grid" | "list") {
     this.view = v;
     save("view", v);
+  }
+  setScope(s: InstalledScope) {
+    this.scope = s;
+    save("scope", s);
+  }
+  toggleSelected(id: string) {
+    this.selected = this.selected.includes(id) ? this.selected.filter((x) => x !== id) : [...this.selected, id];
+  }
+  endSelecting() {
+    this.selecting = false;
+    this.selected = [];
   }
   setSort(s: SortKey) {
     this.sort = s;
@@ -157,6 +177,13 @@ export const ui = new Ui();
 
 export function menuItemsFor(app: AppEntry): PopItem[] {
   const items: PopItem[] = [];
+  if (app.source === "programs") {
+    // No catalog: no notes or other versions. A broken one is removed from the list instead.
+    if (app.installDir && app.status !== "missing") items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
+    if (items.length) items.push({ id: "sep", label: "", divider: true });
+    items.push(app.status === "missing" ? { id: "uninstall", label: "Remove from list", icon: "trash", key: "Del", danger: true } : { id: "uninstall", label: "Uninstall", icon: "trash", key: "Del", danger: true, disabled: !app.canUninstall });
+    return items;
+  }
   const repairable = canRepair(app);
   if (app.status === "missing" && repairable) items.push({ id: "repair", label: "Repair", icon: "repair", key: "R" });
   items.push({ id: "notes", label: "Release notes", icon: "notes", key: "N" });

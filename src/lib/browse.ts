@@ -163,7 +163,15 @@ export function windowRows(above: number, viewH: number, rowH: number, rows: num
   return { first, last };
 }
 
+/** The reason the backend gives for an app that only the Microsoft Store installs. */
+export const STORE_ONLY = "only in the Microsoft Store";
+
+/** Is this an app only the Microsoft Store installs (its page there is offered instead)? */
+export function storeOnly(reason: string | null | undefined): boolean {
+  return reason === STORE_ONLY;
+}
+
 /** The short reason shown next to a disabled Install. */
 export function blockedTitle(reason: string): string {
-  return `Can't be installed silently: ${reason}`;
+  return storeOnly(reason) ? "Install from the Microsoft Store" : `Can't be installed silently: ${reason}`;
 }
