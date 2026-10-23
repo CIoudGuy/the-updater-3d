@@ -11,6 +11,7 @@
   import GetDetail from "./screens/GetDetail.svelte";
   import Queue from "./screens/Queue.svelte";
   import Activity from "./screens/Activity.svelte";
+  import Drivers from "./screens/Drivers.svelte";
   import Services from "./screens/Services.svelte";
   import Settings from "./screens/Settings.svelte";
   import Skeleton from "./components/Skeleton.svelte";
@@ -317,6 +318,8 @@
         <Queue />
       {:else if shown.name === "activity"}
         <Activity />
+      {:else if shown.name === "drivers"}
+        <Drivers />
       {:else if shown.name === "services"}
         <Services />
       {:else if shown.name === "settings"}

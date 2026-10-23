@@ -5,7 +5,7 @@ use crate::model::AppStatus;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder};
 
 const POPUP_W: f64 = 360.0;
 const POPUP_H: f64 = 480.0;
@@ -13,9 +13,10 @@ const POPUP_H: f64 = 480.0;
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open The Updater 3D", true, None::<&str>)?;
     let check = MenuItem::with_id(app, "check", "Check for updates", true, None::<&str>)?;
+    let drivers = MenuItem::with_id(app, "drivers", "Drivers", true, None::<&str>)?;
     let update = MenuItem::with_id(app, "update_all", "Update all", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &check, &update, &PredefinedMenuItem::separator(app)?, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &check, &update, &drivers, &PredefinedMenuItem::separator(app)?, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")).ok().or_else(|| app.default_window_icon().cloned()).expect("icon"))
         .tooltip("The Updater 3D")
@@ -25,6 +26,11 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             let core = app.state::<Arc<Core>>().inner().clone();
             match ev.id.as_ref() {
                 "open" => show_main(app),
+                "drivers" => {
+                    *core.pending_route.lock() = Some("drivers".into());
+                    show_main(app);
+                    let _ = app.emit("navigate", "drivers");
+                }
                 "check" => {
                     tauri::async_runtime::spawn(async move {
                         let _ = core.check_now(true).await;

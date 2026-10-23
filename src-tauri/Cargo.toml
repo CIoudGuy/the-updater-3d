@@ -71,6 +71,8 @@ features = [
   "Win32_Security_Authorization",
   "Win32_System_TaskScheduler",
   "Win32_System_Variant",
+  "Win32_System_Ole",
+  "Win32_System_UpdateAgent",
   "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_IO",
   "Win32_Security_Cryptography",

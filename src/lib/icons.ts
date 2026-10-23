@@ -5,6 +5,7 @@ export const I = {
   get: "M12 3v12M7 10l5 5 5-5M5 21h14",
   queue: "M4 6h16M4 12h9M4 18h9M18 12v8M15 17l3 3 3-3",
   activity: "M3 12a9 9 0 1 0 2.6-6.4L3 8M3 3v5h5M12 7v5l3 2",
+  drivers: "M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM9 9h6v6H9z",
   services: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
   settings: "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",

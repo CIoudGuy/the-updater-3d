@@ -1,6 +1,6 @@
 // Reactive snapshot of the backend plus derived values. Events from the backend patch it.
 import { call, on, send, setErrorHandler } from "./api";
-import type { ActivityEntry, AppEntry, AppStatus, Job, Settings, Status } from "./types";
+import type { DriversSnapshot, ActivityEntry, AppEntry, AppStatus, Job, Settings, Status } from "./types";
 import { driveOf } from "./format";
 import { currentBatch } from "./batch";
 import { tryLoad } from "./load";
@@ -94,6 +94,8 @@ class Store {
   /** the first snapshot could not be read; the page shows this with a Retry button */
   loadError = $state<string | null>(null);
   apps = $state<AppEntry[]>([]);
+  /** Device drivers (the Drivers screen): read when that screen opens, then kept up to date. */
+  drivers = $state<DriversSnapshot>({ entries: [], checking: false, lastCheck: null, unreachable: [], restartNeeded: false });
   jobs = $state<Job[]>([]);
   settings = $state<Settings>(defaultSettings);
   status = $state<Status>(defaultStatus);
@@ -104,6 +106,7 @@ class Store {
 
   // ---- derived ----
   updates = $derived(this.apps.filter((a) => a.status === "update"));
+  driverUpdates = $derived(this.drivers.entries.filter((d) => d.status === "update"));
   updatesBytes = $derived(this.updates.reduce((n, a) => n + (a.updateSize ?? 0), 0));
   missing = $derived(this.apps.filter((a) => a.status === "missing"));
   openJobs = $derived(this.jobs.filter((j) => isOpenState(j.state)));
@@ -179,6 +182,7 @@ class Store {
     const subs = Promise.all([
       on("apps", (a) => (this.apps = syncList(this.apps, a))),
       on("jobs", (j) => (this.jobs = syncList(this.jobs, j))),
+      on("drivers", (d) => (this.drivers = d)),
       on("status", (s) => (this.status = s)),
       on("settings", (s) => (this.settings = s)),
       on("activity", (e) => (this.activity = [e, ...this.activity.filter((x) => x.id !== e.id)])),

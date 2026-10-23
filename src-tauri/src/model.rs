@@ -73,6 +73,46 @@ pub struct AppEntry {
     pub job_id: Option<String>,
 }
 
+/// One device driver in the Drivers window. Mirrors DriverEntry in src/lib/types.ts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverEntry {
+    /// "driver:wu:<hardware id>" or "driver:nvidia:<product id>"
+    pub id: String,
+    /// The device: "NVIDIA GeForce RTX 4060 Ti"
+    pub name: String,
+    /// What kind of device: "Graphics", "Network", "Bluetooth", "Audio"
+    pub kind: String,
+    pub maker: String,
+    /// Where the update comes from: "nvidia", "amd", "intel" (the maker's own driver),
+    /// "windowsUpdate", or "vendor" (the maker could not be reached: its own updater has newer)
+    pub source: String,
+    pub version: String,
+    pub latest: Option<String>,
+    pub status: AppStatus,
+    pub size: Option<u64>,
+    /// Date of the newest driver, "2026.10.21"
+    pub date: Option<String>,
+    pub notes_url: Option<String>,
+    /// For source "vendor": the vendor's own updater, to open
+    pub vendor_url: Option<String>,
+    pub note: Option<String>,
+    pub job_id: Option<String>,
+}
+
+/// Everything the Drivers window shows.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriversSnapshot {
+    pub entries: Vec<DriverEntry>,
+    pub checking: bool,
+    pub last_check: Option<String>,
+    /// Sources that could not be reached on the last check ("Windows Update", "NVIDIA")
+    pub unreachable: Vec<String>,
+    /// A driver installed since the app started needs a restart to finish
+    pub restart_needed: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogEntry {

@@ -1,5 +1,5 @@
-// Tiny hash router: #/home, #/installed, #/installed/<appId>, #/get, #/get/<catalogId>, #/queue, #/activity, #/services, #/settings/<section>
-export type RouteName = "home" | "installed" | "detail" | "get" | "getdetail" | "queue" | "activity" | "services" | "settings";
+// Tiny hash router: #/home, #/installed, #/installed/<appId>, #/get, #/get/<catalogId>, #/queue, #/activity, #/drivers, #/services, #/settings/<section>
+export type RouteName = "home" | "installed" | "detail" | "get" | "getdetail" | "queue" | "activity" | "drivers" | "services" | "settings";
 export const SETTINGS_SECTIONS = ["sources", "updates", "notifications", "background", "downloads", "storage", "account", "about"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
@@ -18,6 +18,7 @@ function parse(hash: string): Route {
       return b ? { name: "getdetail", param: b } : { name: "get", param: null };
     case "queue":
     case "activity":
+    case "drivers":
     case "services":
       return { name: a, param: null };
     case "settings":

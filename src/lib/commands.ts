@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, BrowsePage, CatalogEntry, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, BrowsePage, CatalogEntry, DriversSnapshot, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 import type { OtherSort } from "./browse";
 
 export interface Commands {
@@ -38,6 +38,17 @@ export interface Commands {
   /** A page of the whole winget catalog (Other apps on only): a search through it or null, a
    * category and first letter ("A" to "Z", "#") or null for all, and an order. */
   browse_other_apps: { args: { query: string | null; category: string | null; letter: string | null; sort: OtherSort; offset: number; limit: number }; ret: BrowsePage };
+
+  /** The Drivers window: what the last driver check found. */
+  get_drivers: { args: {}; ret: DriversSnapshot };
+  /** Ask Windows Update and NVIDIA for driver updates; the answer arrives as a "drivers" event. */
+  check_drivers: { args: {}; ret: void };
+  /** Queue these driver updates. */
+  update_drivers: { args: { ids: string[] }; ret: void };
+  /** Restart the PC in a minute to finish installing drivers. */
+  restart_pc: { args: {}; ret: void };
+  /** Open AMD's or Intel's own updater page for a graphics card. */
+  open_vendor_tool: { args: { id: string }; ret: void };
 
   pause_job: { args: { jobId: string }; ret: void };
   resume_job: { args: { jobId: string }; ret: void };

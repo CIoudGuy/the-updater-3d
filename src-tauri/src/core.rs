@@ -3,7 +3,7 @@
 use crate::download::{self, Control, Outcome, Progress, Throttle};
 use crate::elevate::Elevator;
 use crate::model::*;
-use crate::sources::{self, adobe, blender, craft, other, tools, Installed, Latest, Plan, SourceData, Verify};
+use crate::sources::{self, adobe, blender, craft, drivers, other, tools, Installed, Latest, Plan, SourceData, Verify};
 use crate::store::{self, Persisted};
 use crate::{install_detail, paths, procs, version, winutil};
 use anyhow::{anyhow, Result};
@@ -24,6 +24,8 @@ pub enum JobRequest {
     /// `remove_prefs`: also delete the app's settings and add-ons ("Also delete settings and add-ons")
     Uninstall { app_id: String, remove_prefs: bool },
     Repair { app_id: String },
+    /// A driver update from the Drivers window ("driver:nvidia:1022", "driver:wu:pci\\ven_8086...")
+    Driver { id: String },
 }
 
 /// An Other app without an icon is searched for again after this many days.
@@ -148,6 +150,8 @@ struct JobRec {
     dests: Vec<PathBuf>,
     /// How to tell after a restart whether an install that was cut off finished.
     verify: Option<SavedVerify>,
+    /// Its installer said a restart finishes the install.
+    restart: bool,
 }
 
 /// Where a job is in its run. Only jobs that are downloading use a "downloads at once" slot.
@@ -507,6 +511,15 @@ fn close_targets(list: &[procs::Proc], dirs: &[PathBuf], names: &[String]) -> Ve
 }
 
 #[derive(Default)]
+pub struct DriversState {
+    found: Vec<drivers::Found>,
+    checking: bool,
+    last_check: Option<String>,
+    unreachable: Vec<String>,
+    restart_needed: bool,
+}
+
+#[derive(Default)]
 struct St {
     installed: Vec<Installed>,
     latest: HashMap<String, Latest>,
@@ -549,6 +562,8 @@ pub struct Core {
     /// A check was asked for while one ran: run once more when it ends
     check_again: std::sync::atomic::AtomicBool,
     pub persisted: Mutex<Persisted>,
+    /// The Drivers window: what the last driver check found. Not part of the apps list.
+    pub drivers: Mutex<DriversState>,
     jobs_dirty: std::sync::atomic::AtomicBool,
     /// "SAP@version" -> download size from the product manifest (the catalog often lacks it)
     adobe_sizes: Mutex<HashMap<String, u64>>,
@@ -611,6 +626,7 @@ impl Core {
             check_lock: tokio::sync::Mutex::new(()),
             check_again: std::sync::atomic::AtomicBool::new(false),
             persisted: Mutex::new(persisted),
+            drivers: Mutex::new(DriversState::default()),
             jobs_dirty: std::sync::atomic::AtomicBool::new(false),
             adobe_sizes: Mutex::new(HashMap::new()),
             self_release: Mutex::new(None),
@@ -673,7 +689,7 @@ impl Core {
             job.needs_admin = false;
             let (tx, _) = watch::channel(if state == JobState::Paused { Control::Pause } else { Control::Run });
             let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-            jobs.push(JobRec { job, req: s.req, ctl: tx, active: false, block: Default::default(), seq, phase, held: true, dests: s.dests, verify: s.verify });
+            jobs.push(JobRec { job, req: s.req, ctl: tx, active: false, block: Default::default(), seq, phase, held: true, dests: s.dests, verify: s.verify, restart: false });
         }
         let n = jobs.len();
         drop(jobs);
@@ -962,6 +978,137 @@ impl Core {
         tauri::async_runtime::spawn(async move { me.fill_download_sizes().await });
     }
 
+    /// What the Drivers window shows.
+    pub fn drivers_snapshot(&self) -> crate::model::DriversSnapshot {
+        let d = self.drivers.lock();
+        crate::model::DriversSnapshot { entries: d.found.iter().map(|f| f.entry.clone()).collect(), checking: d.checking, last_check: d.last_check.clone(), unreachable: d.unreachable.clone(), restart_needed: d.restart_needed }
+    }
+
+    fn emit_drivers(&self) {
+        self.emit("drivers", self.drivers_snapshot());
+    }
+
+    /// Look for driver updates: Windows Update and NVIDIA at the same time. Only the Drivers
+    /// window asks for this, so the apps check never waits for Windows Update (about 10 s).
+    pub async fn check_drivers(self: &Arc<Self>) {
+        {
+            let mut d = self.drivers.lock();
+            if d.checking {
+                return;
+            }
+            d.checking = true;
+        }
+        self.emit_drivers();
+        let t0 = std::time::Instant::now();
+        let present = tauri::async_runtime::spawn_blocking(drivers::present).await.unwrap_or_default();
+        let gpus: Vec<(String, String)> = present.iter().filter(|p| sources::nvidia::is_gpu(p)).map(|p| (p.matching_id.clone(), p.desc.clone())).collect();
+        let nvidia_f = async {
+            if gpus.is_empty() {
+                return Ok(vec![]);
+            }
+            let products = sources::nvidia::products().await?;
+            let mut out = Vec::new();
+            for (matching, desc) in &gpus {
+                let pfid = sources::nvidia::product_id(desc, &products).unwrap_or_default();
+                let rel = if pfid.is_empty() {
+                    None
+                } else {
+                    match sources::nvidia::latest(&pfid).await {
+                        Ok(r) => Some(r),
+                        Err(e) => {
+                            log::warn!("nvidia lookup {desc}: {e:#}");
+                            None
+                        }
+                    }
+                };
+                out.push((matching.clone(), pfid, rel));
+            }
+            anyhow::Ok(out)
+        };
+        let has_amd = present.iter().any(sources::amd::is_gpu);
+        let amd_f = async {
+            if !has_amd {
+                return Ok(None);
+            }
+            sources::amd::latest(drivers::windows_11()).await.map(Some)
+        };
+        let has_intel = present.iter().any(sources::intel::is_gpu);
+        let intel_f = async {
+            if !has_intel {
+                return Ok(None);
+            }
+            sources::intel::fetch().await.map(Some)
+        };
+        let (wu, nv, amd, intel) = tokio::join!(drivers::fetch(), nvidia_f, amd_f, intel_f);
+        let mut unreachable = vec![];
+        let wu = match wu {
+            Ok(f) => Some(f),
+            Err(e) => {
+                log::warn!("windows update drivers: {e:#}");
+                unreachable.push("Windows Update".to_string());
+                None
+            }
+        };
+        let nv = nv.unwrap_or_else(|e| {
+            log::warn!("nvidia drivers: {e:#}");
+            unreachable.push("NVIDIA".to_string());
+            vec![]
+        });
+        let amd = amd.unwrap_or_else(|e| {
+            log::warn!("amd drivers: {e:#}");
+            unreachable.push("AMD".to_string());
+            None
+        });
+        let intel = intel.unwrap_or_else(|e| {
+            log::warn!("intel drivers: {e:#}");
+            unreachable.push("Intel".to_string());
+            None
+        });
+        let found = drivers::collect(wu.as_ref(), &present, &nv, amd.as_ref(), intel.as_deref());
+        log::info!("timing: driver check found {} drivers in {} ms", found.len(), t0.elapsed().as_millis());
+        {
+            let mut d = self.drivers.lock();
+            d.found = found;
+            d.checking = false;
+            d.last_check = Some(now());
+            d.unreachable = unreachable;
+        }
+        self.emit_drivers();
+    }
+
+    /// A driver job finished: show the new version until the next check, and ask for a restart
+    /// when the driver needs one to finish.
+    fn driver_installed(&self, id: &str, restart: bool) {
+        let mut d = self.drivers.lock();
+        let first_restart = restart && !d.restart_needed;
+        d.restart_needed |= restart;
+        if let Some(f) = d.found.iter_mut().find(|f| f.entry.id == id) {
+            if let Some(l) = f.entry.latest.clone() {
+                f.entry.version = l;
+            }
+            f.entry.status = AppStatus::Current;
+            f.entry.size = None;
+            f.entry.note = Some(if restart { "Installed. Restart your PC to finish." } else { "Installed." }.into());
+            f.how = None;
+        }
+        drop(d);
+        self.emit_drivers();
+        if first_restart {
+            self.notify("Restart to finish installing drivers", "Open The Updater 3D to restart now, or restart later yourself.");
+        }
+    }
+
+    /// Restart the PC in a minute (Windows shows its own notice; `shutdown /a` stops it).
+    pub fn restart_pc(&self) -> Result<()> {
+        let mut c = winutil::cmd("shutdown.exe");
+        c.args(["/r", "/t", "60", "/c", "The Updater 3D: restarting to finish installing drivers. Save your work."]);
+        let out = c.output()?;
+        if !out.status.success() {
+            return Err(anyhow!("Windows did not start the restart (exit code {})", out.status.code().unwrap_or(-1)));
+        }
+        Ok(())
+    }
+
     /// Download sizes of Other apps updates (the catalog does not list them): asked from the
     /// download server once per version, so "Update all" shows the real total.
     async fn fill_download_sizes(self: Arc<Self>) {
@@ -1017,6 +1164,15 @@ impl Core {
         st.failed.retain(|k, _| ids.contains(k.as_str()));
         st.latest = latest;
         st.installed = installed;
+    }
+
+    /// Recompute statuses with the feeds known so far and show them (during a check, as each
+    /// source answers). The Other apps feed also changes what is matched, so it waits for the
+    /// full rescan at the end.
+    fn show_versions_now(&self) {
+        let installed = self.st.lock().installed.clone();
+        self.recompute_latest(installed);
+        self.emit_apps();
     }
 
     /// After an Other app was installed or updated: make sure the feed has its package (one
@@ -1160,7 +1316,12 @@ impl Core {
                 return None;
             }
             match adobe::fetch_catalog().await {
-                Ok(c) => Some(Arc::new(c)),
+                Ok(c) => {
+                    let c = Arc::new(c);
+                    *self.adobe.write() = Some(c.clone());
+                    self.show_versions_now();
+                    Some(c)
+                }
                 Err(e) => {
                     log::warn!("adobe catalog: {e:#}");
                     None
@@ -1172,7 +1333,12 @@ impl Core {
                 return None;
             }
             match craft::fetch(settings.craft_prereleases).await {
-                Ok(f) => Some(Arc::new(f)),
+                Ok(f) => {
+                    let f = Arc::new(f);
+                    *self.craft.write() = Some(f.clone());
+                    self.show_versions_now();
+                    Some(f)
+                }
                 Err(e) => {
                     log::warn!("craft feed: {e:#}");
                     None
@@ -1184,7 +1350,12 @@ impl Core {
                 return None;
             }
             match blender::fetch(&installed, settings.blender_channel == "beta").await {
-                Ok(f) => Some(Arc::new(f)),
+                Ok(f) => {
+                    let f = Arc::new(f);
+                    *self.blender.write() = Some(f.clone());
+                    self.show_versions_now();
+                    Some(f)
+                }
                 Err(e) => {
                     log::warn!("blender feed: {e:#}");
                     None
@@ -1196,7 +1367,12 @@ impl Core {
                 return None;
             }
             match tools::fetch(&installed).await {
-                Ok(f) => Some(Arc::new(f)),
+                Ok(f) => {
+                    let f = Arc::new(f);
+                    *self.tools.write() = Some(f.clone());
+                    self.show_versions_now();
+                    Some(f)
+                }
                 Err(e) => {
                     log::warn!("more apps feed: {e:#}");
                     None
@@ -1360,6 +1536,12 @@ impl Core {
     /// Background loop: periodic checks and the auto-install window.
     pub async fn scheduler(self: Arc<Self>) {
         self.preload().await;
+        if self.persisted.lock().last_check.is_some() {
+            self.set_status(|s| {
+                s.first_scan = false;
+                s.scan_step = None;
+            });
+        }
         // The installed apps are known again: jobs from before a restart continue.
         self.release_restored();
         let _ = self.check_now(false).await;
@@ -2075,11 +2257,25 @@ impl Core {
                 }
                 (app_id.clone(), JobKind::Repair, inst.version)
             }
+            JobRequest::Driver { id } => {
+                let d = self.drivers.lock();
+                let f = d.found.iter().find(|f| &f.entry.id == id).ok_or_else(|| anyhow!("That driver is no longer listed. Check again."))?;
+                if f.how.is_none() {
+                    return Err(anyhow!("{} has no update to install", f.entry.name));
+                }
+                (id.clone(), JobKind::Update, f.entry.latest.clone().unwrap_or_default())
+            }
         };
         // Gather everything before taking the jobs lock (lock order is st, then jobs).
         let catalog_entry = self.catalog().into_iter().find(|c| c.id == app_id);
+        let driver = self.drivers.lock().found.iter().find(|f| f.entry.id == app_id).map(|f| f.entry.clone());
         let (name, code, fg, bg, from) = match self.installed(&app_id) {
             Some(i) => (i.name, i.code, i.fg, i.bg, Some(i.version)),
+            None if driver.is_some() => {
+                let e = driver.unwrap();
+                let (fg, bg) = driver_colors(&e.maker);
+                (e.name, "Dr".into(), fg.into(), bg.into(), Some(e.version))
+            }
             None => match &catalog_entry {
                 Some(c) => (c.name.clone(), c.code.clone(), c.fg.clone(), c.bg.clone(), None),
                 None => (app_id.clone(), "?".into(), "#EDEDED".into(), "#262626".into(), None),
@@ -2129,6 +2325,7 @@ impl Core {
             held: false,
             dests: vec![],
             verify: None,
+            restart: false,
         });
         drop(jobs);
         self.mark_jobs_dirty();
@@ -2192,7 +2389,7 @@ impl Core {
         self.jobs.lock().retain(|j| j.job.id != id);
         self.st.lock().failed.remove(match &req {
             JobRequest::Update { app_id, .. } | JobRequest::Uninstall { app_id, .. } | JobRequest::Repair { app_id } => app_id,
-            JobRequest::Install { id, .. } => id,
+            JobRequest::Install { id, .. } | JobRequest::Driver { id } => id,
         });
         self.enqueue(req)?;
         Ok(())
@@ -2431,6 +2628,10 @@ impl Core {
                     _ => Err(anyhow!("Unknown app {id}")),
                 }
             }
+            JobRequest::Driver { id } => {
+                let f = self.drivers.lock().found.iter().find(|f| &f.entry.id == id).cloned();
+                drivers::plan(&f.ok_or_else(|| anyhow!("That driver is no longer listed. Open Drivers and check again."))?)
+            }
             JobRequest::Uninstall { app_id, remove_prefs } => {
                 let inst = installed.iter().find(|i| &i.id == app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
                 let mut plan = match inst.source {
@@ -2624,6 +2825,12 @@ impl Core {
                     p.updated_at.insert(app_id.clone(), now());
                     store::save_state(&p);
                     drop(p);
+                    if app_id.starts_with("driver:") {
+                        let said = self.with_job(id, |j| j.restart).unwrap_or(false);
+                        // Two registry reads: quick enough to do right here.
+                        let restart = said || drivers::restart_pending();
+                        self.driver_installed(&app_id, restart);
+                    }
                     if app_id.starts_with("other:") {
                         let me = self.clone();
                         let id = app_id.clone();
@@ -2885,11 +3092,15 @@ impl Core {
                 }
                 _ => None,
             };
-            let detail = step_detail(step, files);
+            let waiting = step.label().starts_with(sources::WAITING_FOR_YOU);
+            let detail = if waiting { "Its window may be behind this one. The update continues once you finish it".to_string() } else { step_detail(step, files) };
             self.set_job(id, |j| {
                 j.step = label.clone();
                 j.detail = detail.clone();
             });
+            if waiting {
+                self.notify("An installer is waiting for you", step.label().trim_start_matches(sources::WAITING_FOR_YOU).trim_start_matches(':').trim());
+            }
             let step_t0 = Instant::now();
             let step_est = (inst_est * weights[k] / weight_sum).max(2.0);
             let weights = weights.clone();
@@ -3002,6 +3213,9 @@ impl Core {
             };
             if matches!(step, sources::Step::Run { .. }) {
                 ran_program = true;
+                if res.ok && res.code.is_some_and(|c| sources::restart_code(&plan.app_id, c)) {
+                    self.with_job(id, |j| j.restart = true);
+                }
             }
             if !res.ok {
                 let log = match step {
@@ -3617,6 +3831,16 @@ fn newest_update(recorded: Option<&str>, source: Option<&str>) -> Option<String>
 
 /// An update's size from the download server when its source did not give one.
 /// Why a copy that Steam or the Microsoft Store manages is not changed here.
+/// Job colors for a driver: the maker's.
+fn driver_colors(maker: &str) -> (&'static str, &'static str) {
+    match maker.to_ascii_lowercase().as_str() {
+        m if m.starts_with("nvidia") => ("#FFFFFF", "#4E7A00"),
+        m if m.starts_with("amd") || m.starts_with("advanced micro") => ("#FFFFFF", "#9E1B1B"),
+        m if m.starts_with("intel") => ("#FFFFFF", "#0B5CAD"),
+        _ => ("#EDEDED", "#3A4A5C"),
+    }
+}
+
 fn read_only_error(inst: &Installed) -> anyhow::Error {
     let by = if inst.store.is_some() { "the Microsoft Store" } else { "Steam" };
     anyhow!("{} is updated and removed by {by}", inst.name)

@@ -3,10 +3,14 @@
 
 pub mod about;
 pub mod adobe;
+pub mod amd;
 pub mod blender;
 pub mod browse;
 pub mod craft;
+pub mod drivers;
+pub mod nvidia;
 pub mod icons;
+pub mod intel;
 pub mod msstore;
 pub mod locate;
 pub mod other;
@@ -222,6 +226,15 @@ impl Plan {
         v.dedup();
         v
     }
+}
+
+/// A step whose label starts with this opens an installer the user must click through.
+pub const WAITING_FOR_YOU: &str = "Waiting for you";
+
+/// Installer exit codes that mean "installed, restart to finish": Windows Installer's (also ours
+/// for Windows Update drivers) and, for NVIDIA's package, 1.
+pub fn restart_code(app_id: &str, code: u32) -> bool {
+    code == 3010 || code == 1641 || (code == 1 && app_id.starts_with("driver:nvidia:"))
 }
 
 /// Brand marks for apps that have no icon yet.

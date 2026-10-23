@@ -356,6 +356,41 @@ pub async fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) -> Re
     Ok(())
 }
 
+// ------------------------------------------------------------ the Drivers screen
+
+#[tauri::command]
+pub fn get_drivers(core: C<'_>) -> DriversSnapshot {
+    core.drivers_snapshot()
+}
+
+/// Look for driver updates (Windows Update and NVIDIA); the answer comes as a "drivers" event.
+#[tauri::command]
+pub async fn check_drivers(core: C<'_>) -> Res<()> {
+    core.inner().check_drivers().await;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_drivers(core: C<'_>, ids: Vec<String>) -> Res<()> {
+    for id in ids {
+        core.inner().enqueue(JobRequest::Driver { id }).map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Restart the PC to finish installing drivers (in a minute, so work can be saved).
+#[tauri::command]
+pub fn restart_pc(core: C<'_>) -> Res<()> {
+    core.inner().restart_pc().map_err(err)
+}
+
+/// Open AMD's or Intel's own updater page for a graphics card (only their addresses).
+#[tauri::command]
+pub fn open_vendor_tool(core: C<'_>, id: String) -> Res<()> {
+    let url = core.inner().drivers_snapshot().entries.into_iter().find(|e| e.id == id).and_then(|e| e.vendor_url).ok_or_else(|| "No vendor page for that driver".to_string())?;
+    winutil::shell_open(&url).map_err(err)
+}
+
 #[tauri::command]
 pub async fn install_self_update(app: AppHandle, core: C<'_>) -> Res<()> {
     let c = core.inner().clone();

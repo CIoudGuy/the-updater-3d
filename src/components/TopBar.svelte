@@ -19,6 +19,7 @@
     { id: "get", label: "Get apps", href: "#/get", key: "Ctrl 3", d: I.get },
     { id: "queue", label: "Queue", href: "#/queue", key: "Ctrl 4", d: I.queue },
     { id: "activity", label: "Activity", href: "#/activity", key: "Ctrl 5", d: I.activity },
+    { id: "drivers", label: "Drivers", href: "#/drivers", key: "", d: I.drivers },
     { id: "services", label: "Services", href: "#/services", key: "Ctrl 6", d: I.services },
     { id: "settings", label: "Settings", href: "#/settings", key: "Ctrl ,", d: I.settings },
   ] as const;
@@ -72,6 +73,7 @@
 
   function badge(id: string): { text: string; color: string } | null {
     if (id === "installed" && store.updates.length > 0) return { text: String(store.updates.length), color: "var(--warn)" };
+    if (id === "drivers" && store.driverUpdates.length > 0) return { text: String(store.driverUpdates.length), color: "var(--warn)" };
     if (id === "services" && store.ccDown) return { text: "Off", color: "var(--err)" };
     return null;
   }
@@ -90,7 +92,7 @@
         class="item"
         class:on={active === n.id}
         class:compact
-        title="{n.label}  {n.key}"
+        title={n.key ? `${n.label}  ${n.key}` : n.label}
         aria-label={n.label}
         aria-current={active === n.id ? "page" : undefined}
       >

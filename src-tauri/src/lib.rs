@@ -169,6 +169,11 @@ pub fn run() {
             commands::catalog_versions,
             commands::browse_other_apps,
             commands::quit_app,
+            commands::get_drivers,
+            commands::check_drivers,
+            commands::update_drivers,
+            commands::open_vendor_tool,
+            commands::restart_pc,
         ])
         .build(tauri::generate_context!())
         .expect("error while building The Updater 3D")

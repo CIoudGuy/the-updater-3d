@@ -277,7 +277,41 @@ export interface Snapshot {
 }
 
 /** Events emitted by the backend */
+/** One device driver in the Drivers window. Mirrors DriverEntry in src-tauri/src/model.rs. */
+export interface DriverEntry {
+  /** "driver:nvidia:1022", "driver:wu:pci\\ven_8086&dev_7a70", "driver:gpu:pci\\ven_1002&dev_744c" */
+  id: string;
+  name: string;
+  /** "Graphics", "Network", "Bluetooth", "Audio"... */
+  kind: string;
+  maker: string;
+  /** "nvidia" or "amd" (the maker's own driver), "windowsUpdate", or "vendor" (only Intel's own updater has newer ones) */
+  source: "nvidia" | "amd" | "intel" | "windowsUpdate" | "vendor";
+  version: string;
+  latest: string | null;
+  status: AppStatus;
+  size: number | null;
+  /** date of the newest driver, "2026.10.21" */
+  date: string | null;
+  notesUrl: string | null;
+  vendorUrl: string | null;
+  note: string | null;
+  jobId: string | null;
+}
+
+export interface DriversSnapshot {
+  entries: DriverEntry[];
+  checking: boolean;
+  lastCheck: string | null;
+  /** sources not reached on the last check: "Windows Update", "NVIDIA" */
+  unreachable: string[];
+  /** a driver installed since the app started needs a restart to finish */
+  restartNeeded: boolean;
+}
+
 export interface EventMap {
+  /** the Drivers window's list or its check changed */
+  drivers: DriversSnapshot;
   /** full app list changed */
   apps: AppEntry[];
   /** job list or progress changed (sent at most ~8 times a second) */

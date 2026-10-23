@@ -6,6 +6,7 @@ import type {
   ActivityEntry,
   AppEntry,
   CatalogEntry,
+  DriversSnapshot,
   EventMap,
   Job,
   JobError,
@@ -1010,6 +1011,18 @@ function findApp(id: string) {
   return apps.find((a) => a.id === id);
 }
 
+const MOCK_DRIVERS: DriversSnapshot = {
+  checking: false,
+  lastCheck: new Date().toISOString(),
+  unreachable: [],
+  restartNeeded: MODE === "restart",
+  entries: [
+    { id: "driver:nvidia:1022", name: "NVIDIA GeForce RTX 4060 Ti", kind: "Graphics", maker: "NVIDIA", source: "nvidia", version: "610.88", latest: "621.01", status: "update", size: 1116691496, date: "2026.10.21", notesUrl: "https://www.nvidia.com/en-gb/drivers/details/282478/", vendorUrl: null, note: "GeForce Game Ready Driver from NVIDIA", jobId: null },
+    { id: "driver:amd:pci\\ven_1002&dev_744c", name: "AMD Radeon RX 7900 XTX", kind: "Graphics", maker: "AMD", source: "amd", version: "32.0.21001.9024", latest: "32.0.32015.7029", status: "update", size: 1782243424, date: null, notesUrl: "https://www.amd.com/en/resources/support-articles/release-notes/RN-RAD-WIN-26-10-1.html", vendorUrl: null, note: "Adrenalin Edition 26.10.1 from AMD", jobId: null },
+    { id: "driver:wu:pci\\ven_8086&dev_7a70&subsys_00948086", name: "Intel(R) Wi-Fi 6E AX211 160MHz", kind: "Network", maker: "Intel Corporation", source: "windowsUpdate", version: "24.20.0.4", latest: "24.40.0.4", status: "update", size: 24467933, date: "2026.04.13", notesUrl: null, vendorUrl: null, note: "From Windows Update. Some drivers need a restart.", jobId: null },
+  ],
+};
+
 const handlers: H = {
   get_snapshot: () => clone<Snapshot>({ apps, jobs, settings, status }),
   async check_now() {
@@ -1394,6 +1407,15 @@ const handlers: H = {
     location.href = "/";
   },
   quit_app: () => {},
+  get_drivers: () => MOCK_DRIVERS,
+  check_drivers: () => {
+    emit("drivers", { ...MOCK_DRIVERS, checking: true });
+    setTimeout(() => emit("drivers", { ...MOCK_DRIVERS, lastCheck: new Date().toISOString() }), 1500);
+  },
+  update_drivers: () => {},
+  open_vendor_tool: () => {},
+  restart_pc: () => {},
+
   test_notification() {
     emit("toast", { kind: "info", text: "Test notification sent. Look in the Windows notification area." });
   },
