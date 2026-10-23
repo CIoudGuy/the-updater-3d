@@ -64,6 +64,31 @@
     return out;
   });
 
+  /** Cleanups whose saved registry entries and tasks can still be put back (30 days) */
+  let restorable = $state<string[]>([]);
+  let restoring = $state<string | null>(null);
+  function loadBackups() {
+    call("leftover_backups", {})
+      .then((b) => (restorable = b.map((x) => x.id)))
+      .catch(() => (restorable = []));
+  }
+  $effect(() => {
+    // again when a cleanup adds an entry
+    void store.activity.filter((e) => e.restoreId).length;
+    loadBackups();
+  });
+  async function restore(id: string) {
+    restoring = id;
+    try {
+      await call("leftover_restore", { backupId: id });
+      store.toast("ok", "Restored");
+    } catch (err) {
+      store.toast("err", String((err as Error)?.message ?? err));
+    }
+    restoring = null;
+    loadBackups();
+  }
+
   function toggle(id: string) {
     open = open.includes(id) ? open.filter((x) => x !== id) : [...open, id];
   }
@@ -134,6 +159,9 @@
               <span class="dot"><Dab color={COLOR[e.kind]} size={10} /></span>
               <span class="tx ellipsis" style:color={e.kind === "check" || e.kind === "service" ? "var(--text-2)" : "var(--text)"}>{e.title}</span>
               {#if e.meta}<span class="mt">{e.meta}</span>{/if}
+              {#if e.restoreId && restorable.includes(e.restoreId)}
+                <Btn variant="raised" size="sm" title="Put back the registry entries, services and tasks this cleanup removed" disabled={restoring === e.restoreId} onclick={(ev: MouseEvent) => { ev.stopPropagation(); restore(e.restoreId!); }}>{restoring === e.restoreId ? "Restoring" : "Restore"}</Btn>
+              {/if}
               {#if expandable}
                 <button class="ib" aria-expanded={isOpen} aria-label={isOpen ? "Hide details" : "Show details"} title="{isOpen ? 'Hide' : 'Show'} details  Enter" onclick={(ev) => { ev.stopPropagation(); toggle(e.id); }}>
                   <span class="chev" class:up={isOpen}><Icon d={I.chevronDown} size={14} width={2.5} /></span>

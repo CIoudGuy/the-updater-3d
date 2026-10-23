@@ -193,8 +193,10 @@ fn mark_for(sap: &str, name: &str) -> (String, String, String) {
 // ---------------------------------------------------------------- catalog
 
 pub async fn fetch_catalog() -> Result<Catalog> {
+    // Parsed once per new catalog: most checks get the same one again.
+    static PARSED: http::Parsed<Catalog> = http::Parsed::new();
     let f = http::get_cached(CATALOG_URL, &[APP_ID_HEADER], Duration::from_secs(20 * 60)).await?;
-    let mut cat = tokio::task::spawn_blocking(move || parse_catalog(&f.body)).await??;
+    let mut cat = tokio::task::spawn_blocking(move || PARSED.get_or(CATALOG_URL, &f.body, parse_catalog)).await??;
     // Creative Cloud: the full build number, which its offline installer's address needs.
     match creative_cloud_build().await {
         Ok(Some(full)) => {

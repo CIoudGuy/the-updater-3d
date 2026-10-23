@@ -26,7 +26,7 @@ async fn detects_installed_apps_and_finds_latest_versions() {
             updater_lib::model::Source::Craft => craft::latest(i, &feed),
             updater_lib::model::Source::Blender => blender::latest(i, &all, &bfeed),
             updater_lib::model::Source::Tools => tools::latest(i, &all, &tfeed),
-            updater_lib::model::Source::Other => None,
+            updater_lib::model::Source::Other | updater_lib::model::Source::Programs => None,
         };
         let l = latest.as_ref().map(|l| l.version.clone()).unwrap_or_else(|| "?".into());
         let mark = if latest.as_ref().is_some_and(|l| version::newer(&l.version, &i.version)) { "UPDATE" } else { "" };
@@ -320,13 +320,13 @@ async fn other_apps_coverage_and_changelogs() {
     handled.extend(blender::scan(&un, &std::path::PathBuf::from(std::env::var("ProgramFiles").unwrap()).join("Blender Foundation")));
     handled.extend(tools::scan(&un, &std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap()).join("Programs").join("Godot")));
     let t0 = std::time::Instant::now();
-    let mut feed = other::fetch(&handled).await.expect("winget catalog");
+    let mut feed = other::fetch(&handled, None).await.expect("winget catalog");
     // The first start may not read the whole starter list in time; the next read has the rest.
     for _ in 0..3 {
         if !feed.unfinished {
             break;
         }
-        feed = other::fetch(&handled).await.expect("winget catalog");
+        feed = other::fetch(&handled, None).await.expect("winget catalog");
     }
     println!("catalog read in {:.1} s, {} packages fetched", t0.elapsed().as_secs_f64(), feed.pkgs.len());
     // Apps that are also in the Store (they have a package family name) but have a normal
@@ -621,7 +621,7 @@ async fn other_apps_starter_list_and_icons() {
     use futures_util::StreamExt;
     use updater_lib::sources::{icons, other, winget};
     let t0 = std::time::Instant::now();
-    let feed = other::fetch(&[]).await.expect("winget catalog");
+    let feed = other::fetch(&[], None).await.expect("winget catalog");
     println!("starter list read in {:.1} s (unfinished: {})", t0.elapsed().as_secs_f64(), feed.unfinished);
     let idx = winget::Index::open(&winget::index_path()).unwrap();
     let kept: std::collections::HashSet<String> = feed.popular.iter().map(|(p, _)| p.pkg.id.to_ascii_lowercase()).collect();

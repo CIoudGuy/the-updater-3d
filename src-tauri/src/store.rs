@@ -70,7 +70,14 @@ pub fn merge(current: &Settings, patch: serde_json::Value) -> Settings {
 }
 
 pub fn activity(kind: ActivityKind, title: impl Into<String>, meta: Option<String>, app_id: Option<String>, error: Option<JobError>) -> ActivityEntry {
-    let e = ActivityEntry {
+    let e = new_activity(kind, title, meta, app_id, error);
+    append_activity(&e);
+    e
+}
+
+/// An Activity entry, not written yet.
+pub fn new_activity(kind: ActivityKind, title: impl Into<String>, meta: Option<String>, app_id: Option<String>, error: Option<JobError>) -> ActivityEntry {
+    ActivityEntry {
         id: uuid::Uuid::new_v4().simple().to_string(),
         time: chrono::Utc::now().to_rfc3339(),
         kind,
@@ -78,11 +85,15 @@ pub fn activity(kind: ActivityKind, title: impl Into<String>, meta: Option<Strin
         meta,
         app_id,
         error,
-    };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths::activity_file()) {
-        let _ = writeln!(f, "{}", serde_json::to_string(&e).unwrap_or_default());
+        restore_id: None,
     }
-    e
+}
+
+/// Add an entry to the activity file.
+pub fn append_activity(e: &ActivityEntry) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(paths::activity_file()) {
+        let _ = writeln!(f, "{}", serde_json::to_string(e).unwrap_or_default());
+    }
 }
 
 /// Newest first, at most 1000 entries.

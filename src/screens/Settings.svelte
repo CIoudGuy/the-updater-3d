@@ -29,24 +29,24 @@
     blurb: string;
   }
   const NAV: NavItem[] = [
-    { id: "sources", label: "Sources", blurb: "Choose which apps The Updater 3D looks after." },
-    { id: "updates", label: "Updates", blurb: "How often to look for new versions and what to do with them." },
-    { id: "notifications", label: "Notifications", blurb: "Windows notifications from the background checker." },
-    { id: "background", label: "Background", blurb: "Keep checking for updates without a window." },
-    { id: "downloads", label: "Downloads", blurb: "How fast and how many installers download at once." },
-    { id: "storage", label: "Storage", blurb: "Where apps go and what is kept on disk." },
-    { id: "account", label: "Account", blurb: "Adobe apps are installed through Creative Cloud." },
+    { id: "general", label: "General", blurb: "When to check, what to do with updates, and notifications." },
+    { id: "apps", label: "Apps", blurb: "Which apps The Updater 3D looks after, and their options." },
+    { id: "downloads", label: "Downloads", blurb: "How many apps download at once, and how fast." },
+    { id: "startup", label: "Startup", blurb: "Keep checking for updates when the window is closed." },
+    { id: "cleanup", label: "Cleanup", blurb: "Free up space and tidy what removed apps left behind." },
+    { id: "adobe", label: "Adobe", blurb: "Adobe apps are installed through Creative Cloud." },
     { id: "about", label: "About", blurb: "This version of The Updater 3D." },
   ];
 
-  // "general" was the old combined page; its settings now live under Background
+  // Pages that were renamed or merged, so old links still land in the right place.
+  const OLD: Record<string, SettingsSection> = { sources: "apps", updates: "general", notifications: "general", background: "startup", storage: "cleanup", account: "adobe" };
   const active = $derived.by((): SettingsSection => {
-    const want = section === "general" ? "background" : section;
-    if (want === "account" && !store.adobeOn) return "sources";
-    return want && (SETTINGS_SECTIONS as readonly string[]).includes(want) ? (want as SettingsSection) : "sources";
+    const want = section ? (OLD[section] ?? section) : null;
+    if (want === "adobe" && !store.adobeOn) return "apps";
+    return want && (SETTINGS_SECTIONS as readonly string[]).includes(want) ? (want as SettingsSection) : "general";
   });
-  // Account is all Creative Cloud: only shown while Adobe apps are on (Sources keeps the switch).
-  const nav = $derived(NAV.filter((n) => n.id !== "account" || store.adobeOn));
+  // The Adobe page is all Creative Cloud: only shown while Adobe apps are on (Apps keeps the switch).
+  const nav = $derived(NAV.filter((n) => n.id !== "adobe" || store.adobeOn));
   const idx = $derived(nav.findIndex((n) => n.id === active));
   const cur = $derived(nav[idx] ?? nav[0]);
 
@@ -210,43 +210,56 @@
           <p>{cur.blurb}</p>
         </header>
 
-        {#if active === "sources"}
-          <SRow label="Adobe apps" desc={s.sources.adobe ? "Read from Creative Cloud. Needs Creative Cloud installed and signed in." : "Off. Turn on to keep Adobe apps up to date and see Creative Cloud's services."}>
+        {#if active === "apps"}
+          <SRow label="Adobe apps" desc={s.sources.adobe ? "Through Creative Cloud. Needs Creative Cloud installed and signed in." : "Off. Turn on to keep Adobe apps up to date."}>
             {#snippet control()}<Toggle checked={s.sources.adobe} label="Adobe apps" onchange={(v) => store.patchSettings({ sources: { ...s.sources, adobe: v } })} />{/snippet}
           </SRow>
+          <SRow label="Blender" desc="Every installed version is listed. New versions install next to the old ones.">
+            {#snippet control()}<Toggle checked={s.sources.blender} label="Blender" onchange={(v) => store.patchSettings({ sources: { ...s.sources, blender: v } })} />{/snippet}
+          </SRow>
+          {#if s.sources.blender}
+            <div class="nest" in:rise>
+              <SRow label="Pre-releases" desc="Alpha, beta and release candidate builds, marked Pre-release.">
+                {#snippet control()}
+                  <Segmented options={[{ value: "beta", label: "Show" }, { value: "stable", label: "Hide" }]} value={s.blenderChannel} onchange={(v) => store.patchSettings({ blenderChannel: v })} label="Blender pre-releases" />
+                {/snippet}
+              </SRow>
+              <SRow label="Keep bug-fix versions" desc="Updating 5.2.2 to 5.2.3 keeps the old copy instead of replacing it." id="keep-patch">
+                {#snippet control()}<Toggle checked={s.blenderKeepPatchVersions} labelledby="keep-patch" onchange={(v) => store.patchSettings({ blenderKeepPatchVersions: v })} />{/snippet}
+              </SRow>
+              <SRow label="Install folder" desc={s.blenderInstallDir ? s.blenderInstallDir + freeOf(s.blenderInstallDir) : "Not set"}>
+                {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("blenderInstallDir")}>Change</Btn>{/snippet}
+              </SRow>
+            </div>
+          {/if}
           <SRow label="Craft apps" desc="From ArtCraft, including the ArtCraft Launcher.">
             {#snippet control()}<Toggle checked={s.sources.craft} label="Craft apps" onchange={(v) => store.patchSettings({ sources: { ...s.sources, craft: v } })} />{/snippet}
           </SRow>
-          <SRow label="Blender" desc="Every installed series is listed. New versions install next to the old ones.">
-            {#snippet control()}<Toggle checked={s.sources.blender} label="Blender" onchange={(v) => store.patchSettings({ sources: { ...s.sources, blender: v } })} />{/snippet}
-          </SRow>
-          <SRow label="More apps" desc="OBS Studio, Krita, FreeCAD, Godot, Unity, Unity Hub and the Epic Games Launcher (Preview). The Unity Editor download is about 4 GB.">
+          {#if s.sources.craft}
+            <div class="nest" in:rise>
+              <SRow label="Pre-releases" desc="Show Craft app pre-releases in Get apps." id="craft-pre">
+                {#snippet control()}<Toggle checked={s.craftPrereleases} labelledby="craft-pre" onchange={(v) => store.patchSettings({ craftPrereleases: v })} />{/snippet}
+              </SRow>
+            </div>
+          {/if}
+          <SRow label="More apps" desc="OBS Studio, Krita, FreeCAD, Godot, Unity, Unity Hub and the Epic Games Launcher (Preview).">
             {#snippet control()}<Toggle checked={s.sources.tools} label="More apps: OBS Studio, Krita, FreeCAD, Godot, Unity, Unity Hub and the Epic Games Launcher (Preview)" onchange={(v) => store.patchSettings({ sources: { ...s.sources, tools: v } })} />{/snippet}
           </SRow>
-          <SRow label="Show installed apps in Get apps" desc="Get apps also lists apps you already have, marked Installed, with Open." id="show-installed">
-            {#snippet control()}<Toggle checked={s.showInstalledInGetApps} labelledby="show-installed" onchange={(v) => store.patchSettings({ showInstalledInGetApps: v })} />{/snippet}
-          </SRow>
-          <SRow label="Other apps" desc="Every other app on this PC that Microsoft's public winget catalog lists, updated with its publisher's own installer. Matched from the catalog, so less complete than the apps above.">
+          {#if s.sources.tools}
+            <div class="nest" in:rise>
+              <SRow label="Godot install folder" desc={s.godotInstallDir ? s.godotInstallDir + freeOf(s.godotInstallDir) : "Not set"}>
+                {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("godotInstallDir")}>Change</Btn>{/snippet}
+              </SRow>
+            </div>
+          {/if}
+          <SRow label="Other apps" desc="Every other app on this PC from Microsoft's winget catalog, updated with its publisher's own installer.">
             {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}
           </SRow>
-          <SRow label="Blender pre-releases" desc="Alpha, beta and release candidate builds appear in Get apps, marked Pre-release.">
-            {#snippet control()}
-              <Segmented options={[{ value: "beta", label: "Show" }, { value: "stable", label: "Hide" }]} value={s.blenderChannel} onchange={(v) => store.patchSettings({ blenderChannel: v })} label="Blender pre-releases" />
-            {/snippet}
+          <SRow label="Show installed apps in Get apps" desc="Get apps also lists apps you already have, marked Installed. Search always finds them." id="show-installed">
+            {#snippet control()}<Toggle checked={s.showInstalledInGetApps} labelledby="show-installed" onchange={(v) => store.patchSettings({ showInstalledInGetApps: v })} />{/snippet}
           </SRow>
-          <SRow label="Keep bug-fix versions" desc="A bug-fix update, for example 5.2.2 to 5.2.3, keeps the old copy instead of replacing it." id="keep-patch">
-            {#snippet control()}<Toggle checked={s.blenderKeepPatchVersions} labelledby="keep-patch" onchange={(v) => store.patchSettings({ blenderKeepPatchVersions: v })} />{/snippet}
-          </SRow>
-          <SRow label="Craft pre-releases" desc="Show Craft app pre-releases in Get apps." id="craft-pre">
-            {#snippet control()}<Toggle checked={s.craftPrereleases} labelledby="craft-pre" onchange={(v) => store.patchSettings({ craftPrereleases: v })} />{/snippet}
-          </SRow>
-          <SRow label="Blender install folder" desc={s.blenderInstallDir ? s.blenderInstallDir + freeOf(s.blenderInstallDir) : "Not set"}>
-            {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("blenderInstallDir")}>Change</Btn>{/snippet}
-          </SRow>
-          <SRow label="Godot install folder" desc={s.godotInstallDir ? s.godotInstallDir + freeOf(s.godotInstallDir) : "Not set"}>
-            {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("godotInstallDir")}>Change</Btn>{/snippet}
-          </SRow>
-        {:else if active === "updates"}
+        {:else if active === "general"}
+          <h3 class="sub">Updates</h3>
           <SRow label="Check for updates" desc="Runs in the background, even with this window closed.">
             {#snippet control()}<Select options={intervalOpts} value={String(s.checkInterval)} onchange={(v) => store.patchSettings({ checkInterval: Number(v) })} width={180} label="Check for updates" />{/snippet}
           </SRow>
@@ -286,7 +299,7 @@
           <SRow label="Fewer admin prompts" desc="Asks for admin rights once, then installs without a prompt each time." id="silent">
             {#snippet control()}<Toggle checked={s.silentElevation} labelledby="silent" onchange={(v) => store.patchSettings({ silentElevation: v })} />{/snippet}
           </SRow>
-        {:else if active === "notifications"}
+          <h3 class="sub">Notifications</h3>
           <SRow label="Updates found" desc="Tell me when new versions are available." id="n-upd">
             {#snippet control()}<Toggle checked={s.notifyUpdates} labelledby="n-upd" onchange={(v) => store.patchSettings({ notifyUpdates: v })} />{/snippet}
           </SRow>
@@ -303,10 +316,10 @@
             Notifications come from the background checker, so they appear even when this window is closed.
             {#if !s.launchAtStartup}
               Background checking is off right now, so you will only see them while the app is open.
-              <a class="lnk" href="#/settings/background" onclick={(e) => { e.preventDefault(); pick("background"); }}>Turn it on</a>
+              <a class="lnk" href="#/settings/startup" onclick={(e) => { e.preventDefault(); pick("startup"); }}>Turn it on</a>
             {/if}
           </p>
-        {:else if active === "background"}
+        {:else if active === "startup"}
           <SRow label="Check for updates in the background" desc="Starts with Windows as a tiny background checker with no window. It checks on your schedule and notifies you when something can be updated." id="bg-check">
             {#snippet control()}<Toggle checked={s.launchAtStartup} labelledby="bg-check" onchange={(v) => store.patchSettings({ launchAtStartup: v })} />{/snippet}
           </SRow>
@@ -326,22 +339,20 @@
               <Toggle checked={bwOn} labelledby="bw-limit" onchange={(v) => store.patchSettings({ bandwidthLimitEnabled: v, bandwidthLimit: s.bandwidthLimit || 40e6 })} />
             {/snippet}
           </SRow>
-        {:else if active === "storage"}
-          {#if s.sources.adobe}
-            <SRow label="Adobe install location" desc={s.adobeInstallDir ? s.adobeInstallDir + freeOf(s.adobeInstallDir) : "Not set"}>
-              {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("adobeInstallDir")}>Change</Btn>{/snippet}
-            </SRow>
-          {/if}
+        {:else if active === "cleanup"}
           <SRow label="Download cache" desc="Installers already used. Safe to remove. Cleared by itself after 14 days or above 5 GB, oldest first.">
             {#snippet control()}
               <span class="big">{bytes(st.cacheSize) || "0 B"}</span>
               <Btn variant="raised" size="md" title="Clear download cache" disabled={st.cacheSize === 0} onclick={clearCache}>Clear cache</Btn>
             {/snippet}
           </SRow>
+          <SRow label="Dead shortcuts" desc="Shortcuts in the Start menu, on the desktop or in Startup that open programs no longer on this PC.">
+            {#snippet control()}<Btn variant="raised" size="md" onclick={() => ui.openDialog({ type: "leftovers", apps: [{ id: "system:dead-shortcuts", name: "Dead shortcuts", broken: true }] })}>Find</Btn>{/snippet}
+          </SRow>
           <SRow label="Logs" desc="What the app did, and the cause if it ever crashed. Attach app.log to a bug report.">
             {#snippet control()}<Btn variant="raised" size="md" onclick={() => send("open_logs_folder", {})}>Open log folder</Btn>{/snippet}
           </SRow>
-        {:else if active === "account"}
+        {:else if active === "adobe"}
           <SRow label="Creative Cloud" desc={st.ccInstalled ? "Installed on this PC." : "Not installed. Adobe apps need it."}>
             {#snippet control()}<span class="ccs" style:color={st.ccInstalled ? "var(--ok)" : "var(--err)"}><Dab color={st.ccInstalled ? "var(--ok)" : "var(--err)"} />{st.ccInstalled ? "Installed" : "Not installed"}</span>{/snippet}
           </SRow>
@@ -351,13 +362,16 @@
           <SRow label="Sign-in" desc="This app never sees your password. It uses the session Creative Cloud keeps.">
             {#snippet control()}<span class="ccs" style:color={st.signedIn ? "var(--ok)" : "var(--err)"}><Dab color={st.signedIn ? "var(--ok)" : "var(--err)"} />{st.signedIn ? "Signed in" : "Signed out"}</span>{/snippet}
           </SRow>
-          <SRow label="Open Creative Cloud" desc={s.sources.adobe ? "Sign in or start its services there." : "Adobe apps are switched off in Sources."}>
+          <SRow label="Open Creative Cloud" desc={s.sources.adobe ? "Sign in or start its services there." : "Adobe apps are switched off in Apps."}>
             {#snippet control()}
               <Btn variant="raised" size="md" title="Opens Creative Cloud" onclick={() => send("open_creative_cloud", {})}>Open Creative Cloud <Icon d={I.external} size={14} width={2.5} /></Btn>
             {/snippet}
           </SRow>
           <SRow label="Install language" desc="Language for new Adobe installs.">
             {#snippet control()}<Select options={langOpts} value={s.language} onchange={(v) => store.patchSettings({ language: v })} width={180} label="Language" />{/snippet}
+          </SRow>
+          <SRow label="Install location" desc={s.adobeInstallDir ? s.adobeInstallDir + freeOf(s.adobeInstallDir) : "Not set"}>
+            {#snippet control()}<Btn variant="raised" size="md" onclick={() => changeFolder("adobeInstallDir")}>Change</Btn>{/snippet}
           </SRow>
         {:else if active === "about"}
           <SRow label="Installed version" desc={st.lastCheck ? `Last checked for updates at ${clock(st.lastCheck)}.` : "Not checked for updates yet."}>
@@ -369,6 +383,7 @@
               <Btn variant="raised" size="md" disabled={st.checking} onclick={checkNow}>{st.checking ? "Checking" : "Check now"}</Btn>
             {/snippet}
           </SRow>
+          {#if st.machine}<SRow label="Tuned for this PC" desc={`${st.machine}. Downloads and checks do as much at once as this PC handles well.`} />{/if}
         {/if}
       </div>
     {/key}
@@ -453,6 +468,24 @@
   .ph p {
     font-size: 13px;
     color: var(--text-3);
+  }
+  /* A group title inside a page ("Updates", "Notifications"). */
+  .sub {
+    margin: 28px 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .sub:first-of-type {
+    margin-top: 4px;
+  }
+  /* Options that belong to the switch above them, shown only while it is on. */
+  .nest {
+    margin-left: 18px;
+    padding-left: 16px;
+    border-left: 2px solid var(--sep);
   }
   .foot {
     margin-top: 16px;

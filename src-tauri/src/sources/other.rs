@@ -13,7 +13,7 @@
 //! one package is left, the locale and the name decide; when they can not, the entry is dropped.
 
 use super::winget::{self, Index, Installer, Manifest, Pkg, VerRef};
-use super::{Download, Installed, Latest, Plan, SourceData, Step, Verify};
+use super::{msix, Download, Installed, Latest, Plan, SourceData, Step, StoreRef, Verify};
 use crate::model::{CatalogEntry, JobKind, Source, VersionInfo};
 use crate::{http, notes, paths, version, winutil};
 use anyhow::{anyhow, bail, Result};
@@ -120,6 +120,8 @@ pub enum How {
     NamePublisher,
     UpgradeCode,
     ProductCode,
+    /// An app package (MSIX) whose package family name the catalog lists for this package only
+    PackageFamily,
 }
 
 impl How {
@@ -130,6 +132,7 @@ impl How {
             How::NamePublisher => "name and publisher",
             How::Location => "install folder",
             How::Name => "own name",
+            How::PackageFamily => "package family name",
         }
     }
 }
@@ -140,6 +143,8 @@ pub struct Match {
     pub pkg: Pkg,
     pub how: How,
     pub upgrade_code: Option<String>,
+    /// An app package (MSIX) this user has; its `entry` is made from the package
+    pub package: Option<Box<msix::AppPackage>>,
 }
 
 /// Why an entry was not matched.
@@ -458,12 +463,12 @@ fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[I
                         Some(v) => {
                             let mut e2 = e.clone();
                             e2.display_version = v;
-                            r.matches.push(Match { entry: e2, pkg, how, upgrade_code });
+                            r.matches.push(Match { entry: e2, pkg, how, upgrade_code, package: None });
                         }
                         None => r.misses.push((e.clone(), Miss::NoVersion)),
                     }
                 } else {
-                    r.matches.push(Match { entry: e.clone(), pkg, how, upgrade_code });
+                    r.matches.push(Match { entry: e.clone(), pkg, how, upgrade_code, package: None });
                 }
             }
             Err(m) => r.misses.push((e.clone(), m)),
@@ -484,6 +489,73 @@ fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[I
     }
     r.matches = kept;
     r
+}
+
+/// The `hive` of an entry made from an app package (MSIX) rather than read from the uninstall
+/// list. Its `key` is the package's full name.
+pub const APPX: &str = "APPX";
+
+/// The entry an app package stands for: its name, publisher, version, folder and date.
+fn package_entry(p: &msix::AppPackage) -> winutil::UninstallEntry {
+    winutil::UninstallEntry {
+        key: p.full_name.clone(),
+        hive: APPX,
+        display_name: if p.display_name.trim().is_empty() || p.display_name.starts_with("ms-resource:") { p.name.clone() } else { p.display_name.clone() },
+        display_version: msix::display_version(&p.version),
+        publisher: p.publisher.clone(),
+        install_location: p.install_dir.as_ref().map(|d| d.to_string_lossy().to_string()).unwrap_or_default(),
+        written: p.installed_at,
+        ..Default::default()
+    }
+}
+
+/// This user's app packages (MSIX) matched to the catalog by their exact package family name,
+/// when only one package has it. A package already matched from the uninstall list (`classic`),
+/// listed by another source (a Store copy of Blender) or left out on purpose stays out.
+pub fn package_matches(pkgs: &[msix::AppPackage], idx: &Index, classic: &[Match], handled: &[Installed]) -> Vec<Match> {
+    let mut out: Vec<Match> = Vec::new();
+    for p in pkgs {
+        let rows = idx.by_family(&p.family);
+        let [row] = rows.as_slice() else { continue };
+        let Some(pkg) = idx.by_row(*row) else { continue };
+        if handled_package(&pkg.id) || excluded_package(&pkg.id).is_some() {
+            continue;
+        }
+        if handled.iter().any(|h| h.store.as_ref().is_some_and(|s| s.family.eq_ignore_ascii_case(&p.family))) {
+            continue;
+        }
+        if classic.iter().chain(out.iter()).any(|m| m.pkg.id.eq_ignore_ascii_case(&pkg.id)) {
+            continue;
+        }
+        out.push(Match { entry: package_entry(p), pkg, how: How::PackageFamily, upgrade_code: None, package: Some(Box::new(p.clone())) });
+    }
+    out
+}
+
+/// Every match: the uninstall list's, then this user's app packages.
+fn all_matches(entries: &[winutil::UninstallEntry], idx: &Index, path: &Path, handled: &[Installed]) -> Vec<Match> {
+    let mut ms = match_on_disk(entries, idx, path, handled).matches;
+    let more = package_matches(&msix::app_packages(), idx, &ms, handled);
+    ms.extend(more);
+    ms
+}
+
+/// The Store page of a catalog entry ("other:<package id>") by the package family name the
+/// index gives it.
+pub fn store_ref_of(id: &str) -> Option<StoreRef> {
+    let pkg = id.strip_prefix("other:")?;
+    let idx = Index::open(&winget::index_path()).ok()?;
+    let row = idx.by_id(pkg)?.row;
+    let family = idx.families_of(row).into_iter().next()?;
+    Some(StoreRef { family, app: None })
+}
+
+/// Is this installed copy an app package (MSIX)? Its package family name, when it is.
+pub fn package_family(i: &Installed) -> Option<String> {
+    match &i.data {
+        SourceData::Other { how: How::PackageFamily, entry, .. } => Some(msix::family_of(&entry.key)),
+        _ => None,
+    }
 }
 
 /// Is this entry a WiX Burn bundle? Its uninstaller is the installer kept in the Package Cache.
@@ -524,7 +596,8 @@ pub(crate) fn fold_bundles(entries: &[winutil::UninstallEntry]) -> Vec<winutil::
 
 /// "user" for a copy registered for this user only, else "machine".
 fn entry_scope(e: &winutil::UninstallEntry) -> &'static str {
-    if e.hive == "HKCU" {
+    // App packages are installed for each user.
+    if e.hive == "HKCU" || e.hive == APPX {
         "user"
     } else {
         "machine"
@@ -595,6 +668,9 @@ pub struct Want {
     pub product_code: Option<String>,
     pub upgrade_code: Option<String>,
     pub locale: Option<String>,
+    /// An installed app package (MSIX): its package family name. Only a package of that family
+    /// updates it.
+    pub package: Option<String>,
 }
 
 /// The processor Windows runs on ("arm64" even for this app running emulated as x64).
@@ -628,11 +704,23 @@ impl Want {
             product_code: Some(e.key.clone()),
             upgrade_code: upgrade_code.map(String::from),
             locale: nn.locale,
+            package: None,
         }
+    }
+
+    /// An installed app package, by its full name.
+    pub fn for_package(full_name: &str) -> Want {
+        let arch = match msix::arch_of(full_name).as_str() {
+            "x64" => Some("x64"),
+            "x86" => Some("x86"),
+            _ => None,
+        };
+        Want { machine: machine_arch(), arch, scope: Some("user"), msi: false, product_code: None, upgrade_code: None, locale: None, package: Some(msix::family_of(full_name)) }
     }
 
     pub fn for_installed(i: &Installed) -> Want {
         match &i.data {
+            SourceData::Other { how: How::PackageFamily, entry, .. } => Want::for_package(&entry.key),
             SourceData::Other { entry, upgrade_code, .. } => Want::for_entry(entry, upgrade_code.as_deref()),
             _ => Want::fresh(),
         }
@@ -640,7 +728,7 @@ impl Want {
 
     /// A new install: the computer's own architecture is preferred, any scope.
     pub fn fresh() -> Want {
-        Want { machine: machine_arch(), arch: None, scope: None, msi: false, product_code: None, upgrade_code: None, locale: None }
+        Want { machine: machine_arch(), arch: None, scope: None, msi: false, product_code: None, upgrade_code: None, locale: None, package: None }
     }
 }
 
@@ -659,6 +747,14 @@ fn msi_family(k: &str) -> bool {
 
 const OTHER_CPU: &str = "only for another kind of processor";
 
+/// Why a package that only the Microsoft Store installs can not be installed here.
+pub const STORE_ONLY: &str = "only in the Microsoft Store";
+
+/// MSIX and APPX packages, which Windows' package manager installs.
+pub fn package_kind(k: &str) -> bool {
+    k == "msix" || k == "appx"
+}
+
 /// Can this installer run here, silently? `Err` says why not.
 pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static str> {
     match i.arch.as_str() {
@@ -667,7 +763,10 @@ pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static 
         _ => return Err(OTHER_CPU),
     }
     match kind_of(i) {
-        "msix" | "appx" | "msstore" => return Err("only a Store or MSIX package"),
+        "msstore" => return Err(STORE_ONLY),
+        "msix" | "appx" if i.kind == "zip" => return Err("an MSIX package inside a zip"),
+        "msix" | "appx" if i.family.as_deref().is_none_or(|f| f.trim().is_empty()) => return Err("an MSIX package without its package family name"),
+        "msix" | "appx" => {}
         "portable" => return Err("only a portable copy"),
         "pwa" | "font" => return Err("not a desktop app installer"),
         "zip" => return Err("a zip without an installer in it"),
@@ -714,12 +813,32 @@ pub fn choose_with<'a>(m: &'a Manifest, w: &Want, learned: &Learned) -> std::res
         let pc = same(&w.product_code, &i.product_code) || i.arp.iter().any(|a| same(&w.product_code, &a.product_code));
         let uc = w.upgrade_code.is_some() && i.arp.iter().any(|a| same(&w.upgrade_code, &a.upgrade_code));
         let k = kind_of(i);
+        // An app package is only updated by a package of its own family, and a copy from a
+        // normal installer never by a package (that would install a second copy).
+        let is_pkg = package_kind(k);
+        match &w.package {
+            Some(fam) => {
+                if !is_pkg {
+                    why = (3, "no MSIX package, this copy is an app package");
+                    continue;
+                }
+                if i.family.as_deref().is_some_and(|f| !f.eq_ignore_ascii_case(fam)) {
+                    why = (3, "only an MSIX package of another family");
+                    continue;
+                }
+            }
+            None if is_pkg && w.product_code.is_some() => {
+                why = (3, "only an MSIX package, this copy did not come from one");
+                continue;
+            }
+            None => {}
+        }
         // A key name such as "7-Zip" is the same for every architecture; a GUID is not.
         let named = uc || (pc && w.product_code.as_deref().is_some_and(is_guid));
         // The scope the installer really installs for, when an earlier install showed it differs
         // from the catalog's.
         let iscope = learned.real_scope(&m.id, i.scope.as_deref());
-        if let (Some(ws), Some(is)) = (w.scope, iscope) {
+        if let (Some(ws), Some(is), None) = (w.scope, iscope, &w.package) {
             if ws != is && !named {
                 why = (3, if ws == "user" { "only an installer for all users, this copy is per user" } else { "only a per-user installer, this copy is for all users" });
                 continue;
@@ -736,6 +855,10 @@ pub fn choose_with<'a>(m: &'a Manifest, w: &Want, learned: &Learned) -> std::res
             }
         }
         let mut s = 0;
+        // A new install takes a normal installer over an app package when there are both.
+        if is_pkg && w.package.is_none() {
+            s -= 40;
+        }
         if pc {
             s += 100;
         }
@@ -812,8 +935,7 @@ pub struct Feed {
     pub unfinished: bool,
 }
 
-/// Starter list manifests read at the same time, and how long a refresh waits for them.
-const POPULAR_PARALLEL: usize = 16;
+/// How long a refresh waits for the starter list manifests (read as many at once as this PC is tuned for).
 const POPULAR_BUDGET: Duration = Duration::from_secs(25);
 
 /// Well-known apps that Get apps lists under Other apps without a search. Ids the catalog does not
@@ -1246,20 +1368,45 @@ pub fn popular_candidates(idx: &Index) -> Vec<(Pkg, &'static str)> {
     POPULAR.iter().filter(|(id, _)| !handled_package(id) && excluded_package(id).is_none()).filter_map(|(id, line)| idx.by_id(id).map(|p| (p, *line))).collect()
 }
 
+/// The packages an earlier feed read, by lowercase id.
+fn read_before(prev: Option<&Feed>) -> HashMap<String, &PkgFeed> {
+    let Some(f) = prev else { return HashMap::new() };
+    f.popular.iter().map(|(p, _)| p).chain(f.pkgs.values()).filter(|p| p.latest.is_some()).map(|p| (p.pkg.id.to_ascii_lowercase(), p)).collect()
+}
+
+/// A package as an earlier check read it, when its index row still names the same version list
+/// (by its checksum): then its versions and newest manifest are the same too, and nothing needs
+/// reading again. The row itself is the new one.
+fn reuse(before: &HashMap<String, &PkgFeed>, p: &Pkg) -> Option<Loaded> {
+    let f = before.get(&p.id.to_ascii_lowercase())?;
+    let m = f.latest.clone()?;
+    (f.pkg.hash == p.hash && !p.hash.is_empty()).then(|| (p.clone(), Ok((f.versions.clone(), m))))
+}
+
+/// `load_pkg`, or the package as `before` has it when it did not change.
+async fn load_or_reuse(before: &HashMap<String, &PkgFeed>, p: Pkg) -> Loaded {
+    match reuse(before, &p) {
+        Some(l) => l,
+        None => load_pkg(p).await,
+    }
+}
+
 /// Refresh the index, match what is installed and read the version list and newest manifest of
-/// every matched package. `installed` are the apps the other sources found.
-pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
+/// every matched package. `installed` are the apps the other sources found; `prev` is the feed of
+/// the check before, whose packages are kept as they are when the index did not change them.
+pub async fn fetch(installed: &[Installed], prev: Option<&Feed>) -> Result<Feed> {
     let path = winget::refresh_index(Duration::from_secs(30 * 60)).await?;
     let handled: Vec<Installed> = installed.iter().filter(|i| i.source != Source::Other).cloned().collect();
     let (pkgs, popular): (Vec<Pkg>, Vec<(Pkg, &'static str)>) = tokio::task::spawn_blocking(move || -> Result<(Vec<Pkg>, Vec<(Pkg, &'static str)>)> {
         let idx = Index::open(&path)?;
-        let r = match_on_disk(&winutil::uninstall_entries(), &idx, &path, &handled);
+        let ms = all_matches(&winutil::uninstall_entries(), &idx, &path, &handled);
         let popular = popular_candidates(&idx);
-        Ok((r.matches.into_iter().map(|m| m.pkg).collect(), popular))
+        Ok((ms.into_iter().map(|m| m.pkg).collect(), popular))
     })
     .await
     .map_err(|e| anyhow!("{e}"))??;
-    let got: Vec<Loaded> = futures_util::stream::iter(pkgs).map(load_pkg).buffer_unordered(8).collect().await;
+    let before = read_before(prev);
+    let got: Vec<Loaded> = futures_util::stream::iter(pkgs).map(|p| load_or_reuse(&before, p)).buffer_unordered(crate::machine::tuned().manifest_parallel).collect().await;
     let lines: HashMap<String, &'static str> = popular.iter().map(|(p, l)| (p.id.to_ascii_lowercase(), *l)).collect();
     let pop_pkgs: Vec<Pkg> = popular.into_iter().map(|(p, _)| p).collect();
     // The version lists and manifests are kept on disk by their checksum, so only the first start
@@ -1269,8 +1416,12 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     let mut pop: Vec<Loaded> = Vec::new();
     {
         let mut set = tokio::task::JoinSet::new();
-        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(POPULAR_PARALLEL));
+        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(crate::machine::tuned().popular_parallel));
         for p in pop_pkgs {
+            if let Some(l) = reuse(&before, &p) {
+                pop.push(l);
+                continue;
+            }
             let gate = gate.clone();
             set.spawn(async move {
                 let _slot = gate.acquire_owned().await;
@@ -1313,7 +1464,13 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     if failed > 0 && feed.pkgs.is_empty() {
         bail!("Could not read the winget catalog");
     }
-    tokio::task::spawn_blocking(|| winget::prune_files(Duration::from_secs(60 * 24 * 3600))).await.ok();
+    // Old version lists and manifests: looked for once a day, not on every check.
+    static PRUNED: Mutex<Option<std::time::Instant>> = parking_lot::const_mutex(None);
+    let due = PRUNED.lock().is_none_or(|t| t.elapsed() > Duration::from_secs(24 * 3600));
+    if due {
+        *PRUNED.lock() = Some(std::time::Instant::now());
+        tokio::task::spawn_blocking(|| winget::prune_files(Duration::from_secs(60 * 24 * 3600))).await.ok();
+    }
     Ok(feed)
 }
 
@@ -1470,11 +1627,16 @@ fn read_hints() -> super::locate::Hints {
     super::locate::Hints::default()
 }
 
+/// One match as an installed app, without shared location hints (tests use it).
+#[cfg(test)]
 fn make(m: &Match, feed: Option<&Feed>) -> Option<Installed> {
     make_with(m, feed, &std::cell::OnceCell::new())
 }
 
 fn make_with(m: &Match, feed: Option<&Feed>, hints: &std::cell::OnceCell<super::locate::Hints>) -> Option<Installed> {
+    if let Some(p) = &m.package {
+        return make_package(m, p, feed);
+    }
     let e = &m.entry;
     let pf = feed.and_then(|f| f.get(&m.pkg.id));
     let man = pf.and_then(|p| p.latest.as_ref());
@@ -1510,6 +1672,42 @@ fn make_with(m: &Match, feed: Option<&Feed>, hints: &std::cell::OnceCell<super::
     })
 }
 
+/// The installed app for an app package (MSIX). One the Microsoft Store installed is listed for
+/// the Store to update; a sideloaded one is updated and removed here, and like other apps only
+/// listed when the catalog has a package of its family to update it with.
+fn make_package(m: &Match, p: &msix::AppPackage, feed: Option<&Feed>) -> Option<Installed> {
+    let man = feed.and_then(|f| f.get(&m.pkg.id)).and_then(|pf| pf.latest.as_ref());
+    let store = p.store_signed();
+    if let (Some(man), false) = (man, store) {
+        choose(man, &Want::for_package(&p.full_name)).ok()?;
+    }
+    let name = man.map(|x| x.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| m.pkg.name.clone());
+    let (code, fg, bg) = mark_for(&name, &m.pkg.id);
+    let (app, exe, logo) = p.install_dir.as_deref().map(msix::read_visual).unwrap_or_default();
+    let tagline = if store { Some("Updated by the Microsoft Store".to_string()) } else { man.and_then(|x| x.description.clone()).or_else(|| Some(m.entry.publisher.clone()).filter(|p| !p.is_empty())) };
+    Some(Installed {
+        id: format!("other:{}", m.pkg.id),
+        source: Source::Other,
+        name,
+        code,
+        fg,
+        bg,
+        version: m.entry.display_version.clone(),
+        install_dir: p.install_dir.clone(),
+        exe: exe.filter(|e| e.is_file()),
+        uninstall: None,
+        updated_at: entry_date(&m.entry),
+        size_hint: None,
+        tagline,
+        channel: None,
+        missing: false,
+        read_only: store,
+        store: Some(StoreRef { family: p.family.clone(), app }),
+        icon_remote: logo.map(|l| l.to_string_lossy().to_string()),
+        data: SourceData::Other { pkg: m.pkg.id.clone(), how: How::PackageFamily, entry: Box::new(m.entry.clone()), upgrade_code: None },
+    })
+}
+
 /// Installed apps matched to the catalog (no network: the index on disk, if there is one yet).
 pub fn scan(entries: &[winutil::UninstallEntry], handled: &[Installed], feed: Option<&Feed>) -> Vec<Installed> {
     let path = winget::index_path();
@@ -1523,8 +1721,7 @@ pub fn scan(entries: &[winutil::UninstallEntry], handled: &[Installed], feed: Op
             return vec![];
         }
     };
-    let r = match_on_disk(entries, &idx, &path, handled);
-    installed_copies(&r.matches, feed)
+    installed_copies(&all_matches(entries, &idx, &path, handled), feed)
 }
 
 /// The installed apps for these matches, with a distinct id for each copy.
@@ -1684,8 +1881,7 @@ pub struct PkgCopy {
 pub fn package_copies(pkg: &str, entries: &[winutil::UninstallEntry], handled: &[Installed], since: std::time::SystemTime) -> Vec<PkgCopy> {
     let path = winget::index_path();
     let Ok(idx) = Index::open(&path) else { return vec![] };
-    let r = match_on_disk(entries, &idx, &path, handled);
-    let ms: Vec<Match> = r.matches.into_iter().filter(|m| m.pkg.id.eq_ignore_ascii_case(pkg)).collect();
+    let ms: Vec<Match> = all_matches(entries, &idx, &path, handled).into_iter().filter(|m| m.pkg.id.eq_ignore_ascii_case(pkg)).collect();
     copies_of(&ms, since)
 }
 
@@ -1943,6 +2139,11 @@ type Notes = (Vec<String>, Option<String>);
 
 static NOTES_CACHE: Lazy<Mutex<HashMap<String, Notes>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Forget change lists kept for open pages (they are saved on disk too).
+pub fn clear_notes_cache() {
+    NOTES_CACHE.lock().clear();
+}
+
 /// The change list of one version and the page with the full notes, from the best source there
 /// is: the manifest's own release notes, its release notes page, or the GitHub release.
 async fn notes_for(m: &Manifest, gh: &Gh) -> Notes {
@@ -2051,6 +2252,11 @@ async fn version_infos(list: &[VerRef], installed: Option<&str>, want: &Want, la
         .buffered(6)
         .collect()
         .await;
+    // The catalog lists no sizes: ask the download server for the newest version's installer.
+    let newest_size = match manifests.first().and_then(|m| m.as_ref()).and_then(|m| choose(m, want).ok()) {
+        Some(i) => tokio::time::timeout(Duration::from_secs(5), remote_size(&i.url)).await.ok().flatten(),
+        None => None,
+    };
     let mut out = Vec::new();
     for (k, ((r, m), (lines, url))) in top.iter().zip(manifests.iter()).zip(fetched).enumerate() {
         let mut lines = lines;
@@ -2064,7 +2270,7 @@ async fn version_infos(list: &[VerRef], installed: Option<&str>, want: &Want, la
             date: m.as_ref().and_then(|m| iso_date(&m.release_date)),
             notes: lines,
             notes_url: url.or_else(|| m.as_ref().and_then(|m| m.package_url.clone())),
-            size: None,
+            size: if k == 0 { newest_size } else { None },
             installed: is_installed,
             latest: k == 0,
             prerelease: super::tools::is_pre(&r.version),
@@ -2112,15 +2318,19 @@ fn safe_name(s: &str) -> String {
 fn file_name(i: &Installer, pkg: &str, ver: &str) -> String {
     let last = i.url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("");
     let last = safe_name(&percent_decode(last));
-    let ext = match i.kind.as_str() {
-        "msi" | "wix" => "msi",
-        "zip" => "zip",
-        _ => "exe",
+    let exts: &[&str] = match i.kind.as_str() {
+        "msi" | "wix" => &["msi"],
+        "zip" => &["zip"],
+        // Windows reads a package by its extension.
+        "msix" => &["msix", "msixbundle", "appx", "appxbundle"],
+        "appx" => &["appx", "appxbundle", "msix", "msixbundle"],
+        _ => &["exe"],
     };
-    if last.to_ascii_lowercase().ends_with(&format!(".{ext}")) && last.len() > 4 {
+    let low = last.to_ascii_lowercase();
+    if exts.iter().any(|e| low.ends_with(&format!(".{e}")) && low.len() > e.len() + 1) {
         last
     } else {
-        format!("{}-{}.{ext}", safe_name(pkg), safe_name(ver))
+        format!("{}-{}.{}", safe_name(pkg), safe_name(ver), exts[0])
     }
 }
 
@@ -2191,6 +2401,31 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
     let dest = base.join(file_name(i, &p.id, &m.version));
     let log = paths::logs().join(format!("other-{}-{}.log", tail, safe_name(&m.version)));
     let update = current.is_some() && kind != JobKind::Install;
+    let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
+    let download = Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()), sha512: None, md5: None, signer: None, headers: vec![] };
+    if package_kind(&i.kind) {
+        // An app package: Windows' package manager installs it for this user, no admin rights.
+        let family = i.family.clone().filter(|f| !f.trim().is_empty()).ok_or_else(|| anyhow!("{name}: the catalog does not name its package family"))?;
+        let doing = match kind {
+            JobKind::Update => "Updating",
+            JobKind::Repair => "Reinstalling",
+            _ => "Installing",
+        };
+        let label = format!("{doing} {name} {}", m.version);
+        return Ok(Plan {
+            app_id: app_id.clone(),
+            kind,
+            name: name.clone(),
+            to_version: m.version.clone(),
+            downloads: vec![download],
+            steps: vec![Step::AddPackage { path: dest.clone(), family, signature_sha256: i.signature_sha256.clone(), update, any_version: kind == JobKind::Rollback, label }],
+            block_dirs,
+            block_names: vec![],
+            verify: Verify::Version { app_id, version: expected_version(m, i) },
+            fallback: None,
+            cleanup: vec![dest],
+        });
+    }
     let admin = needs_admin(i, &w);
     let label = format!("Installing {} {}", name, m.version);
     let mut steps = Vec::new();
@@ -2225,14 +2460,13 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         cleanup.push(log.clone());
     }
     let run = |elevated: bool| Step::Run { exe: exe.clone(), args: args.clone(), cwd: None, ok_codes: ok_codes.clone(), elevated, label: label.clone(), log: logged.then(|| log.clone()) };
-    let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
     let block_names: Vec<String> = if block_dirs.is_empty() { current.and_then(|c| c.exe.as_ref()).and_then(|e| e.file_name()).map(|n| n.to_string_lossy().to_ascii_lowercase()).filter(|n| n.ends_with(".exe")).into_iter().collect() } else { vec![] };
     let make = |steps: Vec<Step>| Plan {
         app_id: app_id.clone(),
         kind,
         name: name.clone(),
         to_version: m.version.clone(),
-        downloads: vec![Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()), sha512: None, md5: None, signer: None, headers: vec![] }],
+        downloads: vec![download.clone()],
         steps,
         block_dirs: block_dirs.clone(),
         block_names: block_names.clone(),
@@ -2324,6 +2558,22 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
 }
 
 pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
+    if let Some(family) = package_family(inst) {
+        // An app package: Windows' package manager removes it (and its data) for this user.
+        return Ok(Plan {
+            app_id: inst.id.clone(),
+            kind: JobKind::Uninstall,
+            name: inst.name.clone(),
+            to_version: inst.version.clone(),
+            downloads: vec![],
+            steps: vec![Step::RemovePackage { family, label: format!("Uninstalling {}", inst.name) }],
+            block_dirs: inst.install_dir.iter().filter(|d| own_dir(d)).cloned().collect(),
+            block_names: vec![],
+            verify: Verify::Removed { app_id: inst.id.clone() },
+            fallback: None,
+            cleanup: vec![],
+        });
+    }
     let u = inst.uninstall.clone().filter(|u| !u.is_empty()).ok_or_else(|| anyhow!("{} has no silent uninstaller registered", inst.name))?;
     let user = matches!(&inst.data, SourceData::Other { entry, .. } if entry.hive == "HKCU");
     let exe = PathBuf::from(&u[0]);
@@ -2351,6 +2601,10 @@ pub fn install_seconds(mb: f64) -> f64 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod package_tests;
+#[cfg(test)]
+mod package_probe;
 #[cfg(test)]
 mod probe;
 #[cfg(test)]

@@ -38,8 +38,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_TRIES: usize = 5;
 /// Candidates fetched ahead while the better one before them is still loading.
 const AHEAD: usize = 3;
-/// Apps whose icon is searched for at the same time.
-pub const PARALLEL: usize = 16;
+/// Apps whose icon is searched for at the same time: as many as this PC is tuned for (16 on a
+/// usual PC); each server still gets at most `PER_HOST`.
+pub fn parallel() -> usize {
+    crate::machine::tuned().icon_parallel
+}
 /// Requests to one server at the same time, so a page of apps by one publisher does not flood it.
 const PER_HOST: usize = 4;
 /// Edge of a saved icon in pixels: sharp at the biggest mark (80 px) on a 150% screen.

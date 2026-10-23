@@ -937,3 +937,17 @@ pub fn resume_process(pid: u32) -> bool {
     }
     resumed
 }
+
+/// Give memory the app no longer uses back to Windows: compact the heap and empty the working
+/// set (pages come back on their own when needed). For when the window has closed.
+pub fn give_back_memory() {
+    use windows::Win32::System::Memory::{GetProcessHeap, HeapCompact, HEAP_FLAGS};
+    use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        if let Ok(h) = GetProcessHeap() {
+            let _ = HeapCompact(h, HEAP_FLAGS(0));
+        }
+        let _ = K32EmptyWorkingSet(GetCurrentProcess());
+    }
+}

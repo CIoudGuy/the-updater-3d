@@ -5,6 +5,7 @@
   import Dab from "./Dab.svelte";
   import BrushBar from "./BrushBar.svelte";
   import Check from "./Check.svelte";
+  import LeftoverDialog from "./LeftoverDialog.svelte";
   import { store } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { call, send } from "../lib/api";
@@ -24,6 +25,7 @@
   let prefsItems = $state<PrefsItem[] | null>(null);
   let prefsFor = "";
   $effect(() => {
+    if (d?.type === "uninstall-many") manyPrefs = false;
     if (d?.type === "uninstall") {
       removePrefs = false;
       prefsItems = null;
@@ -46,10 +48,28 @@
   });
   const prefsTotal = $derived((prefsItems ?? []).reduce((n, i) => n + (i.size ?? 0), 0));
 
+  /** A program whose uninstaller is gone: "Remove from list" instead of running it */
+  const unBroken = $derived(!!unApp && unApp.source === "programs" && unApp.status === "missing");
   function doUninstall() {
     if (!unApp) return;
+    const one = { id: unApp.id, name: unApp.name };
+    if (unBroken) {
+      ui.openDialog({ type: "leftovers", apps: [{ ...one, broken: true }] });
+      return;
+    }
     send("uninstall_app", { appId: unApp.id, removePrefs });
-    ui.closeDialog();
+    // What the uninstaller leaves behind is shown once it is done.
+    ui.openDialog({ type: "leftovers", apps: [one] });
+  }
+  const manyApps = $derived(d?.type === "uninstall-many" ? d.appIds.map((id) => store.app(id)).filter((a) => !!a) : []);
+  const manyBytes = $derived(manyApps.reduce((n, a) => n + (a?.sizeOnDisk ?? 0), 0));
+  let manyPrefs = $state(false);
+  function doUninstallMany() {
+    const list = manyApps.filter((a) => !!a);
+    const broken = list.filter((a) => a.source === "programs" && a.status === "missing");
+    for (const a of list) if (!broken.includes(a)) send("uninstall_app", { appId: a.id, removePrefs: manyPrefs });
+    ui.endSelecting();
+    ui.openDialog({ type: "leftovers", apps: list.map((a) => ({ id: a.id, name: a.name, broken: broken.includes(a) })) });
   }
   function later() {
     if (blocked) ui.dismissedBlocked = [...ui.dismissedBlocked, blocked.id];
@@ -68,9 +88,11 @@
 {#if kind === "uninstall" && unApp}
   <Dialog role="alertdialog" labelledby="un-title" onclose={() => ui.closeDialog()}>
     <Mark app={unApp} size={44} fs={16} />
-    <h2 id="un-title">Uninstall {unApp.name}?</h2>
+    <h2 id="un-title">{unBroken ? `Remove ${unApp.name} from the list?` : `Uninstall ${unApp.name}?`}</h2>
     <p class="lead">
-      {#if unApp.status === "missing"}
+      {#if unBroken}
+        Its uninstaller is missing, so it can't run. This removes {unApp.name} from the list of installed programs and shows what is left of it to clean up. Registry entries are saved first; Restore in Activity puts them back.
+      {:else if unApp.status === "missing"}
         Removes the leftover entry for {unApp.name} {unApp.version}. The files are already gone.
       {:else if unApp.source === "blender"}
         Removes {unApp.name} ({unApp.version}){unApp.sizeOnDisk ? ` and frees ${bytes(unApp.sizeOnDisk)}` : ""}. Your .blend files and other Blender versions are not touched.
@@ -78,11 +100,12 @@
         Removes {unApp.name} {unApp.version}{unApp.sizeOnDisk ? ` and frees ${bytes(unApp.sizeOnDisk)}` : ""}. Your projects and media files are not touched.
       {/if}
     </p>
-    {#if unApp.source === "other"}
+    {#if unApp.source === "other" || (unApp.source === "programs" && !unBroken)}
       <div class="opt info">
-        <span class="grow">Runs {unApp.name}'s own uninstaller.</span>
+        <span class="grow">Runs {unApp.name}'s own uninstaller{unApp.source === "programs" ? ". If it opens a window, answer it there" : ""}. Then it shows what was left behind, to clean up.</span>
       </div>
     {/if}
+    {#if !unBroken}
     <div class="opt prefs">
         <Check checked={removePrefs} onchange={(v) => (removePrefs = v)}>Also delete settings and add-ons</Check>
         {#if removePrefs}
@@ -100,11 +123,35 @@
           {/if}
         {/if}
     </div>
+    {/if}
     <div class="actions first">
       <Btn variant="raised" onclick={() => ui.closeDialog()} hint="Esc">Cancel</Btn>
-      <Btn variant="danger" title="Uninstall {unApp.name}" onclick={doUninstall}>Uninstall</Btn>
+      <Btn variant="danger" title="{unBroken ? 'Remove' : 'Uninstall'} {unApp.name}" onclick={doUninstall}>{unBroken ? "Continue" : "Uninstall"}</Btn>
     </div>
   </Dialog>
+{:else if d?.type === "uninstall-many"}
+  <Dialog role="alertdialog" labelledby="unm-title" width={520} onclose={() => ui.closeDialog()}>
+    <h2 id="unm-title">Uninstall {manyApps.length} programs?</h2>
+    <p class="lead">
+      They are removed one after another{manyBytes ? `, freeing ${bytes(manyBytes)}` : ""}. Programs with their own uninstaller window wait for your answer there. Then it shows what each left behind, to clean up.
+    </p>
+    <ul class="plist many selectable">
+      {#each manyApps as a (a?.id)}
+        {#if a}<li><span class="pp">{a.name}{a.source === "programs" && a.status === "missing" ? " (removed from the list: its uninstaller is missing)" : ""}</span><span class="ps">{a.sizeOnDisk ? bytes(a.sizeOnDisk) : ""}</span></li>{/if}
+      {/each}
+    </ul>
+    <div class="opt prefs">
+      <Check checked={manyPrefs} onchange={(v) => (manyPrefs = v)}>Also delete their settings and add-ons</Check>
+    </div>
+    <div class="actions first">
+      <Btn variant="raised" onclick={() => ui.closeDialog()} hint="Esc">Cancel</Btn>
+      <Btn variant="danger" onclick={doUninstallMany}>Uninstall {manyApps.length}</Btn>
+    </div>
+  </Dialog>
+{:else if d?.type === "leftovers"}
+  {#key d}
+    <LeftoverDialog apps={d.apps} />
+  {/key}
 {:else if kind === "blocked" && blocked}
   {@const a = store.app(blocked.appId)}
   <Dialog labelledby="blk-title" onclose={later} onenter={closeAndUpdate}>
@@ -191,6 +238,10 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+  .plist.many {
+    margin-top: 16px;
+    max-height: 220px;
   }
   .pnote {
     font-size: 12px;

@@ -7,8 +7,8 @@
   import { send } from "../lib/api";
   import { store, statusColor, statusLabel } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
-  import { openMenuFor, go, retryFor } from "../lib/appview";
-  import { openApp, repairApp, updateOne } from "../lib/actions";
+  import { openMenuFor, go, retryFor, stateLabel } from "../lib/appview";
+  import { askUninstall, openApp, repairApp, updateOne } from "../lib/actions";
   import { bytes, dateShort } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip } from "../lib/jobs";
   import type { AppEntry } from "../lib/types";
@@ -19,8 +19,8 @@
   let menuBtn = $state<HTMLButtonElement>();
   const menuOpen = $derived(ui.popover?.anchor === menuBtn && !!menuBtn);
   const upd = $derived(app.status === "update");
-  const label = $derived(app.status === "update" ? "Update available" : app.status === "current" ? "Up to date" : statusLabel(app.status));
-  const latestShown = $derived(app.status === "update" ? app.latest : app.status === "missing" ? "" : (app.latest ?? app.version));
+  const label = $derived(app.source === "programs" ? stateLabel(app, true) : app.status === "update" ? "Update available" : app.status === "current" ? "Up to date" : statusLabel(app.status));
+  const latestShown = $derived(app.source === "programs" ? "" : app.status === "update" ? app.latest : app.status === "missing" ? "" : (app.latest ?? app.version));
 
   function key(e: KeyboardEvent) {
     if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
@@ -65,6 +65,8 @@
       <Btn variant="raised" size="sm" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update</Btn>
     {:else if app.status === "missing" && canRepair(app)}
       <Btn variant="raised" size="sm" onclick={() => repairApp(app.id)}>Repair</Btn>
+    {:else if app.status === "missing" && app.source === "programs"}
+      <Btn variant="raised" size="sm" title="Remove {app.name} from the list and clean up what is left" onclick={() => askUninstall(app.id)}>Remove</Btn>
     {:else if app.status === "failed"}
       <Btn variant="raised" size="sm" title="Retry  R" onclick={() => retryFor(app)}>Retry</Btn>
     {:else if job}
