@@ -82,9 +82,10 @@ npm install
 npx tauri build
 ```
 
-The installer is written to `src-tauri/target/release/bundle/nsis/`. Self-updates are optional:
-set `UPDATER3D_FEED_URL` (and `UPDATER3D_UPDATE_KEY` if your feed needs one) at build time to point
-the app at your own release feed; without them it never offers self-updates.
+The installer is written to `src-tauri/target/release/bundle/nsis/`. Builds from source use the
+official update feed (`src-tauri/.update-feed` and `.update-key`), so they get updates like the
+released app. To point a fork at its own feed, set `UPDATER3D_FEED_URL` (and `UPDATER3D_UPDATE_KEY`)
+at build time.
 
 <details>
 <summary>Development and tests</summary>
