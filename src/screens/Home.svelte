@@ -280,7 +280,7 @@
         <Btn variant="ghost" href={appHref(store.missing[0].id)}>Open details</Btn>
       {:else if hs === "empty"}
         {#if sourcesOff}
-          <Btn variant="primary" href="#/settings/sources">Turn on sources</Btn>
+          <Btn variant="primary" href="#/settings/apps">Turn on sources</Btn>
         {:else}
           <Btn variant="primary" href="#/get">Get apps</Btn>
         {/if}

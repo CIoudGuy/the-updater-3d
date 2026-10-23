@@ -176,7 +176,51 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
             }
             _ => {}
         },
-        SourceData::Other { .. } => {}
+        SourceData::Other { pkg, .. } => {
+            // A second copy of the same package (per user and for all users) shares them.
+            let copies = others.iter().any(|o| matches!(&o.data, SourceData::Other { pkg: p, .. } if p.eq_ignore_ascii_case(pkg)));
+            for place in known::KNOWN.iter().filter(|(id, _)| id.eq_ignore_ascii_case(pkg) && !copies).flat_map(|(_, p)| p.iter()) {
+                let (root, rest) = place.split_once('\\').unwrap_or((place, ""));
+                let base = match root {
+                    "Roaming" => &r.roaming,
+                    "Local" => &r.local,
+                    "LocalLow" => &r.local_low,
+                    "Home" => &r.home,
+                    "ProgramData" => &r.program_data,
+                    "HKCU" => {
+                        if reg_exists(&format!("{}\\{rest}", r.reg)) {
+                            reg_keys.push(format!("{}\\{rest}", r.reg));
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                // "JetBrains\IdeaIC*": the name with a version after it ("IdeaIC2025.2").
+                let found: Vec<PathBuf> = match rest.strip_suffix('*') {
+                    Some(stem) => {
+                        let (parent, prefix) = stem.rsplit_once('\\').unwrap_or(("", stem));
+                        subdirs(&base.join(parent))
+                            .into_iter()
+                            .filter(|(_, n)| {
+                                let head = n.get(..prefix.len()).is_some_and(|h| h.eq_ignore_ascii_case(prefix));
+                                let ver = n.get(prefix.len()..).unwrap_or("");
+                                head && ver.starts_with(|c: char| c.is_ascii_digit()) && ver.chars().all(|c| c.is_ascii_digit() || c == '.')
+                            })
+                            .map(|(p, _)| p)
+                            .collect()
+                    }
+                    None => vec![base.join(rest)],
+                };
+                // A settings file of its own ("Local\kdenliverc").
+                let (found_files, found): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|p| p.is_file());
+                files.extend(found_files);
+                if root == "ProgramData" {
+                    elevated_dirs.extend(found);
+                } else {
+                    dirs.extend(found);
+                }
+            }
+        }
     }
     if by_name(inst) {
         // A folder or key another installed app maps to as well (or one holding it) is shared:
@@ -188,10 +232,32 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
             let me = p.to_ascii_lowercase();
             theirs.iter().any(|t| *t == me || t.starts_with(&format!("{me}\\")))
         };
+        // What is found by the app's full name in a folder that is not its publisher's: nor one
+        // inside a folder another app takes whole.
+        let shared_weak = |p: &str| shared(p) || theirs.iter().any(|t| p.to_ascii_lowercase().starts_with(&format!("{t}\\")));
+        // A dot-folder named after a command another installed app has as well: Anaconda's
+        // "Scripts\conda.exe" uses the ".conda" that Miniconda's "_conda.exe" finds.
+        let their_cmd = |d: &Path| {
+            let Some(cmd) = d.file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| n.starts_with('.') && d.parent() == Some(r.home.as_path())) else { return false };
+            let cmd = cmd.trim_start_matches('.');
+            others.iter().any(|o| {
+                let mut at: Vec<PathBuf> = o.install_dir.iter().flat_map(|i| [i.clone(), i.join("Scripts"), i.join("bin")]).collect();
+                at.extend(o.exe.as_deref().and_then(Path::parent).map(Path::to_path_buf));
+                at.iter().any(|p| ["exe", "cmd", "bat"].iter().any(|x| p.join(format!("{cmd}.{x}")).is_file()))
+            })
+        };
         let f = found(inst, r, &sc);
-        dirs.extend(f.dirs.into_iter().filter(|d| !shared(&d.to_string_lossy())));
+        dirs.extend(f.dirs.into_iter().filter(|d| !shared(&d.to_string_lossy()) && !their_cmd(d)));
         elevated_dirs.extend(f.elevated.into_iter().filter(|d| !shared(&d.to_string_lossy())));
         reg_keys.extend(f.reg.into_iter().filter(|k| !shared(&format!("hkcu\\{k}"))));
+        for (d, elevated) in f.weak.into_iter().filter(|(d, _)| !shared_weak(&d.to_string_lossy())) {
+            if elevated {
+                elevated_dirs.push(d);
+            } else {
+                dirs.push(d);
+            }
+        }
+        reg_keys.extend(f.weak_reg.into_iter().filter(|k| !shared_weak(&format!("hkcu\\{k}"))));
     }
     // Never a folder that holds an installed app (its own or another one, or any program in the
     // uninstall list), nor a browser profile.
@@ -247,10 +313,11 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
     out
 }
 
-/// A browser profile (Chromium's "User Data", Firefox's profiles): passwords, bookmarks and
-/// history are the user's own, not settings.
+/// A browser profile (Chromium's "User Data", Firefox's profiles, or a Chromium profile right in
+/// the folder as Opera keeps it: "Local State" with a "Default" profile): passwords, bookmarks
+/// and history are the user's own, not settings.
 fn user_content(d: &Path) -> bool {
-    d.join("User Data").is_dir() || d.join("profiles.ini").is_file()
+    d.join("User Data").is_dir() || d.join("profiles.ini").is_file() || (d.join("Local State").is_file() && d.join("Default").is_dir())
 }
 
 /// Apps whose settings are found by their names: Other apps and the More apps tools without
@@ -330,6 +397,13 @@ fn cut_version(display: &str) -> String {
     cut.join(" ").trim_end_matches(['-', ':', ',']).trim().to_string()
 }
 
+/// The year right after the name, as editions are named: "2024" of "SoftMaker FreeOffice 2024".
+fn edition_year(display: &str) -> Option<&str> {
+    let base = cut_version(display);
+    let w = display.split_whitespace().nth(base.split_whitespace().count())?;
+    (w.len() == 4 && (w.starts_with("19") || w.starts_with("20")) && w.chars().all(|c| c.is_ascii_digit()) && !base.is_empty()).then_some(w)
+}
+
 /// The normalized names an app's own folders and registry keys may have.
 struct Keys {
     /// For folders right under AppData, ProgramData, the profile and HKCU\Software.
@@ -365,6 +439,12 @@ fn keys(inst: &Installed, r: &Roots) -> Keys {
     for n in other_names(&inst.name, pkg).into_iter().chain(other_names(display, "")) {
         add(&mut top, &n, GENERIC);
     }
+    // An edition year is part of the name: "SoftMaker FreeOffice 2024" keeps its own key.
+    for n in [inst.name.as_str(), display] {
+        if let Some(y) = edition_year(n) {
+            add(&mut top, &format!("{} {y}", cut_version(n)), GENERIC);
+        }
+    }
     if !pkg.is_empty() {
         if let Some(m) = (r.moniker)(pkg) {
             add(&mut top, &m, GENERIC);
@@ -376,9 +456,21 @@ fn keys(inst: &Installed, r: &Roots) -> Keys {
     let mut pubs = Vec::new();
     if let Some(first) = words.iter().find(|w| !w.eq_ignore_ascii_case("the")) {
         add(&mut pubs, first, &["the"]);
+        // "CPUID" keeps its apps in "CPUID Software".
+        add(&mut pubs, &format!("{first}Software"), &["the"]);
     }
     let whole: String = words.iter().filter(|w| !LEGAL.contains(&norm(w).as_str())).copied().collect::<Vec<_>>().join(" ");
     add(&mut pubs, &whole, &["the"]);
+    // "The Document Foundation" keeps its name whole; "MediaArea.net" is "MediaArea".
+    let with_the: String = words.iter().filter(|w| w.eq_ignore_ascii_case("the") || !LEGAL.contains(&norm(w).as_str())).copied().collect::<Vec<_>>().join(" ");
+    add(&mut pubs, &with_the, &["the"]);
+    if let Some((name, tld)) = words.first().and_then(|w| w.rsplit_once('.')) {
+        if (2..=6).contains(&tld.len()) && tld.chars().all(|c| c.is_ascii_alphabetic()) {
+            add(&mut pubs, name, &["the"]);
+        }
+    }
+    // Qt apps keep the name whole ("Menlo Research Pte. Ltd.").
+    add(&mut pubs, publisher, &["the"]);
     // The program's and the install folder's names: "Code.exe" keeps "AppData\Roaming\Code",
     // "PotPlayerMini64.exe" "PotPlayerMini64", "Ubisoft Game Launcher" its own folder. Never the
     // publisher's name ("Maxon.exe" of Maxon's app manager is not all of Maxon's folder) and
@@ -399,6 +491,11 @@ fn keys(inst: &Installed, r: &Roots) -> Keys {
             top.push(k);
         }
     }
+    // The package id starts with the maker ("Perplexity.Comet" of "The Comet Authors"), though
+    // its program may have that name ("GeoGebra.exe" keeps "Roaming\GeoGebra").
+    if let Some((maker, _)) = pkg.split_once('.') {
+        add(&mut pubs, maker, &["the"]);
+    }
     let mut sub = Vec::new();
     for k in &top {
         add(&mut sub, k, SUB_GENERIC);
@@ -418,26 +515,52 @@ fn keys(inst: &Installed, r: &Roots) -> Keys {
 }
 
 /// Whether a folder or key name is one of these names: the whole name, the Electron updater's
-/// folder ("lm-studio-updater"), a major version after it ("WizTree3"), or an app id that ends
+/// folder ("lm-studio-updater"), its cache ("calibre-cache"), a version after it ("WizTree3",
+/// "LibreOffice 26.8"), an id after it, a .NET settings folder of it, or an app id that ends
 /// with it ("bot.cline.app", "com.lbjlaq.antigravity-tools").
 fn name_is(raw: &str, keys: &[String]) -> bool {
+    // "Waterfox-1de4eec8-1241-4177-a864-e594e8d1fb38": the app's name with an id after it.
+    let raw = match raw.len().checked_sub(37).filter(|&i| raw.is_char_boundary(i)) {
+        Some(i) if raw[i..].starts_with('-') && is_guid(&raw[i + 1..]) && i > 0 => &raw[..i],
+        _ => raw,
+    };
+    // "SourceTree.exe_Url_pvbhzmuk...": where .NET keeps a program's user settings.
+    let raw = dotnet_settings(raw).unwrap_or(raw);
+    // "LibreOffice 26.8"
+    let raw = strip_version(raw);
+    let cache_of = raw.len().checked_sub(6).filter(|&i| raw.is_char_boundary(i) && raw[i..].eq_ignore_ascii_case("-cache")).map(|i| &raw[..i]);
     let n = norm(raw);
+    let segs: Vec<&str> = raw.split('.').collect();
     keys.iter().any(|k| {
         if n == *k {
+            return true;
+        }
+        // A Tauri app id: the app's web domain with a word after it ("jan.ai.app").
+        let tld = |t: &str| (2..=6).contains(&t.len()) && t.chars().all(|c| c.is_ascii_lowercase());
+        if segs.len() >= 3 && norm(segs[0]) == *k && tld(segs[1]) && segs[2..].iter().all(|s| ID_SUFFIX.contains(&norm(s).as_str())) {
             return true;
         }
         if k.chars().count() < 4 {
             return false;
         }
-        if n == format!("{k}updater") {
+        // The updater of "evernote-client" and "tutanota-desktop" too.
+        // Also with more than one id word ("theia-ide-electron-app-updater").
+        let updater_of = n.strip_suffix("updater").and_then(|h| h.strip_prefix(k.as_str())).is_some_and(|mut rest| {
+            while let Some(r) = ID_SUFFIX.iter().find_map(|s| rest.strip_prefix(s)) {
+                rest = r;
+            }
+            rest.is_empty()
+        });
+        if updater_of || cache_of.is_some_and(|c| norm(c) == *k) {
             return true;
         }
         if let Some(rest) = n.strip_prefix(k.as_str()) {
+            // "WizTree3", "foobar2000-v2"
+            let rest = rest.strip_prefix('v').filter(|r| !r.is_empty()).unwrap_or(rest);
             if rest.len() <= 2 && rest.chars().all(|c| c.is_ascii_digit()) {
                 return true;
             }
         }
-        let segs: Vec<&str> = raw.split('.').collect();
         if segs.len() >= 3 && (2..=4).contains(&segs[0].len()) && segs[0].chars().all(|c| c.is_ascii_alphabetic()) {
             if let Some(i) = segs.iter().skip(1).position(|s| norm(s) == *k) {
                 return segs[i + 2..].iter().all(|s| ID_SUFFIX.contains(&norm(s).as_str()));
@@ -447,14 +570,63 @@ fn name_is(raw: &str, keys: &[String]) -> bool {
     })
 }
 
+/// The name without a dotted version after it: "LibreOffice" of "LibreOffice 26.8".
+fn strip_version(raw: &str) -> &str {
+    match raw.rsplit_once(' ') {
+        Some((head, tail)) if !head.trim().is_empty() && tail.contains('.') && tail.starts_with(|c: char| c.is_ascii_digit()) && tail.chars().all(|c| c.is_ascii_digit() || c == '.') => head.trim_end(),
+        _ => raw,
+    }
+}
+
+/// Whether a subfolder or subkey has one of the app's full names, long enough to be its own
+/// ("StreamDeck", "MEGAsync"), with or without a version after it, or is the .NET settings
+/// folder of its program ("GARMIN_Corp\BaseCamp.exe_Url_urbejbdz...").
+fn full_name(raw: &str, top: &[String]) -> bool {
+    let raw = dotnet_settings(raw).unwrap_or(raw);
+    let n = norm(strip_version(raw));
+    n.chars().count() >= 6 && !GENERIC.contains(&n.as_str()) && !SUB_GENERIC.contains(&n.as_str()) && top.contains(&n)
+}
+
+/// The program's name in a .NET user settings folder: "SourceTree" of
+/// "SourceTree.exe_Url_pvbhzmuknxzic1u2pbbpoooc2yeizzcm".
+fn dotnet_settings(raw: &str) -> Option<&str> {
+    let low = raw.to_ascii_lowercase();
+    let i = low.find(".exe_")?;
+    let (kind, hash) = low[i + 5..].split_once('_')?;
+    (["url", "strongname", "path"].contains(&kind) && hash.len() == 32 && hash.chars().all(|c| c.is_ascii_alphanumeric()) && i > 0).then(|| &raw[..i])
+}
+
+/// "1de4eec8-1241-4177-a864-e594e8d1fb38"
+fn is_guid(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12]) && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Whether a folder or key is the publisher's: its name ("Piriform"), or a web domain of the publisher or app as Qt
+/// and Flutter apps name it ("jellyfin.org", "plex.tv", "io.appflowy").
+fn is_pub(raw: &str, pubs: &[String], top: &[String]) -> bool {
+    let n = norm(raw);
+    if pubs.contains(&n) {
+        return true;
+    }
+    let tld = |t: &str| (2..=6).contains(&t.len()) && t.chars().all(|c| c.is_ascii_lowercase());
+    let named = |w: &str| !GENERIC.contains(&norm(w).as_str()) && (pubs.contains(&norm(w)) || top.contains(&norm(w)));
+    match raw.split_once('.') {
+        // "jellyfin.org", or the other way round as Flutter apps name it ("io.appflowy").
+        Some((first, last)) if !last.contains('.') => (tld(last) && named(first)) || (tld(first) && named(last)),
+        _ => false,
+    }
+}
+
 /// What is in the folders and the registry key apps keep settings in, read once per call.
 struct Scan {
-    /// (folder, name, needs admin rights) right under Roaming, Local, LocalLow and ProgramData.
-    dirs: Vec<(PathBuf, String, bool)>,
+    /// (folder, name, needs admin rights, its subfolders) right under Roaming, Local, LocalLow
+    /// and ProgramData.
+    dirs: Vec<(PathBuf, String, bool, Vec<(PathBuf, String)>)>,
     /// Dot-folders in the user's profile.
     home: Vec<(PathBuf, String)>,
-    /// Keys right under HKCU\Software.
-    reg: Vec<String>,
+    /// Keys right under HKCU\Software, with their subkeys.
+    reg: Vec<(String, Vec<String>)>,
 }
 
 fn subdirs(base: &Path) -> Vec<(PathBuf, String)> {
@@ -463,6 +635,10 @@ fn subdirs(base: &Path) -> Vec<(PathBuf, String)> {
         .filter(|e| e.file_type().map(|t| t.is_dir() && !t.is_symlink()).unwrap_or(false))
         .map(|e| (e.path(), e.file_name().to_string_lossy().to_string()))
         .collect()
+}
+
+fn reg_exists(path: &str) -> bool {
+    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey_with_flags(path, winreg::enums::KEY_READ).is_ok()
 }
 
 fn subkeys(path: &str) -> Vec<String> {
@@ -477,10 +653,17 @@ impl Scan {
     fn new(r: &Roots) -> Scan {
         let mut dirs = Vec::new();
         for (base, elevated) in [(&r.roaming, false), (&r.local, false), (&r.local_low, false), (&r.program_data, true)] {
-            dirs.extend(subdirs(base).into_iter().map(|(p, n)| (p, n, elevated)));
+            dirs.extend(subdirs(base).into_iter().map(|(p, n)| {
+                let subs = subdirs(&p);
+                (p, n, elevated, subs)
+            }));
         }
         let home = subdirs(&r.home).into_iter().filter(|(_, n)| n.starts_with('.')).collect();
-        Scan { dirs, home, reg: subkeys(&r.reg) }
+        let reg = subkeys(&r.reg).into_iter().map(|k| {
+            let subs = subkeys(&format!("{}\\{k}", r.reg));
+            (k, subs)
+        });
+        Scan { dirs, home, reg: reg.collect() }
     }
 }
 
@@ -489,6 +672,10 @@ struct Found {
     dirs: Vec<PathBuf>,
     elevated: Vec<PathBuf>,
     reg: Vec<String>,
+    /// Found by the app's full name in a folder or key that is not its publisher's: never a
+    /// reason for another app to keep its own.
+    weak: Vec<(PathBuf, bool)>,
+    weak_reg: Vec<String>,
 }
 
 impl Found {
@@ -500,9 +687,9 @@ impl Found {
 
 fn found(inst: &Installed, r: &Roots, sc: &Scan) -> Found {
     let k = keys(inst, r);
-    let mut f = Found { dirs: vec![], elevated: vec![], reg: vec![] };
+    let mut f = Found { dirs: vec![], elevated: vec![], reg: vec![], weak: vec![], weak_reg: vec![] };
     let put = |f: &mut Found, p: PathBuf, elevated: bool| if elevated { f.elevated.push(p) } else { f.dirs.push(p) };
-    for (path, name, elevated) in &sc.dirs {
+    for (path, name, elevated, subs) in &sc.dirs {
         if GENERIC.contains(&norm(name).as_str()) {
             // A vendor's folder ("Microsoft", "Google"): only the app's own subfolder in it, and
             // only through the vendor's name as the publisher.
@@ -513,12 +700,23 @@ fn found(inst: &Installed, r: &Roots, sc: &Scan) -> Found {
             put(&mut f, path.clone(), *elevated);
             continue;
         }
-        if k.pubs.iter().any(|p| *p == norm(name)) {
-            for (sp, sn) in subdirs(path) {
-                if name_is(&sn, &k.sub) {
-                    put(&mut f, sp, *elevated);
-                }
+        let vendor = is_pub(name, &k.pubs, &k.top);
+        for (sp, sn) in subs {
+            // In the publisher's folder by any of the app's names; in any other folder only by
+            // its full, distinctive name ("Elgato\StreamDeck", "Mega Limited\MEGAsync").
+            if vendor && name_is(sn, &k.sub) {
+                put(&mut f, sp.clone(), *elevated);
+            } else if !GENERIC.contains(&norm(name).as_str()) && full_name(sn, &k.top) {
+                f.weak.push((sp.clone(), *elevated));
             }
+        }
+    }
+    // An Electron app's updater "Local\<name>-updater" goes with its "Roaming\<name>" (Tuta Mail's
+    // "tutanota-desktop").
+    let updated: Vec<String> = f.dirs.iter().filter(|d| d.parent() == Some(r.local.as_path())).filter_map(|d| Some(d.file_name()?.to_string_lossy().strip_suffix("-updater")?.to_string())).collect();
+    for (path, name, elevated, _) in &sc.dirs {
+        if !*elevated && path.parent() == Some(r.roaming.as_path()) && updated.iter().any(|u| u.eq_ignore_ascii_case(name)) && !f.dirs.contains(path) {
+            f.dirs.push(path.clone());
         }
     }
     // ".cline", ".vscode", ".lmstudio": unless a separate command-line tool of that name uses it
@@ -542,22 +740,26 @@ fn found(inst: &Installed, r: &Roots, sc: &Scan) -> Found {
             put(&mut f, path.clone(), false);
         }
     }
-    for name in &sc.reg {
+    for (name, subs) in &sc.reg {
         let n = norm(name);
         if !GENERIC.contains(&n.as_str()) && name_is(name, &k.top) {
             f.reg.push(format!("{}\\{name}", r.reg));
             continue;
         }
-        if k.pubs.contains(&n) {
-            for s in subkeys(&format!("{}\\{name}", r.reg)) {
-                if name_is(&s, &k.sub) {
-                    f.reg.push(format!("{}\\{name}\\{s}", r.reg));
-                }
+        let vendor = is_pub(name, &k.pubs, &k.top);
+        for s in subs {
+            if vendor && name_is(s, &k.sub) {
+                f.reg.push(format!("{}\\{name}\\{s}", r.reg));
+            } else if !GENERIC.contains(&n.as_str()) && full_name(s, &k.top) {
+                f.weak_reg.push(format!("{}\\{name}\\{s}", r.reg));
             }
         }
     }
     f
 }
+
+#[path = "prefs_known.rs"]
+mod known;
 
 #[cfg(test)]
 #[path = "prefs_tests.rs"]

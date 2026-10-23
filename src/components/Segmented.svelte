@@ -65,7 +65,7 @@
     >
       {#if o.icon}<Icon d={o.icon} />{/if}
       {#if o.label}<span>{o.label}</span>{/if}
-      {#if o.badge !== undefined && o.badge !== ""}<span class="badge" style:color={o.badgeColor ?? "var(--text-3)"}>{o.badge}</span>{/if}
+      {#if o.badge !== undefined && o.badge !== ""}<span class="badge" style:color={o.badgeColor ?? "var(--text-3)"}>{typeof o.badge === "number" ? o.badge.toLocaleString("en-US") : o.badge}</span>{/if}
     </button>
   {/each}
 </div>

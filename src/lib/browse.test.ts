@@ -1,7 +1,7 @@
 // node --test src/lib/browse.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { catalogNote, datedNote, LETTERS, matchRank, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, windowRows } from "./browse.ts";
+import { blockedTitle, catalogNote, datedNote, STORE_ONLY, storeOnly, LETTERS, matchRank, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, windowRows } from "./browse.ts";
 import type { CatalogEntry } from "./types.ts";
 
 const e = (id: string, extra: Partial<CatalogEntry> = {}): CatalogEntry => ({
@@ -114,4 +114,11 @@ test("orders and the note about release dates", () => {
   assert.equal(datedNote(10, 10), "Newest release first.");
   assert.match(datedNote(1234, 15724), /known for 1,234 of 15,724 apps so far/);
   assert.match(datedNote(0, 5), /No release dates are known yet/);
+});
+
+test("an app only the Microsoft Store installs says so", () => {
+  assert.equal(blockedTitle(STORE_ONLY), "Install from the Microsoft Store");
+  assert.ok(storeOnly(STORE_ONLY));
+  assert.ok(!storeOnly("only a portable copy") && !storeOnly(null));
+  assert.equal(blockedTitle("only a portable copy"), "Can't be installed silently: only a portable copy");
 });

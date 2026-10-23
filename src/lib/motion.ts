@@ -3,8 +3,20 @@ import { cubicOut } from "svelte/easing";
 
 export const EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 
+let query: MediaQueryList | null = null;
+let lean = false;
+
+/** Lighter animations on a low end PC (as with Windows' "reduce animations"). */
+export function setLean(on: boolean) {
+  lean = on;
+}
+
 export function reduced(): boolean {
-  return typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (lean) return true;
+  if (typeof matchMedia === "undefined") return false;
+  // One media query, read again on every call (rows and tiles ask once each).
+  query ??= matchMedia("(prefers-reduced-motion: reduce)");
+  return query.matches;
 }
 
 /** Stagger-in for tiles and rows: use:enter={index} */

@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, BrowsePage, CatalogEntry, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 import type { OtherSort } from "./browse";
 
 export interface Commands {
@@ -19,6 +19,14 @@ export interface Commands {
   install_version: { args: { appId: string; version: string }; ret: void };
   uninstall_app: { args: { appId: string; removePrefs: boolean }; ret: void };
   prefs_preview: { args: { appId: string }; ret: PrefsItem[] };
+  /** What an uninstalled (or broken) program left behind; nothing is deleted. */
+  leftover_scan: { args: { appId: string }; ret: LeftoverScan };
+  /** Delete the ticked items of a scan (registry entries, services and tasks are saved first). */
+  leftover_delete: { args: { scanId: string; ids: string[] }; ret: LeftoverResult };
+  /** Put back what a cleanup saved. */
+  leftover_restore: { args: { backupId: string }; ret: void };
+  /** Cleanups that can still be restored. */
+  leftover_backups: { args: {}; ret: BackupInfo[] };
   window_ready: { args: {}; ret: void };
   /** Ask for admin rights once more and continue the jobs waiting for them. */
   allow_admin: { args: {}; ret: void };

@@ -1,7 +1,8 @@
 // Shared contract between the Rust backend (src-tauri/src/model.rs) and the UI.
 // Field names are camelCase on both sides (serde rename_all = "camelCase").
 
-export type Source = "adobe" | "craft" | "blender" | "tools" | "other";
+/** "programs": any other program in Windows' list of installed programs (uninstall only). */
+export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs";
 
 export type AppStatus =
   | "current" // installed and up to date
@@ -174,6 +175,46 @@ export interface ActivityEntry {
   meta: string | null;
   appId: string | null;
   error: JobError | null;
+  /** A cleanup's saved registry entries and tasks, which "Restore" puts back (30 days). */
+  restoreId?: string | null;
+}
+
+/** What an uninstalled program left behind (leftover_scan). */
+export type LeftoverKind = "folder" | "entry" | "shortcut" | "startup" | "registry" | "service" | "task" | "appPath" | "fileType" | "settings";
+export interface LeftoverItem {
+  id: string;
+  kind: LeftoverKind;
+  /** The path or registry key as shown. */
+  label: string;
+  /** Why it is listed: "Starts C:\...pp.exe, which is gone". */
+  detail: string;
+  size: number | null;
+  /** Ticked when the list opens. */
+  checked: boolean;
+  /** Always removed ("Remove from list" removes the entry). */
+  required: boolean;
+  /** Needs admin rights. */
+  elevated: boolean;
+}
+export interface LeftoverScan {
+  scanId: string;
+  appId: string;
+  name: string;
+  /** The program's uninstaller is missing: this list is for "Remove from list". */
+  broken: boolean;
+  items: LeftoverItem[];
+}
+export interface LeftoverResult {
+  removed: number;
+  failed: string[];
+  freed: number;
+  backupId: string | null;
+}
+export interface BackupInfo {
+  id: string;
+  created: string;
+  app: string;
+  items: number;
 }
 
 export interface ServiceInfo {
@@ -267,6 +308,10 @@ export interface Status {
   appVersion: string;
   /** set when a newer The Updater 3D is available */
   selfUpdate: string | null;
+  /** "16 cores, 32 GB, SSD": the PC the app tuned itself for */
+  machine?: string;
+  /** How much the app does at once on this PC */
+  machineTier?: "low" | "normal" | "high";
 }
 
 export interface Snapshot {

@@ -7,9 +7,10 @@
   import Row from "../components/Row.svelte";
   import Icon from "../components/Icon.svelte";
   import Num from "../components/Num.svelte";
+  import Btn from "../components/Btn.svelte";
   import { I } from "../lib/icons";
   import { GROUPS, store } from "../lib/store.svelte";
-  import { ui, type InstalledFilter, type InstalledGroup, type SortKey } from "../lib/ui.svelte";
+  import { ui, type InstalledFilter, type InstalledGroup, type InstalledScope, type SortKey } from "../lib/ui.svelte";
   import { enter, reduced, rise } from "../lib/motion";
   import type { AppEntry, AppStatus } from "../lib/types";
   import { groupOrAll, installedNone } from "../lib/view";
@@ -26,14 +27,17 @@
   const STATUS_RANK: Record<AppStatus, number> = { failed: 0, missing: 1, blocked: 2, update: 3, updating: 4, queued: 5, unknown: 6, current: 7 };
 
   const q = $derived(ui.query.trim().toLowerCase());
+  // Every program is listed; "Other programs" in the Source menu narrows to the ones no catalog updates.
+  const inScope = $derived(store.apps);
+  const programCount = $derived(store.apps.filter((a) => a.source === "programs").length);
   // a source filter whose last app was uninstalled falls back to All, like in Get apps
-  const presentGroups = $derived(GROUPS.filter((g) => store.apps.some((a) => a.group === g)));
+  const presentGroups = $derived(GROUPS.filter((g) => inScope.some((a) => a.group === g)));
   const group = $derived(groupOrAll(ui.group, presentGroups));
   const scoped = $derived(
-    store.apps.filter(
+    inScope.filter(
       (a) =>
         (group === "all" || a.group === group) &&
-        (!q || a.name.toLowerCase().includes(q) || a.version.toLowerCase().includes(q) || a.code.toLowerCase() === q || a.group.toLowerCase().includes(q)),
+        (!q || a.name.toLowerCase().includes(q) || a.version.toLowerCase().includes(q) || a.code.toLowerCase() === q || a.group.toLowerCase().includes(q) || (a.source === "programs" && !!a.tagline?.toLowerCase().includes(q))),
     ),
   );
   const filtered = $derived(
@@ -70,10 +74,20 @@
 
   const filterOpts = $derived([
     { value: "updates" as InstalledFilter, label: ui.compact ? "Updates" : "Updates available", badge: updatesCount || "", badgeColor: "var(--warn)" },
-    { value: "all" as InstalledFilter, label: "All", badge: store.apps.length },
+    { value: "all" as InstalledFilter, label: "All", badge: inScope.length },
     { value: "recent" as InstalledFilter, label: ui.compact ? "Recent" : "Recently updated" },
   ]);
   const groupOpts = $derived([{ value: "all" as InstalledGroup, label: "All sources" }, ...presentGroups.map((g) => ({ value: g as InstalledGroup, label: g }))]);
+  /** Apps a batch uninstall can take */
+  const removable = (a: AppEntry) => a.canUninstall && !a.readOnly && !store.jobByApp.get(a.id);
+  const picked = $derived(ui.selected.filter((id) => store.apps.some((a) => a.id === id && removable(a))));
+  function pick(a: AppEntry) {
+    if (removable(a)) ui.toggleSelected(a.id);
+  }
+  function uninstallPicked() {
+    if (!picked.length) return;
+    ui.openDialog(picked.length === 1 ? { type: "uninstall", appId: picked[0] } : { type: "uninstall-many", appIds: [...picked] });
+  }
   const viewOpts = [
     { value: "grid" as const, icon: I.installed, title: "Grid view  G" },
     { value: "list" as const, icon: I.list, title: "List view  L" },
@@ -88,8 +102,9 @@
 
 <section class="screen installed">
   <div class="head">
-    <h1 class="h1">Installed <span class="count"><Num value={store.apps.length} /></span></h1>
+    <h1 class="h1">Installed <span class="count"><Num value={inScope.length} /></span></h1>
     <div class="tools">
+      <Btn variant={ui.selecting ? "raised" : "ghost"} size="md" title={ui.selecting ? "Stop selecting" : "Select apps to uninstall several at once"} onclick={() => (ui.selecting ? ui.endSelecting() : (ui.selecting = true))}>{ui.selecting ? "Done" : "Select"}</Btn>
       <label class="search">
         <Icon d={I.search} />
         <input bind:this={searchInput} bind:value={ui.query} aria-label="Search apps" placeholder="Search apps" spellcheck="false" autocomplete="off" />
@@ -102,12 +117,13 @@
   <div class="filters">
     <div class="chips">
       <Segmented variant="chip" options={filterOpts} value={ui.filter} onchange={(v) => (ui.filter = v)} label="Filter" />
-      {#if presentGroups.length > 1}
-        <span class="vsep" aria-hidden="true"></span>
-        <Segmented variant="chip" options={groupOpts} value={group} onchange={(v) => (ui.group = v)} label="Source" />
-      {/if}
     </div>
-    <Select options={sortOpts} value={ui.sort} onchange={(v) => ui.setSort(v as SortKey)} width={ui.compact ? 150 : 190} height={30} label="Sort" title="Sort" />
+    <div class="pickers">
+      {#if presentGroups.length > 1}
+        <Select options={groupOpts} value={group} onchange={(v) => (ui.group = v as InstalledGroup)} width={ui.compact ? 150 : 180} height={30} label="Source" title="Source" />
+      {/if}
+      <Select options={sortOpts} value={ui.sort} onchange={(v) => ui.setSort(v as SortKey)} width={ui.compact ? 150 : 190} height={30} label="Sort" title="Sort" />
+    </div>
   </div>
 
   {#if sorted.length === 0}
@@ -121,14 +137,20 @@
         <h2 class="grp"><span>{sec.name}</span><span class="n">{sec.items.length}</span></h2>
         <div class="grid">
           {#each sec.items as a, i (a.id)}
-            <div class="cell" animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={i}><Tile app={a} compact={ui.compact} /></div>
+            <div class="cell" animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={i}>
+              <Tile app={a} compact={ui.compact} />
+              {#if ui.selecting}{@render pickBox(a)}{/if}
+            </div>
           {/each}
         </div>
       {/each}
     {:else}
       <div class="grid first">
         {#each sorted as a, i (a.id)}
-          <div class="cell" animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={i}><Tile app={a} compact={ui.compact} /></div>
+          <div class="cell" animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={i}>
+            <Tile app={a} compact={ui.compact} />
+            {#if ui.selecting}{@render pickBox(a)}{/if}
+          </div>
         {/each}
       </div>
     {/if}
@@ -138,11 +160,30 @@
         <span role="columnheader">App</span><span role="columnheader">Installed</span><span role="columnheader">Latest</span><span role="columnheader">Status</span><span role="columnheader" class="r">Size</span><span role="columnheader">Updated</span><span role="columnheader" class="r">Actions</span>
       </div>
       {#each sorted as a, i (a.id)}
-        <div animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={{ i, y: 6 }}><Row app={a} /></div>
+        <div class="cell" animate:flip={{ duration: reduced() ? 0 : 240 }} use:enter={{ i, y: 6 }}>
+          <Row app={a} />
+          {#if ui.selecting}{@render pickBox(a)}{/if}
+        </div>
       {/each}
     </div>
   {/if}
+
+  {#if ui.selecting}
+    <div class="selbar" role="toolbar" aria-label="Selected apps" in:rise>
+      <span class="n">{picked.length ? `${picked.length} selected` : "Pick the apps to uninstall"}</span>
+      <Btn variant="ghost" size="md" onclick={() => (ui.selected = sorted.filter(removable).map((a) => a.id))}>Select all shown</Btn>
+      {#if picked.length}<Btn variant="ghost" size="md" onclick={() => (ui.selected = [])}>Clear</Btn>{/if}
+      <Btn variant="danger" size="md" disabled={!picked.length} onclick={uninstallPicked}>Uninstall{picked.length > 1 ? ` ${picked.length}` : ""}</Btn>
+    </div>
+  {/if}
 </section>
+
+{#snippet pickBox(a: AppEntry)}
+  {@const on = picked.includes(a.id)}
+  <button class="pick" class:on class:off={!removable(a)} role="checkbox" aria-checked={on} aria-label="Select {a.name}" disabled={!removable(a)} title={removable(a) ? (on ? "Selected" : "Select") : "Can not be uninstalled here"} onclick={() => pick(a)}>
+    <span class="box"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#141414" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5 9-10" /></svg></span>
+  </button>
+{/snippet}
 
 <style>
   .installed {
@@ -209,11 +250,10 @@
     flex-wrap: wrap;
     gap: 4px 4px;
   }
-  .vsep {
-    width: 1px;
-    height: 16px;
-    margin: 0 12px;
-    background: var(--sep-raised);
+  .pickers {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .grp {
     margin-top: 28px;
@@ -239,7 +279,79 @@
     margin-top: 24px;
   }
   .cell {
+    position: relative;
     min-width: 0;
+  }
+  .pick {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 8px;
+    border-radius: var(--r-card);
+    background: transparent;
+    outline: 2px solid transparent;
+    outline-offset: -2px;
+    cursor: pointer;
+    transition: outline-color var(--t-fast) ease, background-color var(--t-fast) ease;
+  }
+  .table .pick {
+    border-radius: 0;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0 0 0 4px;
+  }
+  .pick:hover {
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .pick.on {
+    outline-color: var(--primary);
+    background: rgba(255, 255, 255, 0.04);
+  }
+  .pick.off {
+    cursor: not-allowed;
+    background: rgba(20, 20, 20, 0.45);
+  }
+  .pick .box {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: #3a3a3a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pick .box svg {
+    opacity: 0;
+  }
+  .pick.on .box {
+    background: var(--primary);
+  }
+  .pick.on .box svg {
+    opacity: 1;
+  }
+  .pick.off .box {
+    display: none;
+  }
+  .selbar {
+    position: sticky;
+    bottom: 16px;
+    z-index: 5;
+    margin-top: 24px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px 10px 16px;
+    border-radius: 10px;
+    background: var(--surface-2);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  }
+  .selbar .n {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-2);
   }
   .none {
     margin-top: 48px;

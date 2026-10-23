@@ -392,13 +392,49 @@ fn adobe_from_version_page(html: &str, ver: &str) -> (Vec<String>, Option<String
 /// A page that many versions read at once (25 versions of one app are filled in together): one
 /// fetch per address at a time, kept for ten minutes, so the others wait for it instead of
 /// fetching it again. A failed fetch is kept for a minute.
+type PageSlot = std::sync::Arc<tokio::sync::Mutex<Option<(std::time::Instant, Option<std::sync::Arc<String>>)>>>;
+static PAGES: once_cell::sync::Lazy<parking_lot::Mutex<HashMap<String, PageSlot>>> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+/// Forget fetched notes pages (whole web pages) so a closed app holds no more memory than it needs.
+pub fn clear_page_cache() {
+    PAGES.lock().clear();
+}
+
+/// Keep at most `cap` pages (as many as this PC is tuned for): pages past their time go first,
+/// then the oldest. Pages being fetched or read stay.
+fn prune_pages(pages: &mut HashMap<String, PageSlot>, cap: usize, now: std::time::Instant) {
+    if pages.len() < cap {
+        return;
+    }
+    let mut free: Vec<(String, Option<std::time::Instant>)> = pages
+        .iter()
+        .filter_map(|(k, s)| {
+            let held = s.try_lock().ok()?;
+            let at = held.as_ref().map(|(at, body)| (*at, body.is_some()));
+            let stale = at.is_none_or(|(at, ok)| now.saturating_duration_since(at) >= Duration::from_secs(if ok { 600 } else { 60 }));
+            Some((k.clone(), if stale { None } else { at.map(|(at, _)| at) }))
+        })
+        .collect();
+    // Stale ones (None) first, then by age.
+    free.sort_by_key(|(_, at)| *at);
+    let extra = pages.len() + 1 - cap;
+    for (i, (k, at)) in free.into_iter().enumerate() {
+        if at.is_some() && i >= extra {
+            break;
+        }
+        pages.remove(&k);
+    }
+}
+
 async fn page_shared(url: &str) -> Option<std::sync::Arc<String>> {
-    use once_cell::sync::Lazy;
-    use std::sync::Arc;
     use std::time::Instant;
-    type Slot = Arc<tokio::sync::Mutex<Option<(Instant, Option<Arc<String>>)>>>;
-    static PAGES: Lazy<parking_lot::Mutex<HashMap<String, Slot>>> = Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
-    let slot = PAGES.lock().entry(url.to_string()).or_default().clone();
+    let slot = {
+        let mut pages = PAGES.lock();
+        if !pages.contains_key(url) {
+            prune_pages(&mut pages, crate::machine::tuned().note_pages, Instant::now());
+        }
+        pages.entry(url.to_string()).or_default().clone()
+    };
     let mut held = slot.lock().await;
     if let Some((at, body)) = held.as_ref() {
         let keep = if body.is_some() { 600 } else { 60 };
@@ -406,7 +442,7 @@ async fn page_shared(url: &str) -> Option<std::sync::Arc<String>> {
             return body.clone();
         }
     }
-    let body = page(url).await.map(Arc::new);
+    let body = page(url).await.map(std::sync::Arc::new);
     *held = Some((Instant::now(), body.clone()));
     body
 }
@@ -1020,6 +1056,14 @@ fn lines_of(t: &str, bullets_only: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Inside a boilerplate section or a code block: skipped.
     let (mut skipping, mut fence) = (false, false);
+    // Sentences some publishers run together with no line break ("the application.Note: It
+    // is", "Downloads:- The installer") become separate lines.
+    static RUN_ON: Lazy<Regex> = Lazy::new(|| Regex::new(r"([a-z]{2,})\.([A-Z][a-z])").unwrap());
+    static COLON_DASH: Lazy<Regex> = Lazy::new(|| Regex::new(r":-\s+").unwrap());
+    let t = RUN_ON.replace_all(t, "$1.
+$2");
+    let t = COLON_DASH.replace_all(&t, "
+");
     for raw in t.lines() {
         let l = raw.trim();
         if l.starts_with("```") || l.starts_with("~~~") {
@@ -1156,7 +1200,49 @@ pub async fn fetch_page(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kept_notes_pages_stay_under_the_cap_old_ones_first() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let now = Instant::now() + Duration::from_secs(3600);
+        let slot = |age: u64, ok: bool| -> PageSlot { Arc::new(tokio::sync::Mutex::new(Some((now - Duration::from_secs(age), ok.then(|| Arc::new(String::from("page"))))))) };
+        let mut pages: HashMap<String, PageSlot> = HashMap::new();
+        pages.insert("fresh".into(), slot(10, true));
+        pages.insert("older".into(), slot(300, true));
+        pages.insert("stale".into(), slot(700, true));
+        pages.insert("failed".into(), slot(90, false));
+        // Under the cap: nothing goes.
+        prune_pages(&mut pages, 10, now);
+        assert_eq!(pages.len(), 4);
+        // At the cap: what is past its time goes, then the oldest, leaving room for one more.
+        prune_pages(&mut pages, 2, now);
+        let mut left: Vec<&String> = pages.keys().collect();
+        left.sort();
+        assert_eq!(left, ["fresh"]);
+        // A page being fetched stays.
+        let busy = slot(5000, true);
+        let _held = busy.try_lock().unwrap();
+        pages.insert("busy".into(), busy.clone());
+        prune_pages(&mut pages, 1, now);
+        assert!(pages.contains_key("busy") && !pages.contains_key("fresh"));
+    }
+
     use super::*;
+
+    /// Jellyfin Media Player 1.11.0's notes run their sentences together in the catalog.
+    #[test]
+    fn run_together_sentences_become_separate_lines() {
+        let t = "This release switches to the external web client instead of when I get a chance to release the application.Note: It is normal to have to log in again after installing this update.About Windows Downloads:- The desktop installer requires administrator rights";
+        let l = text_lines(t);
+        assert_eq!(l, vec![
+            "This release switches to the external web client instead of when I get a chance to release the application",
+            "Note: It is normal to have to log in again after installing this update",
+            "About Windows Downloads",
+            "The desktop installer requires administrator rights",
+        ]);
+        // Names with dots stay whole.
+        assert_eq!(text_lines("Updated Node.js and e.g. ASP.NET support"), vec!["Updated Node.js and e.g. ASP.NET support"]);
+    }
 
     #[test]
     fn krita_post_changelog() {

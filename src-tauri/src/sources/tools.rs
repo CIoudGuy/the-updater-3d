@@ -338,14 +338,20 @@ fn parse_godot_for(v: &Value, builds: bool, native: &str) -> Vec<Rel> {
     out
 }
 
-async fn github(repo: &str, per_page: u32) -> Result<Value> {
+/// Release lists parsed before, by address and the parse used: an unchanged answer is not parsed again.
+static PARSED: http::Parsed<Vec<Rel>> = http::Parsed::new();
+
+/// A GitHub release list, read with `parse` (named by `how`).
+async fn github(repo: &str, per_page: u32, how: &str, parse: impl FnOnce(&Value) -> Vec<Rel>) -> Result<Vec<Rel>> {
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page={per_page}");
     let f = http::get_cached(&url, &[("Accept", "application/vnd.github+json")], Duration::from_secs(10 * 60)).await?;
-    let v: Value = serde_json::from_slice(&f.body).map_err(|e| anyhow!("GitHub answer: {e}"))?;
-    if !v.is_array() {
-        bail!("GitHub: {}", v["message"].as_str().unwrap_or("unexpected answer"));
-    }
-    Ok(v)
+    PARSED.get_or(&format!("{url}#{how}"), &f.body, |b| {
+        let v: Value = serde_json::from_slice(b).map_err(|e| anyhow!("GitHub answer: {e}"))?;
+        if !v.is_array() {
+            bail!("GitHub: {}", v["message"].as_str().unwrap_or("unexpected answer"));
+        }
+        Ok(parse(&v))
+    })
 }
 
 // ---------------------------------------------------------------- Krita
@@ -470,8 +476,10 @@ async fn unity_page(query: &str) -> Result<Vec<Rel>> {
         let url = format!("{UNITY_API}?limit=25&offset=0&platform=WINDOWS&architecture={arch}&{query}");
         last = async {
             let f = http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await?;
-            let v: Value = serde_json::from_slice(&f.body).map_err(|e| anyhow!("Unity release list: {e}"))?;
-            Ok(parse_unity(&v))
+            PARSED.get_or(&url, &f.body, |b| {
+                let v: Value = serde_json::from_slice(b).map_err(|e| anyhow!("Unity release list: {e}"))?;
+                Ok(parse_unity(&v))
+            })
         }
         .await;
         if last.as_ref().is_ok_and(|l: &Vec<Rel>| !l.is_empty()) {
@@ -500,10 +508,10 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         s
     };
     let (obs, fc, gd, gdb, kr, un, hub, epic) = tokio::join!(
-        github("obsproject/obs-studio", 40),
-        github("FreeCAD/FreeCAD", 100),
-        github("godotengine/godot", 60),
-        async { if godot_pre { github("godotengine/godot-builds", 60).await.ok() } else { None } },
+        github("obsproject/obs-studio", 40, "obs", parse_obs),
+        github("FreeCAD/FreeCAD", 100, "freecad", parse_freecad),
+        github("godotengine/godot", 60, "godot", |v| parse_godot(v, false)),
+        async { if godot_pre { github("godotengine/godot-builds", 60, "godot-builds", |v| parse_godot(v, true)).await.ok() } else { None } },
         krita_releases(false, 1),
         unity_page("stream=LTS"),
         unity_hub_releases(),
@@ -516,12 +524,11 @@ pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
         Ok(_) => log::warn!("{key}: no releases"),
         Err(e) => log::warn!("{key}: {e:#}"),
     };
-    put("obs", obs.map(|v| parse_obs(&v)));
-    put("freecad", fc.map(|v| parse_freecad(&v)));
-    put("godot", gd.map(|v| {
-        let mut l = parse_godot(&v, false);
-        if let Some(b) = &gdb {
-            l.extend(parse_godot(b, true));
+    put("obs", obs);
+    put("freecad", fc);
+    put("godot", gd.map(|mut l| {
+        if let Some(b) = gdb {
+            l.extend(b);
             sort_newest_first(&mut l);
         }
         l
@@ -1208,8 +1215,8 @@ pub async fn catalog_versions(key: &str, feed: &Feed, installed: &[Installed]) -
         }
         "godot" => {
             let mut l = feed.list("godot").to_vec();
-            if let Ok(b) = github("godotengine/godot-builds", 60).await {
-                l.extend(parse_godot(&b, true));
+            if let Ok(b) = github("godotengine/godot-builds", 60, "godot-builds", |v| parse_godot(v, true)).await {
+                l.extend(b);
                 sort_newest_first(&mut l);
             }
             l
@@ -1295,8 +1302,8 @@ async fn find_release(key: &str, ver: Option<&str>, series: Option<&str>, feed: 
     };
     let mut list = list;
     if key == "godot" && ver.is_some_and(is_pre) && !list.iter().any(|r| Some(r.version.as_str()) == ver) {
-        if let Ok(b) = github("godotengine/godot-builds", 60).await {
-            list.extend(parse_godot(&b, true));
+        if let Ok(b) = github("godotengine/godot-builds", 60, "godot-builds", |v| parse_godot(v, true)).await {
+            list.extend(b);
         }
     }
     if key == "krita" && ver.is_some_and(|v| !list.iter().any(|r| r.version == v)) {

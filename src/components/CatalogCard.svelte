@@ -18,9 +18,9 @@
   import { router, getHref, appHref } from "../lib/router.svelte";
   import { installedFor } from "../lib/appview";
   import { ui } from "../lib/ui.svelte";
-  import { installApp, openApp, updateOne } from "../lib/actions";
+  import { installApp, openApp, openStorePage, updateOne } from "../lib/actions";
   import { bytes, shortVersion } from "../lib/format";
-  import { blockedTitle } from "../lib/browse";
+  import { blockedTitle, storeOnly } from "../lib/browse";
   import { canCancel, cancelTip, pct } from "../lib/jobs";
   import type { CatalogEntry } from "../lib/types";
 
@@ -127,7 +127,7 @@
             <span class="ok"><Dab color="var(--ok)" />Installed</span>
           {/if}
         {:else if c.blocked}
-          <span class="blk" title={blockedTitle(c.blocked)}>Can't be installed silently</span>
+          <span class="blk" title={blockedTitle(c.blocked)}>{storeOnly(c.blocked) ? "In the Microsoft Store" : "Can't be installed silently"}</span>
         {/if}
       </span>
       {#if job}
@@ -141,6 +141,8 @@
             <Btn variant="raised" size="sm" title="Open {c.name}" onclick={() => openApp(openId)}>Open<Icon d={I.external} size={13} width={2.5} /></Btn>
           {/if}
         </div>
+      {:else if storeOnly(c.blocked)}
+        <Btn variant="raised" size="sm" title="Open {c.name} in the Microsoft Store" onclick={() => openStorePage(c.id)}>Store<Icon d={I.external} size={13} width={2.5} /></Btn>
       {:else if c.blocked}
         <Btn variant="raised" size="sm" disabled title={blockedTitle(c.blocked)}><Icon d={I.get} size={14} width={2.5} />Install</Btn>
       {:else if c.pickVersion}

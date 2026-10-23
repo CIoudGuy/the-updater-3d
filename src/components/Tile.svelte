@@ -10,10 +10,10 @@
   import { WAVE_EDGE, WAVE_FILL } from "../lib/paths";
   import { I } from "../lib/icons";
   import { send } from "../lib/api";
-  import { store, statusColor, statusLabel } from "../lib/store.svelte";
+  import { store, statusColor } from "../lib/store.svelte";
   import { canRepair, ui } from "../lib/ui.svelte";
-  import { metaLine, openMenuFor, subColor, subline, go, retryFor } from "../lib/appview";
-  import { openApp, repairApp, updateOne } from "../lib/actions";
+  import { metaLine, openMenuFor, stateLabel, subColor, subline, go, retryFor } from "../lib/appview";
+  import { askUninstall, openApp, repairApp, updateOne } from "../lib/actions";
   import { reduced } from "../lib/motion";
   import { splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, pauseTip } from "../lib/jobs";
@@ -78,7 +78,7 @@
     <div class="head">
       <Mark app={app} size={40} fs={15} />
       <span class="status" style:color={statusColor(app.status)}>
-        <Dab color={statusColor(app.status)} pulse={updating || app.status === "queued"} />{statusLabel(app.status)}
+        <Dab color={statusColor(app.status)} pulse={updating || app.status === "queued"} />{stateLabel(app)}
       </span>
     </div>
     <span class="name ellipsis" title={app.name}>{app.name}</span>
@@ -97,6 +97,8 @@
           <Btn variant="raised" size="sm" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update</Btn>
         {:else if app.status === "missing" && canRepair(app)}
           <Btn variant="raised" size="sm" title="Repair {app.name}" onclick={() => repairApp(app.id)}>Repair</Btn>
+        {:else if app.status === "missing" && app.source === "programs"}
+          <Btn variant="raised" size="sm" title="Remove {app.name} from the list and clean up what is left" onclick={() => askUninstall(app.id)}>Remove</Btn>
         {:else if failedJob}
           <Btn variant="raised" size="sm" title="Retry  R" onclick={() => retryFor(app)}>Retry</Btn>
         {:else if hasJob}

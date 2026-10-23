@@ -46,6 +46,12 @@ fn other_icon_on_disk(id: &str) -> Option<std::path::PathBuf> {
         .find(|p| p.metadata().is_ok_and(|m| m.len() > 0))
 }
 
+/// The apps the catalog sources look at: Other programs are what no source matched, so they
+/// must not count as handled by one.
+fn catalog_apps(v: &[Installed]) -> Vec<Installed> {
+    v.iter().filter(|i| i.source != Source::Programs).cloned().collect()
+}
+
 /// Made small already (or a vector, which needs no making small).
 fn icon_is_small(p: &std::path::Path) -> bool {
     let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
@@ -472,6 +478,10 @@ fn step_detail(step: &sources::Step, files: Option<usize>) -> String {
         Step::OpenUri { uri, .. } => format!("Handing over to {}", uri.split(':').next().unwrap_or("another app")),
         Step::RemoveUserRegKey { .. } => "Removing its registry entries".into(),
         Step::CheckSigner { signer, .. } => format!("Checking the signature by {signer}"),
+        Step::AddPackage { update: true, .. } => "Windows is updating the app package".into(),
+        Step::AddPackage { .. } => "Windows is installing the app package".into(),
+        Step::RemovePackage { .. } => "Windows is removing the app package".into(),
+        Step::Leftover { label, .. } => label.clone(),
     }
 }
 
@@ -550,6 +560,8 @@ pub struct Core {
     check_again: std::sync::atomic::AtomicBool,
     pub persisted: Mutex<Persisted>,
     jobs_dirty: std::sync::atomic::AtomicBool,
+    /// Wakes the job progress sender, which sleeps while nothing changes.
+    jobs_wake: Notify,
     /// "SAP@version" -> download size from the product manifest (the catalog often lacks it)
     adobe_sizes: Mutex<HashMap<String, u64>>,
     pub self_release: Mutex<Option<crate::selfupdate::Release>>,
@@ -612,6 +624,7 @@ impl Core {
             check_again: std::sync::atomic::AtomicBool::new(false),
             persisted: Mutex::new(persisted),
             jobs_dirty: std::sync::atomic::AtomicBool::new(false),
+            jobs_wake: Notify::new(),
             adobe_sizes: Mutex::new(HashMap::new()),
             self_release: Mutex::new(None),
         });
@@ -629,6 +642,8 @@ impl Core {
             first_scan: true,
             app_version: env!("CARGO_PKG_VERSION").into(),
             self_update: None,
+            machine: crate::machine::this().line(),
+            machine_tier: crate::machine::this().tier,
         });
         core.restore_queue();
         core
@@ -798,12 +813,17 @@ impl Core {
 
     fn mark_jobs_dirty(&self) {
         self.jobs_dirty.store(true, Ordering::Relaxed);
+        self.jobs_wake.notify_one();
     }
 
-    /// Sends job progress at most 8 times a second.
+    /// Sends job progress at most 8 times a second, and sleeps (no timer) while nothing changes.
     pub async fn jobs_ticker(self: Arc<Self>) {
         let mut t = tokio::time::interval(Duration::from_millis(125));
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            if !self.jobs_dirty.load(Ordering::Relaxed) {
+                self.jobs_wake.notified().await;
+            }
             t.tick().await;
             if self.jobs_dirty.swap(false, Ordering::Relaxed) {
                 let jobs = self.jobs();
@@ -842,6 +862,18 @@ impl Core {
         self.st.lock().installed.iter().find(|i| i.id == id).cloned()
     }
 
+    pub fn installed_all(&self) -> Vec<Installed> {
+        self.st.lock().installed.clone()
+    }
+
+    /// An Activity entry, with the backup "Restore" puts back.
+    pub fn log_activity(&self, kind: ActivityKind, title: String, meta: Option<String>, restore_id: Option<String>) {
+        let mut e = store::new_activity(kind, title, meta, None, None);
+        e.restore_id = restore_id;
+        store::append_activity(&e);
+        self.emit("activity", e);
+    }
+
     pub fn apps(&self) -> Vec<AppEntry> {
         let running = procs::list();
         let sizes = self.adobe_sizes.lock().clone();
@@ -868,13 +900,15 @@ impl Core {
                 AppStatus::Failed
             } else if has_update {
                 AppStatus::Update
-            } else if latest.is_none() && !i.read_only {
+            } else if latest.is_none() && !i.read_only && i.source != Source::Programs {
                 AppStatus::Unknown
             } else {
                 AppStatus::Current
             };
             let is_running = i.install_dir.as_ref().is_some_and(|d| !procs::blocking(&running, std::slice::from_ref(d), &[]).is_empty());
-            let note = if i.missing {
+            let note = if i.missing && i.source == Source::Programs {
+                Some("Its uninstaller is missing. Remove from list cleans up what is left.".into())
+            } else if i.missing {
                 Some("Files are missing. Repair reinstalls it.".into())
             } else if i.read_only {
                 i.tagline.clone()
@@ -883,7 +917,7 @@ impl Core {
             } else {
                 None
             };
-            let can_rollback = !i.read_only && !matches!(i.data, SourceData::Blender { kind: sources::BlenderKind::Beta, .. });
+            let can_rollback = !i.read_only && i.source != Source::Programs && !matches!(i.data, SourceData::Blender { kind: sources::BlenderKind::Beta, .. });
             out.push(AppEntry {
                 id: i.id.clone(),
                 source: i.source,
@@ -909,10 +943,11 @@ impl Core {
                 tagline: i.tagline.clone(),
                 group: i.source.group().into(),
                 running: is_running,
-                can_uninstall: !i.read_only && (i.uninstall.is_some() || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
+                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
                 read_only: i.read_only,
-                store_url: i.store.as_ref().map(|s| s.page_url()),
+                // Only for copies the Store updates: a sideloaded app package is updated here.
+                store_url: i.store.as_ref().filter(|_| i.read_only).map(|s| s.page_url()),
                 channel: i.channel.clone(),
                 note,
                 job_id: job.map(|j| j.id.clone()),
@@ -950,6 +985,10 @@ impl Core {
             // Leftover registrations whose files are gone are not installed apps (Adobe kept
             // listing a deleted Photoshop). They show up in Get apps instead.
             v.retain(|i| !i.missing);
+            // Every other program in Windows' list, to uninstall it here (a broken one, whose
+            // uninstaller is gone, is listed to remove it from the list).
+            let programs = crate::uninstall::programs::scan(&un, &v);
+            v.extend(programs);
             v
         })
         .await
@@ -976,7 +1015,7 @@ impl Core {
         use futures_util::StreamExt;
         let got: Vec<(String, Option<u64>)> = futures_util::stream::iter(wanted)
             .map(|(key, url)| async move { (key, other::download_size(&url).await) })
-            .buffer_unordered(8)
+            .buffer_unordered(crate::machine::tuned().size_parallel)
             .collect()
             .await;
         let installed = {
@@ -1007,6 +1046,8 @@ impl Core {
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
                 Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
+                // Listed to uninstall them; no catalog knows their versions.
+                Source::Programs => None,
             };
             if let Some(l) = l {
                 latest.insert(i.id.clone(), with_download_size(l, &i.id, &st.dl_sizes));
@@ -1043,7 +1084,15 @@ impl Core {
                 continue;
             }
             let mut url = None;
-            if let Some(remote) = &i.icon_remote {
+            // An app package's logo, a file in its folder (the webview may not read that folder).
+            if let Some(local) = i.icon_remote.as_deref().filter(|r| !r.starts_with("http")) {
+                let src = PathBuf::from(local);
+                let out = paths::icons().join(format!("{}.png", sanitize(&format!("package-{}", i.id))));
+                let ok = out.is_file() || std::fs::copy(&src, &out).is_ok();
+                if ok {
+                    url = Some(paths::asset_url(&out));
+                }
+            } else if let Some(remote) = &i.icon_remote {
                 let name = format!("{}.png", sanitize(&format!("remote-{}", remote.rsplit('/').nth(2).unwrap_or(&i.id))));
                 if let Some(p) = crate::http::cache_icon(remote, &name).await {
                     url = Some(paths::asset_url(&p));
@@ -1132,7 +1181,25 @@ impl Core {
     /// Full check: refresh catalogs and feeds, rescan, notify about new updates. Asked for while
     /// a check runs (a source was just switched on), it runs again right after that one.
     pub async fn check_now(self: &Arc<Self>, manual: bool) -> Result<()> {
-        coalesced(&self.check_lock, &self.check_again, || self.check_once(manual)).await.unwrap_or(Ok(()))
+        let r = coalesced(&self.check_lock, &self.check_again, || self.check_once(manual)).await.unwrap_or(Ok(()));
+        // A check in the background leaves pages and lists behind that nothing shows.
+        if tauri::Manager::get_webview_window(&self.app, "main").is_none() {
+            self.trim_memory();
+        }
+        r
+    }
+
+    /// With no window open and nothing in the queue, drop what only the window uses (fetched notes
+    /// pages, change lists, the whole-catalog list) and give the memory back to Windows. The
+    /// checker keeps its feeds, so the next check needs no more network than before.
+    pub fn trim_memory(&self) {
+        if self.jobs.lock().iter().any(|j| !j.job.state.is_finished()) {
+            return;
+        }
+        crate::notes::clear_page_cache();
+        other::clear_notes_cache();
+        sources::browse::drop_list();
+        tauri::async_runtime::spawn_blocking(crate::winutil::give_back_memory);
     }
 
     async fn check_once(self: &Arc<Self>, manual: bool) -> Result<()> {
@@ -1203,11 +1270,12 @@ impl Core {
                 }
             }
         };
+        let prev_other = self.other.read().clone();
         let other_f = async {
             if !settings.sources.other {
                 return None;
             }
-            match other::fetch(&installed).await {
+            match other::fetch(&catalog_apps(&installed), prev_other.as_deref()).await {
                 Ok(f) => Some(Arc::new(f)),
                 Err(e) => {
                     log::warn!("other apps: {e:#}");
@@ -1463,11 +1531,13 @@ impl Core {
             async { if settings.sources.craft { craft::fetch(settings.craft_prereleases).await.ok() } else { None } },
             async { if settings.sources.blender { blender::fetch(&installed, settings.blender_channel == "beta").await.ok() } else { None } },
             async { if settings.sources.tools { tools::fetch(&installed).await.ok() } else { None } },
-            async { if settings.sources.other { other::fetch(&installed).await.ok() } else { None } },
+            async { if settings.sources.other { other::fetch(&catalog_apps(&installed), None).await.ok() } else { None } },
         );
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
-        if settings.sources.other {
-            // The whole catalog list for Other apps, built now so the first page in Get apps is quick.
+        if settings.sources.other && crate::machine::tuned().prebuild_browse && self.window_open() {
+            // The whole catalog list for Other apps, built now so the first page in Get apps is
+            // quick. Not while only the tray runs (it would only be dropped again), nor on a low
+            // end PC, where Get apps builds it when it opens.
             tauri::async_runtime::spawn_blocking(|| {
                 let _ = sources::browse::list();
             });
@@ -1510,7 +1580,8 @@ impl Core {
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
             let installed = self.st.lock().installed.clone();
-            if let Ok(f) = other::fetch(&installed).await {
+            let prev = self.other.read().clone();
+            if let Ok(f) = other::fetch(&catalog_apps(&installed), prev.as_deref()).await {
                 *self.other.write() = Some(Arc::new(f));
                 self.emit("catalog_changed", ());
                 self.clone().cache_other_icons(None).await;
@@ -1567,7 +1638,7 @@ impl Core {
         }
         self.clone().start_icon_flusher();
         // workers take the next app from the queue until it is empty
-        let want = ICON_QUEUE.lock().len().min(sources::icons::PARALLEL);
+        let want = ICON_QUEUE.lock().len().min(sources::icons::parallel());
         loop {
             let running = ICON_WORKERS.load(Ordering::SeqCst);
             if running >= want {
@@ -1607,7 +1678,7 @@ impl Core {
             ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
             // more apps were queued while this worker was leaving: take a place again if one is free
             let running = ICON_WORKERS.load(Ordering::SeqCst);
-            if ICON_QUEUE.lock().is_empty() || running >= sources::icons::PARALLEL || ICON_WORKERS.compare_exchange(running, running + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            if ICON_QUEUE.lock().is_empty() || running >= sources::icons::parallel() || ICON_WORKERS.compare_exchange(running, running + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 break;
             }
         }
@@ -1945,6 +2016,10 @@ impl Core {
     /// Version history of an installed app, cached like `catalog_versions`.
     pub async fn versions(self: &Arc<Self>, app_id: &str) -> Result<Vec<VersionInfo>> {
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+        if inst.source == Source::Programs {
+            // No catalog knows its versions: only the one installed.
+            return Ok(vec![]);
+        }
         let key = format!("app-{app_id}");
         // A copy saved before an update marks the old version as installed: not usable.
         if let Some((list, age)) = notes_cache::read(&key).filter(|(l, _)| notes_cache::matches_installed(l, &inst.version)) {
@@ -2066,6 +2141,8 @@ impl Core {
                 if inst.read_only {
                     return Err(read_only_error(&inst));
                 }
+                // Where it was, for the leftover review once it is gone.
+                crate::uninstall::run::remember(&inst);
                 (app_id.clone(), JobKind::Uninstall, inst.version)
             }
             JobRequest::Repair { app_id } => {
@@ -2439,17 +2516,20 @@ impl Core {
                     Source::Blender => blender::plan_uninstall(inst),
                     Source::Tools => tools::plan_uninstall(inst),
                     Source::Other => other::plan_uninstall(inst),
+                    Source::Programs => crate::uninstall::run::plan(inst),
                 }?;
                 // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Other
                 // apps: nothing is known about what they keep there, so their folder only goes when
                 // nothing but the uninstaller is left (an NSIS uninstaller run in place can not
-                // delete itself).
+                // delete itself). The same for Other programs; the leftover review after the
+                // uninstall offers the rest.
+                let by_uninstaller = matches!(inst.source, Source::Other | Source::Programs);
                 let others: Vec<PathBuf> = installed.iter().filter(|i| i.id != inst.id).filter_map(|i| i.install_dir.clone()).collect();
-                if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source == Source::Other).and_then(|d| leftover_dir(d, &others)) {
+                if let Some(dir) = inst.install_dir.as_deref().filter(|_| by_uninstaller).and_then(|d| leftover_dir(d, &others)) {
                     plan.steps.push(sources::Step::RemoveIfOnlyUninstaller { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
                 }
                 let removed_already = |d: &std::path::Path| plan.steps.iter().any(|s| matches!(s, sources::Step::RemoveDir { path, .. } if path.as_path() == d));
-                if let Some(dir) = inst.install_dir.as_deref().filter(|_| inst.source != Source::Other).and_then(|d| leftover_dir(d, &others)).filter(|d| !removed_already(d)) {
+                if let Some(dir) = inst.install_dir.as_deref().filter(|_| !by_uninstaller).and_then(|d| leftover_dir(d, &others)).filter(|d| !removed_already(d)) {
                     plan.steps.push(sources::Step::RemoveDir { elevated: under_program_files(&dir), path: dir, label: format!("Removing what is left of {}", inst.name) });
                 }
                 if *remove_prefs {
@@ -3126,7 +3206,7 @@ impl Core {
                     declared_scope: other::declared_scope(feed.as_deref(), &pkg, &plan.to_version, before),
                     before: before.map(|b| b.version.clone()),
                 };
-                let handled: Vec<Installed> = self.st.lock().installed.iter().filter(|i| i.source != Source::Other).cloned().collect();
+                let handled: Vec<Installed> = self.st.lock().installed.iter().filter(|i| !matches!(i.source, Source::Other | Source::Programs)).cloned().collect();
                 let p2 = pkg.clone();
                 let copies = tauri::async_runtime::spawn_blocking(move || other::package_copies(&p2, &winutil::uninstall_entries(), &handled, since)).await.unwrap_or_default();
                 match other::check_install(&x, &copies) {
@@ -3409,7 +3489,7 @@ fn set_control(tx: &watch::Sender<Control>, c: Control) {
 /// the long part, unpacking is shorter, and removing leftovers or writing a file is quick.
 fn step_weight(step: &sources::Step) -> f64 {
     match step {
-        sources::Step::Run { .. } | sources::Step::OpenUri { .. } => 1.0,
+        sources::Step::Run { .. } | sources::Step::OpenUri { .. } | sources::Step::AddPackage { .. } | sources::Step::RemovePackage { .. } => 1.0,
         sources::Step::ExtractZip { .. } => 0.5,
         sources::Step::RemoveDir { .. } => 0.1,
         _ => 0.02,

@@ -292,7 +292,7 @@
   {:else if sections.length === 0}
     <p class="none">
       {#if sourcesOff}
-        Every source is switched off. <a class="lnk" href="#/settings/sources">Turn some on in Settings, Sources</a>.
+        Every source is switched off. <a class="lnk" href="#/settings/apps">Turn some on in Settings, Apps</a>.
       {:else}
         {q ? `No apps match "${ui.getQuery}".` : "Nothing to show for this source."}
       {/if}
@@ -330,7 +330,7 @@
         </div>
         {#if ui.otherSort === "updated" && b && browseCurrent}<p class="srcnote">{datedNote(b.dated, b.total)}</p>{/if}
         <div class:stale={!browseCurrent && browseBusy}>
-          <VirtualGrid items={sec.slots} key={(c) => c.id} onrange={onRange}>
+          <VirtualGrid items={sec.slots} key={(c) => c.id} onrange={onRange} overscan={store.status.machineTier === "low" ? 1 : store.status.machineTier === "high" ? 3 : 2}>
             {#snippet cell(c: CatalogEntry, i: number)}
               <div class="slot" use:enterOnce={{ id: c.id, i }}>
                 <CatalogCard {c} eager />

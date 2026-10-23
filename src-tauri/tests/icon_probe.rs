@@ -33,7 +33,7 @@ async fn time_until_a_screenful_of_icons_is_found() {
             .flatten();
             (id, r.map(|g| (g.via, g.bytes.len())))
         }))
-        .buffer_unordered(icons::PARALLEL);
+        .buffer_unordered(icons::parallel());
         let (mut first, mut hits, mut sizes) = (None, 0, 0usize);
         while let Some((_id, r)) = s.next().await {
             if let Some((_, len)) = r {

@@ -294,6 +294,11 @@ pub fn select<'a, 'd>(list: &'a BrowseList, want: &Want, offset: usize, limit: u
 }
 
 static LIST: Lazy<Mutex<Option<(std::time::SystemTime, Arc<BrowseList>)>>> = Lazy::new(|| Mutex::new(None));
+
+/// Drop the whole-catalog list while no window shows it; the next Get apps visit builds it again.
+pub fn drop_list() {
+    *LIST.lock() = None;
+}
 /// Held while the list is built, so a page asked for during the warm up waits for that build
 /// instead of starting a second one.
 static BUILDING: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -451,6 +456,10 @@ fn day_of(d: Option<&str>) -> Option<String> {
     (ok && !day.starts_with('0')).then(|| day.to_string())
 }
 
+/// The verdict kept for every MSIX package before app packages could be installed: such a
+/// detail is read again, and its verdict is not shown meanwhile.
+const OLD_MSIX_VERDICT: &str = "only a Store or MSIX package";
+
 /// A change to show on an Other apps card once its manifest was read.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -467,7 +476,7 @@ fn patch_for(pkg_id: &str, d: &Detail) -> DetailPatch {
         id: format!("other:{pkg_id}"),
         tagline: tagline_for(d.short.as_deref(), popular_line(pkg_id), d.publisher.as_deref()),
         description: d.long.clone(),
-        blocked: d.blocked.clone(),
+        blocked: d.blocked.clone().filter(|b| b != OLD_MSIX_VERDICT),
     }
 }
 
@@ -521,7 +530,7 @@ pub fn stale(pkgs: &[Pkg]) -> Vec<Pkg> {
     pkgs.iter()
         .filter(|p| {
             let k = p.id.to_ascii_lowercase();
-            d.get(&k).is_none_or(|x| x.hash != p.hash || !x.dated) && !busy.contains(&k) && !failed.contains(&k)
+            d.get(&k).is_none_or(|x| x.hash != p.hash || !x.dated || x.blocked.as_deref() == Some(OLD_MSIX_VERDICT)) && !busy.contains(&k) && !failed.contains(&k)
         })
         .cloned()
         .collect()
@@ -532,9 +541,6 @@ pub fn pkgs_by_id(ids: &[String]) -> Vec<Pkg> {
     let Ok(idx) = Index::open(&winget::index_path()) else { return vec![] };
     ids.iter().filter(|id| !other::handled_package(id) && other::excluded_package(id).is_none()).filter_map(|id| idx.by_id(id)).collect()
 }
-
-/// How many manifests are read at the same time.
-const PARALLEL: usize = 6;
 
 /// Read the newest manifest of each package (from the disk cache when it is there), keep what it
 /// says and hand the changes to `send` in small batches as they come in.
@@ -552,7 +558,8 @@ pub async fn fetch(pkgs: Vec<Pkg>, send: impl Fn(Vec<DetailPatch>)) {
         let r = tokio::time::timeout(Duration::from_secs(30), other::load_pkg(p)).await;
         (id, hash, r.ok().and_then(|(_, r)| r.ok()).map(|(_, m)| m))
     }))
-    .buffer_unordered(PARALLEL);
+    // How many manifests are read at the same time (fewer on a low end PC).
+    .buffer_unordered(crate::machine::tuned().detail_parallel);
     let mut batch = Vec::new();
     let mut last = std::time::Instant::now();
     let mut changed = false;
@@ -838,6 +845,13 @@ mod tests {
         DETAILS.lock().insert("old.detail".into(), old);
         assert_eq!(stale(std::slice::from_ref(&p)).len(), 1);
         DETAILS.lock().insert("old.detail".into(), Detail { hash: "h".into(), dated: true, ..Default::default() });
+        assert!(stale(std::slice::from_ref(&p)).is_empty());
+        // Kept when every MSIX package was refused: read again, and the old verdict not shown.
+        let old_msix = Detail { hash: "h".into(), dated: true, blocked: Some(OLD_MSIX_VERDICT.into()), ..Default::default() };
+        assert_eq!(patch_for("Old.Detail", &old_msix).blocked, None);
+        DETAILS.lock().insert("old.detail".into(), old_msix);
+        assert_eq!(stale(std::slice::from_ref(&p)).len(), 1);
+        DETAILS.lock().insert("old.detail".into(), Detail { hash: "h".into(), dated: true, blocked: Some("only a portable copy".into()), ..Default::default() });
         assert!(stale(&[p]).is_empty());
         DETAILS.lock().remove("old.detail");
     }
@@ -864,7 +878,16 @@ mod tests {
         .unwrap();
         let d = Detail::from_manifest("h1", &m);
         assert_eq!((d.short.as_deref(), d.long.as_deref(), d.publisher.as_deref()), (Some("Short"), Some("Longer text."), Some("A Ltd")));
-        assert_eq!(d.blocked.as_deref(), Some("only a Store or MSIX package"));
+        // An MSIX package installs when the catalog names its package family; a Store-only
+        // package does not.
+        assert_eq!(d.blocked.as_deref(), Some("an MSIX package without its package family name"));
+        let fam = winget::parse_manifest(
+            "PackageIdentifier: A.B\nPackageVersion: 1.0\nPackageFamilyName: A.B_8a0j1tnjnt4a4\nInstallers:\n- Architecture: x64\n  InstallerType: msix\n  InstallerUrl: https://a.example/x.msix\n  InstallerSha256: abababababababababababababababababababababababababababababababab\n",
+        )
+        .unwrap();
+        assert_eq!(Detail::from_manifest("h", &fam).blocked, None);
+        let store = winget::parse_manifest("PackageIdentifier: A.B\nPackageVersion: 1.0\nInstallers:\n- Architecture: x64\n  InstallerType: msstore\n  InstallerUrl: https://apps.microsoft.com/detail/9N\n").unwrap();
+        assert_eq!(Detail::from_manifest("h", &store).blocked.as_deref(), Some(other::STORE_ONLY));
         let p = patch_for("A.B", &d);
         assert_eq!((p.id.as_str(), p.tagline.as_deref()), ("other:A.B", Some("Short")));
         // A long text equal to the short one is not repeated on the page.
