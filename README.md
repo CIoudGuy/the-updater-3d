@@ -4,9 +4,9 @@
 
 # The Updater 3D
 
-**Keep all your creative apps up to date from one place.**
+**Update, install and cleanly uninstall all your Windows apps from one place.**
 
-Adobe Creative Cloud, Blender, the Craft apps, OBS, Krita, Unity and 15,000+ other Windows apps.
+Adobe Creative Cloud, Blender, the Craft apps, OBS, Krita, Unity and 15,000+ other apps.
 Finds what you have, shows what changed, and updates everything in one click.
 
 [**Download for Windows**](https://github.com/CIoudGuy/the-updater-3d/releases/latest)
@@ -29,8 +29,12 @@ Finds what you have, shows what changed, and updates everything in one click.
   instead of starting over.
 - **Roll back or keep versions.** Install any older version, or keep Blender, Godot and Unity
   versions side by side.
-- **Get new apps.** Browse and install from the full catalog, with descriptions and icons.
-- **Quiet.** A small background checker sends a notification when updates are ready.
+- **Get new apps.** Browse and search the full catalog, with descriptions, icons and change lists.
+- **A better uninstaller.** Every program on the PC, uninstalled cleanly: leftover files, registry
+  keys, shortcuts, services and startup entries are shown before anything is deleted, with a
+  30-day restore. Also finds broken entries and dead shortcuts.
+- **Light and quiet.** A small background checker sends a notification when updates are ready,
+  tuned to your PC so it stays fast on older machines.
 
 <table>
   <tr>
@@ -53,15 +57,17 @@ Finds what you have, shows what changed, and updates everything in one click.
 | **Blender** | Every release series side by side, LTS, betas | download.blender.org, builder.blender.org |
 | **Craft apps** | ArtCraft and the Craft apps (PhotoCraft, VectorCraft, FilmCraft and more) | ArtCraft's releases |
 | **More apps** | OBS Studio, Krita, FreeCAD, Godot, Unity Editor, Unity Hub, Epic Games Launcher (Preview) | Each project's own releases |
-| **Other apps** | 15,000+ Windows apps: browsers, chat, dev tools, media, utilities | Microsoft's public winget catalog |
+| **Other apps** | 15,000+ Windows apps: browsers, chat, dev tools, media, utilities, including app packages (MSIX) like Affinity | Microsoft's public winget catalog |
+| **Everything else** | Any other program on the PC, for uninstalling and cleanup | Windows' list of installed programs |
 
 ## Install
 
 1. Download the installer from the [latest release](https://github.com/CIoudGuy/the-updater-3d/releases/latest).
 2. Run it. Windows may show "Windows protected your PC" because the installer is not code-signed:
    click **More info**, then **Run anyway**.
-3. The app finds your installed apps on its own. Updates that need admin rights ask once per batch,
-   or not at all with **Fewer admin prompts** (on by default).
+3. The installer asks whether you use Adobe apps (you can change it later in Settings). The app
+   then finds your installed apps on its own. With **Fewer admin prompts** (on by default) it asks
+   for admin rights once, then never again.
 
 Requires Windows 10 or 11 (64-bit).
 

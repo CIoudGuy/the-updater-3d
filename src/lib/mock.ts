@@ -548,7 +548,7 @@ let status: Status = {
   scanStep: null,
   firstScan: false,
   appVersion: "1.0.0",
-  selfUpdate: MODE === "ready" ? "1.1.0" : null,
+  selfUpdate: MODE === "selfupdate" ? "1.2.0" : null,
 };
 
 let services: ServiceInfo[] = [
