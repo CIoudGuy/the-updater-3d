@@ -153,3 +153,55 @@ async fn sharex_settings_survive_the_pre_release_and_come_back_after_the_rollbac
     assert!(config.exists(), "uninstalling keeps the settings");
     println!("SETTINGS CHECK PASSED");
 }
+
+/// Which of ShareX's Windows links are there: the right-click menu, its file types, the browser
+/// extension link, Send To and startup.
+fn sharex_links() -> Vec<(&'static str, bool)> {
+    let key = |k: &str| std::process::Command::new("reg").args(["query", k]).output().is_ok_and(|o| o.status.success());
+    let appdata = std::path::PathBuf::from(std::env::var("APPDATA").unwrap());
+    vec![
+        ("right-click menu", key(r"HKCU\Software\Classes\*\shell\ShareX")),
+        ("folder menu", key(r"HKCU\Software\Classes\Directory\shell\ShareX")),
+        (".sxcu files", key(r"HKCU\Software\Classes\.sxcu")),
+        (".sxie files", key(r"HKCU\Software\Classes\.sxie")),
+        ("Chrome extension link", key(r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.getsharex.sharex")),
+        ("Firefox extension link", key(r"HKCU\Software\Mozilla\NativeMessagingHosts\ShareX")),
+        ("Send To", appdata.join(r"Microsoft\Windows\SendTo\ShareX.lnk").exists()),
+        ("startup", appdata.join(r"Microsoft\Windows\Start Menu\Programs\Startup\ShareX.lnk").exists()),
+    ]
+}
+
+#[tokio::test]
+#[ignore]
+async fn repair_brings_back_what_sharexs_own_cleanup_removes() {
+    if !in_windows_sandbox() {
+        println!("not in Windows Sandbox: nothing installed");
+        return;
+    }
+    winget::refresh_index(Duration::from_secs(3600)).await.expect("catalog index");
+    run(&other::plan_install(ID, None, JobKind::Install, None, None).await.unwrap()).await;
+    let here = sharex().unwrap();
+    let after_install = sharex_links();
+    println!("after the install: {after_install:?}");
+    // What Steam's uninstall of its ShareX runs is ShareX's own cleanup ("-uninstall"), which
+    // removes these by name for every copy (IntegrationHelpers.Uninstall in ShareX 21). It cannot
+    // run without a desktop here, so the same things are removed directly.
+    for k in [r"HKCU\Software\Classes\*\shell\ShareX", r"HKCU\Software\Classes\Directory\shell\ShareX", r"HKCU\Software\Classes\.sxcu", r"HKCU\Software\Classes\ShareX.sxcu", r"HKCU\Software\Classes\.sxie", r"HKCU\Software\Classes\ShareX.sxie", r"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.getsharex.sharex", r"HKCU\Software\Mozilla\NativeMessagingHosts\ShareX"] {
+        let _ = std::process::Command::new("reg").args(["delete", k, "/f"]).output();
+    }
+    let appdata = std::path::PathBuf::from(std::env::var("APPDATA").unwrap());
+    let _ = std::fs::remove_file(appdata.join(r"Microsoft\Windows\SendTo\ShareX.lnk"));
+    let _ = std::fs::remove_file(appdata.join(r"Microsoft\Windows\Start Menu\Programs\Startup\ShareX.lnk"));
+    let after_cleanup = sharex_links();
+    println!("after ShareX's cleanup: {after_cleanup:?}");
+    assert!(after_cleanup.iter().all(|(_, there)| !there));
+    // Repair: the same version installed again.
+    run(&other::plan_install(ID, None, JobKind::Repair, Some(&here), None).await.unwrap()).await;
+    let after_repair = sharex_links();
+    println!("after Repair: {after_repair:?}");
+    for ((name, installed), (_, repaired)) in after_install.iter().zip(&after_repair) {
+        assert!(!installed || *repaired, "{name} did not come back with Repair");
+    }
+    run(&other::plan_uninstall(&sharex().unwrap()).unwrap()).await;
+    println!("REPAIR CHECK PASSED");
+}

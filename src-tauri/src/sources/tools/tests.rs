@@ -807,3 +807,22 @@ async fn live_beta_channels() {
     eprintln!("unity hub: {:?}", hub.iter().filter(|r| !r.url.is_empty()).map(|r| (r.version.clone(), r.prerelease, r.file.clone())).collect::<Vec<_>>());
     assert!(hub.iter().any(|r| !r.prerelease && !r.url.is_empty()));
 }
+
+#[tokio::test]
+async fn the_next_godot_beta_installs_next_to_the_copy_here() {
+    let root = std::env::temp_dir().join("updater3d-tests").join("godot-next");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("Godot 4.7.2")).unwrap();
+    let here = inst("godot", "tools:godot:4.7.2", "4.7.2", "4.7.2");
+    let mut beta = rel("4.8-beta1", true);
+    beta.file = "Godot_v4.8-beta1_win64.exe.zip".into();
+    let feed = feed_with("godot", vec![beta, rel("4.7.2", false)]);
+    let ctx = Ctx { godot_root: &root };
+    let p = plan_install(&here.id, Some("4.8-beta1"), crate::model::JobKind::Update, Some(&here), std::slice::from_ref(&here), &feed, ctx).await.unwrap();
+    // A copy of its own: its own folder and entry, and 4.7.2's folder is left alone.
+    assert_eq!(p.app_id, "tools:godot:4.8-beta1");
+    assert!(p.steps.iter().any(|s| matches!(s, Step::ExtractZip { dest, .. } if *dest == root.join("Godot 4.8-beta1"))), "{:?}", p.steps);
+    assert!(!p.steps.iter().any(|s| matches!(s, Step::RemoveDir { path, .. } if path.ends_with("Godot 4.7.2"))));
+    assert!(root.join("Godot 4.7.2").is_dir());
+    let _ = std::fs::remove_dir_all(&root);
+}

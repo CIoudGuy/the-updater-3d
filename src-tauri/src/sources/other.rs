@@ -2781,7 +2781,10 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
     } else {
         (dest.clone(), i.kind.clone())
     };
-    let (exe, args) = silent_args(i, &run_kind, &file, &log, update);
+    // A repair installs the version again as a new install does: an installer's upgrade switch
+    // skips what only a new install sets up (ShareX's "/UPDATE" skips its shortcuts, right-click
+    // menu and startup entry, which another copy's uninstaller may have removed).
+    let (exe, args) = silent_args(i, &run_kind, &file, &log, update && kind != JobKind::Repair);
     let mut ok_codes = vec![0];
     ok_codes.extend(i.success_codes.iter().copied());
     if msi_family(&run_kind) {

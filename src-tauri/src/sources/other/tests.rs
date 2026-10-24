@@ -271,6 +271,23 @@ fn an_exe_without_a_silent_switch_is_not_run() {
 }
 
 #[test]
+fn a_repair_runs_the_installer_as_a_new_install_without_its_upgrade_switch() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    let here = installed_from(entry("Zipper_is1", "HKLM64", "Zipper", "26.04", "Example Pavlov"), "Example.Zipper");
+    // ShareX's catalog entry: an Inno installer whose upgrade switch skips the shortcuts,
+    // right-click menu and startup entry a new install sets up.
+    let mut inno = inst("x64", "inno", Some("machine"));
+    inno.upgrade = Some("/UPDATE".into());
+    let args = |kind: JobKind| match &build_plan(&p, &manifest(vec![inno.clone()]), &inno, kind, Some(&here), None).unwrap().steps.last().unwrap() {
+        Step::Run { args, .. } => args.clone(),
+        s => panic!("{s:?}"),
+    };
+    assert!(args(JobKind::Update).iter().any(|a| a == "/UPDATE"));
+    assert!(!args(JobKind::Repair).iter().any(|a| a == "/UPDATE"), "a repair sets up what the other copy's uninstaller removed");
+}
+
+#[test]
 fn the_admin_retry_does_not_uninstall_again() {
     let idx = index();
     let p = idx.by_id("Example.Zipper").unwrap();
