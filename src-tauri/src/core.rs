@@ -52,6 +52,7 @@ fn norm_dir(d: &std::path::Path) -> String {
 /// (installed by "Update and restart", never by a job), and its page is the app's own page.
 fn mark_self(a: &mut AppEntry, ready: Option<&str>) {
     a.is_self = true;
+    a.pre_channel = None;
     a.group = Source::Other.group().into();
     a.tagline = Some("Keeps your apps and drivers up to date".into());
     a.note = None;
@@ -86,6 +87,16 @@ fn forget_game_data(data: &std::path::Path, icons: &std::path::Path) {
                 let _ = std::fs::remove_file(e.path());
             }
         }
+    }
+}
+
+/// The version an installed Other app is offered: its newest GitHub pre-release (`pre`, given
+/// only when the app follows them) when that is newer than the copy and the catalog's version,
+/// else the catalog's.
+fn other_offer(stable: Option<Latest>, pre: Option<&String>, installed: &str) -> Option<Latest> {
+    match pre {
+        Some(v) if other::is_newer(v, installed) && stable.as_ref().is_none_or(|s| other::is_newer(v, &s.version)) => Some(Latest { version: v.clone(), size: None, note: None }),
+        _ => stable,
     }
 }
 
@@ -666,6 +677,9 @@ pub struct Core {
     pub other: RwLock<Option<Arc<other::Feed>>>,
     /// Releases of the GitHub projects that Other programs name (see `ghapps`)
     pub ghapps: RwLock<Option<Arc<ghapps::Feed>>>,
+    /// The newest GitHub pre-release of each installed Other app the user set to follow them
+    /// (app id -> version)
+    other_pre: RwLock<HashMap<String, String>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
     /// Bumped by "Allow admin rights": the jobs waiting for admin rights try again.
@@ -739,6 +753,7 @@ impl Core {
             tools: RwLock::new(None),
             other: RwLock::new(None),
             ghapps: RwLock::new(None),
+            other_pre: RwLock::new(HashMap::new()),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
             admin_gen: watch::channel(0).0,
@@ -1021,7 +1036,11 @@ impl Core {
         let recorded = self.persisted.lock().updated_at.clone();
         let driver_list: Vec<drivers::Found> = if self.settings.read().sources.drivers { self.drivers.lock().found.clone() } else { vec![] };
         let ignored = self.settings.read().ignored.clone();
+        let pre = self.settings.read().pre_releases.clone();
+        let craft_pre = self.settings.read().craft_prereleases;
         let gh = self.ghapps.read().clone();
+        let cf = self.craft.read().clone();
+        let tf = self.tools.read().clone();
         let me = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| norm_dir(d)));
         let self_ready = self.self_release.lock().as_ref().map(|r| r.version.clone());
         let st = self.st.lock();
@@ -1100,9 +1119,20 @@ impl Core {
                 // Only for copies the Store updates: a sideloaded app package is updated here.
                 store_url: i.store.as_ref().filter(|_| i.read_only).map(|s| s.page_url()),
                 channel: i.channel.clone(),
-                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)),
+                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f, pre.get(&i.id).copied())),
                 github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
                 is_self: false,
+                pre_channel: {
+                    let choice = pre.get(&i.id).copied();
+                    match i.source {
+                        Source::Craft => cf.as_deref().and_then(|f| craft::follows_pre(i, f, choice, craft_pre)),
+                        Source::Tools => tf.as_deref().and_then(|f| tools::follows_pre(i, f, choice)),
+                        Source::Programs => gh.as_deref().and_then(|f| ghapps::follows_pre(i, f, choice)),
+                        // Its GitHub pre-releases show in its version list, which offers the choice.
+                        Source::Other => choice,
+                        _ => None,
+                    }
+                },
                 note,
                 job_id: job.map(|j| j.id.clone()),
             });
@@ -1337,7 +1367,8 @@ impl Core {
         if id.starts_with("prog:") {
             let inst = self.installed(id)?;
             let feed = self.ghapps.read().clone()?;
-            return ghapps::manual_page(&inst, &feed).filter(|u| drivers::host_is(u, &["github.com"]));
+            let pre = self.settings.read().pre_releases.get(id).copied();
+            return ghapps::manual_page(&inst, &feed, pre).filter(|u| drivers::host_is(u, &["github.com"]));
         }
         self.drivers.lock().found.iter().find(|f| f.entry.id == id).and_then(|f| drivers::safe_link(f.entry.vendor_url.clone()))
     }
@@ -1417,17 +1448,21 @@ impl Core {
         let of = self.other.read().clone();
         let gf = self.ghapps.read().clone();
         let keep_patch = self.settings.read().blender_keep_patch_versions;
+        let pre = self.settings.read().pre_releases.clone();
+        let opre = self.other_pre.read().clone();
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
         for i in &installed {
             let l = match i.source {
                 Source::Adobe => cat.as_ref().and_then(|c| adobe::latest(i, &installed, c)),
-                Source::Craft => cf.as_ref().and_then(|f| craft::latest(i, f)),
+                Source::Craft => cf.as_ref().and_then(|f| craft::latest_with(i, f, pre.get(&i.id).copied())),
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
-                Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
-                Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
+                Source::Tools => tf.as_ref().and_then(|f| tools::latest_with(i, &installed, f, pre.get(&i.id).copied())),
+                // An app that follows pre-releases is offered its newest GitHub pre-release when
+                // that is newer than the catalog's version and the copy here.
+                Source::Other => other_offer(of.as_ref().and_then(|f| other::latest(i, f)), opre.get(&i.id).filter(|_| pre.get(&i.id) == Some(&true)), &i.version),
                 // Listed to uninstall them; no catalog knows their versions, their GitHub project may.
-                Source::Programs => gf.as_ref().and_then(|f| ghapps::latest(i, f)),
+                Source::Programs => gf.as_ref().and_then(|f| ghapps::latest(i, f, pre.get(&i.id).copied())),
                 // Not in the installed list: the driver check has their versions.
                 Source::Drivers => None,
             };
@@ -1783,6 +1818,7 @@ impl Core {
         } else if settings.sources.other {
             unknown.insert("other");
         }
+        self.refresh_other_pre().await;
         self.st.lock().unknown_sources = unknown.clone();
         self.rescan().await;
         {
@@ -2052,6 +2088,7 @@ impl Core {
         if let Some(o) = o {
             *self.other.write() = Some(Arc::new(o));
         }
+        self.refresh_other_pre().await;
         self.rescan().await;
         let me = self.clone();
         tauri::async_runtime::spawn(async move { me.cache_catalog_icons().await });
@@ -2558,6 +2595,36 @@ impl Core {
         self.admin_gen.send_modify(|g| *g += 1);
     }
 
+    /// The newest GitHub pre-release of each installed Other app the user set to follow them.
+    async fn refresh_other_pre(&self) {
+        let choices = self.settings.read().pre_releases.clone();
+        let follow: Vec<Installed> = self.st.lock().installed.iter().filter(|i| i.source == Source::Other && choices.get(&i.id) == Some(&true)).cloned().collect();
+        let feed = self.other.read().clone();
+        let found = match feed {
+            Some(f) if !follow.is_empty() => other::newest_pre(&follow, &f).await,
+            _ => HashMap::new(),
+        };
+        *self.other_pre.write() = found;
+    }
+
+    /// The user changed which apps follow pre-releases: their offered versions and version lists
+    /// follow at once.
+    fn pre_releases_changed(self: &Arc<Self>, changed: Vec<String>) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            for id in &changed {
+                notes_cache::forget(&format!("app-{id}"));
+            }
+            me.refresh_other_pre().await;
+            let installed = me.st.lock().installed.clone();
+            me.recompute_latest(installed);
+            me.emit_apps();
+            for id in changed {
+                me.emit("versions-changed", serde_json::json!({ "id": id }));
+            }
+        });
+    }
+
     /// One Get apps entry, installed or not (its page stays open after the install finishes).
     pub fn catalog_entry(&self, id: &str) -> Option<CatalogEntry> {
         self.catalog().into_iter().find(|e| e.id == id)
@@ -2723,7 +2790,8 @@ impl Core {
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
         if inst.source == Source::Programs {
             // No catalog knows its versions: its GitHub releases, when it names its project.
-            return Ok(self.ghapps.read().as_deref().map(|f| ghapps::versions(&inst, f)).unwrap_or_default());
+            let pre = self.settings.read().pre_releases.get(app_id).copied();
+            return Ok(self.ghapps.read().as_deref().map(|f| ghapps::versions(&inst, f, pre)).unwrap_or_default());
         }
         let key = format!("app-{app_id}");
         // A copy saved before an update marks the old version as installed: not usable.
@@ -2805,18 +2873,18 @@ impl Core {
                 let list = adobe::versions(sap, platform, Some(&inst.version), &cat);
                 Ok(with_adobe_notes(list).await)
             }
-            SourceData::Craft { key, .. } => craft::versions(key, Some(&inst.version), s.craft_prereleases).await,
+            SourceData::Craft { key, .. } => craft::versions(key, Some(&inst.version), s.pre_releases.get(&inst.id).copied().unwrap_or(s.craft_prereleases)).await,
             SourceData::Blender { .. } => {
                 let feed = self.blender.read().clone().ok_or_else(|| anyhow!("Blender releases are not loaded yet"))?;
                 blender::versions(&inst, &feed).await
             }
             SourceData::Tools { .. } => {
                 let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists are not loaded yet"))?;
-                tools::versions(&inst, &feed).await
+                tools::versions_with(&inst, &feed, s.pre_releases.get(&inst.id).copied()).await
             }
             SourceData::Other { .. } => {
                 let feed = self.other.read().clone().unwrap_or_default();
-                other::versions(&inst, &feed).await
+                other::versions(&inst, &feed, s.pre_releases.get(&inst.id) == Some(&true)).await
             }
         }
     }
@@ -3177,7 +3245,8 @@ impl Core {
                     SourceData::Craft { key, .. } => {
                         let feed = self.craft.read().clone();
                         let kind = if repair { JobKind::Repair } else if version.as_ref().is_some_and(|v| version::newer(&inst.version, v)) { JobKind::Rollback } else { JobKind::Update };
-                        let v = if repair { Some(inst.version.clone()) } else { version.clone() };
+                        // The newest version this app is offered (its own pre-release choice included).
+                        let v = if repair { Some(inst.version.clone()) } else { version.clone().or(latest) };
                         craft::plan_install(key, v.as_deref(), kind, Some(&inst), feed.as_deref(), s.craft_prereleases).await
                     }
                     SourceData::Tools { .. } => {
@@ -3192,12 +3261,16 @@ impl Core {
                         }
                         let feed = self.ghapps.read().clone();
                         let kind = if version.as_ref().is_some_and(|v| tools::cmp_ver(&inst.version, v).is_gt()) { JobKind::Rollback } else { JobKind::Update };
-                        ghapps::plan_install(&inst, version.as_deref(), kind, feed.as_deref())
+                        // The newest version this program is offered (its own pre-release choice included).
+                        ghapps::plan_install(&inst, version.clone().or(latest).as_deref(), kind, feed.as_deref())
                     }
                     SourceData::Other { .. } => {
                         let feed = self.other.read().clone();
                         let kind = if repair { JobKind::Repair } else if version.as_ref().is_some_and(|v| tools::cmp_ver(&inst.version, v).is_gt()) { JobKind::Rollback } else { JobKind::Update };
-                        other::plan_install(&inst.id, if repair { None } else { version.as_deref() }, kind, Some(&inst), feed.as_deref()).await
+                        // The offered version is a GitHub pre-release the catalog does not have: named.
+                        let pre_target = self.other_pre.read().get(&inst.id).filter(|v| latest.as_deref() == Some(v.as_str())).cloned();
+                        let target = if repair { None } else { version.clone().or(pre_target) };
+                        other::plan_install(&inst.id, target.as_deref(), kind, Some(&inst), feed.as_deref()).await
                     }
                     SourceData::Blender { .. } => {
                         if repair {
@@ -4089,6 +4162,10 @@ impl Core {
         if new.silent_elevation != old.silent_elevation {
             self.set_up_silent_task(new.silent_elevation, false);
         }
+        if new.pre_releases != old.pre_releases {
+            let changed: Vec<String> = new.pre_releases.keys().chain(old.pre_releases.keys()).filter(|k| new.pre_releases.get(*k) != old.pre_releases.get(*k)).cloned().collect();
+            self.pre_releases_changed(changed);
+        }
         let rescan = new.sources.adobe != old.sources.adobe
             || new.sources.craft != old.sources.craft
             || new.sources.blender != old.sources.blender
@@ -4229,6 +4306,11 @@ mod notes_cache {
 
     pub fn done(key: &str) {
         RUNNING.lock().remove(key);
+    }
+
+    /// Drop a saved list (what it marks as the newest changed).
+    pub fn forget(key: &str) {
+        let _ = std::fs::remove_file(file(key));
     }
 
     /// A saved list still fits the installed version: the one it marks installed is that version.
@@ -4639,6 +4721,7 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         manual_url: if manual || !installable { drivers::safe_link(e.vendor_url.clone()) } else { None },
         github: None,
         is_self: false,
+        pre_channel: None,
         channel: None,
         note: e.note.clone(),
         job_id,
@@ -4684,6 +4767,23 @@ fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u6
 #[cfg(test)]
 mod tests {
     use super::{update_notice, with_download_size};
+
+    #[test]
+    fn an_other_app_that_follows_pre_releases_is_offered_the_newest_one() {
+        use crate::sources::Latest;
+        let at = |v: &str| Some(Latest { version: v.into(), size: None, note: None });
+        let offer = |stable: Option<Latest>, pre: Option<&str>, here: &str| super::other_offer(stable, pre.map(String::from).as_ref(), here).map(|l| l.version);
+        // ShareX 21.0.0 here, the catalog at 21.0.0, 22.0.0 a pre-release on GitHub.
+        assert_eq!(offer(at("21.0.0"), Some("22.0.0"), "21.0.0").as_deref(), Some("22.0.0"));
+        // Not following them: the catalog's.
+        assert_eq!(offer(at("21.0.0"), None, "21.0.0").as_deref(), Some("21.0.0"));
+        // The pre-release installed: nothing newer.
+        assert_eq!(offer(at("21.0.0"), Some("22.0.0"), "22.0.0").as_deref(), Some("21.0.0"));
+        // A final release newer than the pre-release wins.
+        assert_eq!(offer(at("22.1.0"), Some("22.0.0"), "21.0.0").as_deref(), Some("22.1.0"));
+        // A final 22.0.0 after its own beta is newer than it.
+        assert_eq!(offer(at("22.0.0"), Some("22.0.0-beta.2"), "22.0.0-beta.2").as_deref(), Some("22.0.0"));
+    }
 
     #[test]
     fn an_installer_that_found_the_app_running_names_it() {

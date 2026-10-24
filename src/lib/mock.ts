@@ -2,6 +2,7 @@
 // Dev switch: ?state=ready (default) | current | repair | updating | installing | queue | first | offline | blocked | failed | lowdisk | ccdown | signedout | noadobe
 import type { Commands } from "./commands";
 import { matchRank } from "./browse";
+import { cmpVersion } from "./format";
 import type {
   ActivityEntry,
   AppEntry,
@@ -489,11 +490,11 @@ const TOOLS_RELEASES: Record<string, { v: string; pre?: boolean; size: number; n
     { v: "6000.7.0b6", pre: true, size: 4.1 * GB, notes: ["Beta build"] },
   ],
 };
-function toolsVersions(key: string, installedVersions: string[], within?: string): VersionInfo[] {
+function toolsVersions(key: string, installedVersions: string[], within?: string, follows = false): VersionInfo[] {
   const rel = TOOLS_RELEASES[key] ?? [];
   const series = (v: string) => v.split(".").slice(0, 2).join(".");
   const list = within ? rel.filter((r) => series(r.v) === series(within)) : rel;
-  const newest = list.find((r) => !r.pre)?.v;
+  const newest = (follows ? [...list].sort((x, y) => cmpVersion(y.v, x.v))[0] : list.find((r) => !r.pre))?.v;
   return list.map((r, i) => ({
     version: r.v,
     date: iso((i * 19 + 3) * DAY).slice(0, 10),
@@ -505,6 +506,33 @@ function toolsVersions(key: string, installedVersions: string[], within?: string
     prerelease: !!r.pre,
   }));
 }
+/** Whether an app follows pre-releases, as the backend says: the user's choice, or for a More apps entry
+ * with pre-releases (of its own series when it installs side by side), whether the copy here is one.
+ * An Other app has only the choice. */
+function preFor(a: AppEntry): boolean | null {
+  const choice = settings.preReleases?.[a.id];
+  if (a.source === "other") return choice ?? null;
+  if (a.source !== "tools") return null;
+  const own = a.id.split(":").length > 2;
+  const series = (v: string) => v.split(".").slice(0, 2).join(".");
+  const pres = (TOOLS_RELEASES[a.id.split(":")[1]] ?? []).filter((r) => r.pre && (!own || series(r.v) === series(a.version)));
+  if (!pres.length) return null;
+  return choice ?? pres.some((r) => r.v === a.version);
+}
+
+/** Each app's choice of pre-releases, and the version a More apps entry is offered by it. */
+function applyPre() {
+  for (const a of apps) {
+    a.preChannel = preFor(a);
+    if (a.source !== "tools" || a.preChannel === null || (a.status !== "current" && a.status !== "update")) continue;
+    const top = toolsVersions(a.id.split(":")[1], [a.version], undefined, a.preChannel).find((v) => v.latest);
+    const newer = !!top && cmpVersion(top.version, a.version) > 0;
+    a.latest = newer ? top.version : a.version;
+    a.status = newer ? "update" : "current";
+    a.updateSize = newer ? top.size : null;
+  }
+}
+
 /** FreeCAD installs one copy per series, Godot and Unity one per version; OBS Studio and Krita one in all. */
 function toolsId(key: string, version: string): string {
   if (key === "freecad") return `tools:freecad:${/^\d+\.\d+/.exec(version)?.[0] ?? version}`;
@@ -889,6 +917,7 @@ function advance(seconds: number) {
 
 function setup() {
   apps = seedApps();
+  applyPre();
   seedActivity();
   if (MODE === "first") {
     const all = apps;
@@ -1008,7 +1037,7 @@ function versionsFor(a: AppEntry): VersionInfo[] {
   if (a.source === "other") return otherVersions(a.id);
   if (a.source === "tools") {
     const key = a.id.split(":")[1];
-    return toolsVersions(key, [a.version], key === "freecad" || key === "godot" || key === "unity" ? a.version : undefined);
+    return toolsVersions(key, [a.version], key === "freecad" || key === "godot" || key === "unity" ? a.version : undefined, !!a.preChannel);
   }
   if (a.source === "blender") {
     BLENDER_RELEASES.forEach((v, i) => {
@@ -1503,6 +1532,11 @@ const handlers: H = {
     const adobeWas = settings.sources.adobe;
     settings = { ...settings, ...patch, sources: { ...settings.sources, ...(patch.sources ?? {}) } };
     if (settings.sources.adobe !== adobeWas) setAdobe(settings.sources.adobe);
+    if (patch.preReleases) {
+      applyPre();
+      emit("apps", apps);
+      for (const id of Object.keys(patch.preReleases)) setTimeout(() => emit("versions-changed", { id }), 300);
+    }
     emit("settings", settings);
     return clone(settings);
   },

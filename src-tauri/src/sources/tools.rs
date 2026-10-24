@@ -1015,14 +1015,42 @@ pub fn store_copies(pkgs: &[super::msstore::Package]) -> Vec<Installed> {
 /// (`inst` has siblings in `all`) are only offered newer builds of their own series, and nothing
 /// when a sibling already has it; the newest installed series is offered the next series.
 pub fn latest(inst: &Installed, all: &[Installed], feed: &Feed) -> Option<Latest> {
+    latest_with(inst, all, feed, None)
+}
+
+/// The releases an installed copy can move to: its series' for Unity, else the app's.
+fn list_for<'a>(inst: &Installed, feed: &'a Feed) -> Option<&'a [Rel]> {
+    let key = tools_key(inst);
+    if key == "unity" {
+        feed.unity_series.get(&version::series(&inst.version)).map(|v| v.as_slice())
+    } else {
+        Some(feed.list(key))
+    }
+}
+
+/// Does the app publish pre-releases this copy could move to (its own series for an app that
+/// installs each series side by side)? Then the user can choose them: what it follows now
+/// (`choice`, else as the copy is). None when there are none.
+pub fn follows_pre(inst: &Installed, feed: &Feed, choice: Option<bool>) -> Option<bool> {
+    if inst.read_only {
+        return None;
+    }
+    let d = def(tools_key(inst))?;
+    let list = list_for(inst, feed)?;
+    let same = |r: &&Rel| !d.side_by_side || version::series(&r.version) == version::series(&inst.version);
+    list.iter().filter(same).any(|r| r.prerelease && !r.url.is_empty()).then(|| choice.unwrap_or_else(|| is_pre(&inst.version)))
+}
+
+/// `latest` with the user's choice of pre-releases for the app (None: as the copy is).
+pub fn latest_with(inst: &Installed, all: &[Installed], feed: &Feed, choice: Option<bool>) -> Option<Latest> {
     // A Store copy is the Store's to update.
     if inst.read_only {
         return None;
     }
     let key = tools_key(inst);
     let d = def(key)?;
-    let list: &[Rel] = if key == "unity" { feed.unity_series.get(&version::series(&inst.version)).map(|v| v.as_slice())? } else { feed.list(key) };
-    let allow_pre = is_pre(&inst.version);
+    let list: &[Rel] = list_for(inst, feed)?;
+    let allow_pre = choice.unwrap_or_else(|| is_pre(&inst.version));
     // A release without a download address (a Unity Hub version the notes page lists before
     // the update feed has it) cannot be installed, so it is never offered.
     let usable = |r: &&Rel| !r.url.is_empty() && (allow_pre || !r.prerelease);
@@ -1151,6 +1179,11 @@ fn with_fallback_notes(key: &str, list: &mut [Rel]) {
 
 /// Versions an installed app can be set to (newest first, at most 25).
 pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>> {
+    versions_with(inst, feed, None).await
+}
+
+/// `versions` with the user's choice of pre-releases for the app (None: as the copy is).
+pub async fn versions_with(inst: &Installed, feed: &Feed, choice: Option<bool>) -> Result<Vec<VersionInfo>> {
     let key = tools_key(inst).to_string();
     let d = def(&key).ok_or_else(|| anyhow!("unknown app"))?;
     let mut list: Vec<Rel> = match key.as_str() {
@@ -1174,7 +1207,7 @@ pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>>
     if list.is_empty() {
         bail!("{} has no other versions to choose from", d.name);
     }
-    let allow_pre = is_pre(&inst.version);
+    let allow_pre = choice.unwrap_or_else(|| is_pre(&inst.version));
     if !allow_pre {
         trim_pre(&mut list);
     }

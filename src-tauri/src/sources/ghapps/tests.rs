@@ -115,22 +115,22 @@ fn tidalunar_answer() -> Value {
 fn a_project_that_flags_its_dev_builds_offers_its_normal_releases() {
     let rels = parse_releases(&tidalunar_answer());
     // Its normal releases are all named "-alpha": only GitHub's flag tells a dev build.
-    assert_eq!(newest(&rels, "0.0.18-alpha").map(|r| r.version.as_str()), Some("0.0.19-alpha"));
+    assert_eq!(newest(&rels, "0.0.18-alpha", None).map(|r| r.version.as_str()), Some("0.0.19-alpha"));
     assert!(fits("0.0.18-alpha", &rels));
-    let r = newest(&rels, "0.0.18-alpha").unwrap();
+    let r = newest(&rels, "0.0.18-alpha", None).unwrap();
     assert_eq!(installer_for(r, Kind::Nsis, "x64").map(|a| a.name.as_str()), Some("tidalunar_0.0.19-alpha_x64.exe"));
     let e = UninstallEntry { key: "TidaLunar".into(), hive: "HKCU", display_name: "TidaLunar".into(), display_version: "0.0.18-alpha".into(), url_info_about: "https://github.com/Inrixia/TidaLuna".into(), ..Default::default() };
     let i = program(&e);
     let mut f = Feed::default();
     f.apps.insert(i.id.clone(), Tracked { repo: "Brskt/TidaLuna".into(), kind: Kind::Nsis });
     f.repos.insert("brskt/tidaluna".into(), rels.clone());
-    let list = versions(&i, &f);
+    let list = versions(&i, &f, None);
     // Dev builds older than the newest normal release are left out; the normal ones are not pre-releases.
     assert_eq!(list.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["0.0.19-alpha", "0.0.18-alpha"]);
     assert!(list.iter().all(|v| !v.prerelease));
     assert!(list[0].latest && list[1].installed);
     // A copy on a dev build moves on to the next normal release too.
-    assert_eq!(newest(&rels, "0.0.19-alpha.dev.3").map(|r| r.version.as_str()), Some("0.0.19-alpha"));
+    assert_eq!(newest(&rels, "0.0.19-alpha.dev.3", None).map(|r| r.version.as_str()), Some("0.0.19-alpha"));
 }
 
 #[test]
@@ -160,13 +160,36 @@ fn releases_are_read_newest_first_without_drafts_or_foreign_files() {
 #[test]
 fn a_pre_release_copy_moves_to_the_newer_final_release() {
     let rels = parse_releases(&answer());
-    assert_eq!(newest(&rels, "1.0.2-alpha.3").map(|r| r.version.as_str()), Some("1.1.0"));
+    assert_eq!(newest(&rels, "1.0.2-alpha.3", None).map(|r| r.version.as_str()), Some("1.1.0"));
     // A final copy is never offered a pre-release; a pre-release copy is.
     let mut v = answer();
     v.as_array_mut().unwrap().push(release("v1.2.0-beta.1", true, vec![]));
     let rels = parse_releases(&v);
-    assert_eq!(newest(&rels, "1.1.0").map(|r| r.version.as_str()), Some("1.1.0"));
-    assert_eq!(newest(&rels, "1.0.2-alpha.3").map(|r| r.version.as_str()), Some("1.2.0-beta.1"));
+    assert_eq!(newest(&rels, "1.1.0", None).map(|r| r.version.as_str()), Some("1.1.0"));
+    assert_eq!(newest(&rels, "1.0.2-alpha.3", None).map(|r| r.version.as_str()), Some("1.2.0-beta.1"));
+    // The user's own choice for the app wins over what the copy is.
+    assert_eq!(newest(&rels, "1.1.0", Some(true)).map(|r| r.version.as_str()), Some("1.2.0-beta.1"));
+    assert_eq!(newest(&rels, "1.0.2-alpha.3", Some(false)).map(|r| r.version.as_str()), Some("1.1.0"));
+}
+
+#[test]
+fn a_program_with_pre_releases_offers_the_choice() {
+    let e = tidalfast();
+    let mut i = program(&e);
+    i.version = "1.1.0".into();
+    let tracked = |v: Value| {
+        let rels = parse_releases(&v);
+        Feed { apps: [(i.id.clone(), Tracked { repo: "CIoudGuy/tidalfast".into(), kind: Kind::Nsis })].into_iter().collect(), repos: [("cioudguy/tidalfast".to_string(), rels)].into_iter().collect(), about: Default::default() }
+    };
+    // Only final releases: nothing to choose.
+    let finals = tracked(json!([release("v1.1.0", false, vec![]), release("v1.0.0", false, vec![])]));
+    assert_eq!(follows_pre(&i, &finals, None), None);
+    // A beta newer than the copy: the choice is offered, stable until the user picks it.
+    let with = tracked(json!([release("v1.2.0-beta.1", true, vec![]), release("v1.1.0", false, vec![])]));
+    assert_eq!(follows_pre(&i, &with, None), Some(false));
+    assert_eq!(follows_pre(&i, &with, Some(true)), Some(true));
+    assert_eq!(latest(&i, &with, None).map(|l| l.version), Some("1.1.0".to_string()));
+    assert_eq!(latest(&i, &with, Some(true)).map(|l| l.version), Some("1.2.0-beta.1".to_string()));
 }
 
 #[test]
@@ -178,14 +201,14 @@ fn an_old_tag_numbered_another_way_is_not_the_newest() {
         r
     };
     let rels = parse_releases(&json!([at("v1.13.2", "2025-11-20T10:00:00Z"), at("v1.13.1", "2025-07-10T10:00:00Z"), at("release-120715", "2012-07-15T10:00:00Z")]));
-    assert_eq!(newest(&rels, "1.13.1").map(|r| r.version.as_str()), Some("1.13.2"));
+    assert_eq!(newest(&rels, "1.13.1", None).map(|r| r.version.as_str()), Some("1.13.2"));
     let i = program(&UninstallEntry { display_name: "ninja".into(), display_version: "1.13.1".into(), ..tidalfast() });
     let f = feed_for(&i, Kind::Inno, &json!([at("v1.13.2", "2025-11-20T10:00:00Z"), at("v1.13.1", "2025-07-10T10:00:00Z"), at("release-120715", "2012-07-15T10:00:00Z")]));
-    assert_eq!(latest(&i, &f).map(|l| l.version), Some("1.13.2".into()));
-    assert_eq!(versions(&i, &f).iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.13.2", "1.13.1"]);
+    assert_eq!(latest(&i, &f, None).map(|l| l.version), Some("1.13.2".into()));
+    assert_eq!(versions(&i, &f, None).iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.13.2", "1.13.1"]);
     // A new first number, once it is out, is the newest.
     let rels = parse_releases(&json!([at("v2.0.0", "2026-01-05T10:00:00Z"), at("v1.13.2", "2025-11-20T10:00:00Z")]));
-    assert_eq!(newest(&rels, "1.13.2").map(|r| r.version.as_str()), Some("2.0.0"));
+    assert_eq!(newest(&rels, "1.13.2", None).map(|r| r.version.as_str()), Some("2.0.0"));
 }
 
 #[test]
@@ -217,19 +240,19 @@ fn an_installer_without_a_checksum_or_one_of_several_is_not_run() {
 fn a_program_from_github_gets_its_newest_version_and_history() {
     let i = program(&tidalfast());
     let f = feed_for(&i, Kind::Inno, &answer());
-    let l = latest(&i, &f).unwrap();
+    let l = latest(&i, &f, None).unwrap();
     assert_eq!(l.version, "1.1.0");
     assert_eq!(l.size, Some(14356377));
-    assert_eq!(manual_page(&i, &f), None);
+    assert_eq!(manual_page(&i, &f, None), None);
     assert!(can_roll_back(&i, &f));
-    let list = versions(&i, &f);
+    let list = versions(&i, &f, None);
     assert_eq!(list.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.1.0", "1.0.1"]);
     assert!(list[0].latest && !list[1].latest);
     assert!(list[0].notes.iter().any(|n| n.contains("Plugins work like in TidaLuna")), "{:?}", list[0].notes);
     assert_eq!(list[0].notes_url.as_deref(), Some("https://github.com/CIoudGuy/tidalfast/releases/tag/v1.1.0"));
     // Another program is not this project's.
     let other = program(&UninstallEntry { key: "Other".into(), display_name: "Other".into(), ..tidalfast() });
-    assert!(latest(&other, &f).is_none() && versions(&other, &f).is_empty());
+    assert!(latest(&other, &f, None).is_none() && versions(&other, &f, None).is_empty());
 }
 
 #[test]
@@ -237,8 +260,8 @@ fn a_release_with_no_installer_to_run_opens_its_page() {
     let i = program(&tidalfast());
     // An uninstaller of unknown type: the newest version shows, its page has the download.
     let f = feed_for(&i, Kind::Unknown, &answer());
-    assert_eq!(latest(&i, &f).map(|l| l.version), Some("1.1.0".into()));
-    assert_eq!(manual_page(&i, &f).as_deref(), Some("https://github.com/CIoudGuy/tidalfast/releases/tag/v1.1.0"));
+    assert_eq!(latest(&i, &f, None).map(|l| l.version), Some("1.1.0".into()));
+    assert_eq!(manual_page(&i, &f, None).as_deref(), Some("https://github.com/CIoudGuy/tidalfast/releases/tag/v1.1.0"));
     assert!(!can_roll_back(&i, &f));
 }
 
@@ -249,7 +272,7 @@ fn older_pre_releases_are_left_out_of_the_history() {
     v.as_array_mut().unwrap().push(release("v1.1.0-rc.1", true, vec![]));
     v.as_array_mut().unwrap().push(release("v1.2.0-beta.1", true, vec![]));
     let f = feed_for(&i, Kind::Inno, &v);
-    let list = versions(&i, &f);
+    let list = versions(&i, &f, None);
     assert_eq!(list.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.2.0-beta.1", "1.1.0", "1.0.1"]);
     assert!(list[0].prerelease && !list[0].latest);
     assert!(list[1].installed && list[1].latest);
@@ -319,7 +342,7 @@ fn live_this_pc() {
             eprintln!("{} {}: {o}/{r}, {} releases, not its own", e.display_name, e.display_version, rels.len());
             continue;
         }
-        let top = newest(&rels, &e.display_version);
+        let top = newest(&rels, &e.display_version, None);
         let file = top.and_then(|t| installer_for(t, kind, "x64"));
         eprintln!("{} {}: {o}/{r} ({kind:?}), newest {:?}, installer {:?}", e.display_name, e.display_version, top.map(|t| &t.version), file.map(|a| &a.name));
     }
@@ -334,7 +357,7 @@ async fn live_tidalfast_releases() {
         Ok(p) => parse_releases(&serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()),
         Err(_) => releases("cioudguy/tidalfast").await,
     };
-    let r = newest(&rels, "1.0.2-alpha.3").expect("a release");
+    let r = newest(&rels, "1.0.2-alpha.3", None).expect("a release");
     let a = installer_for(r, Kind::Inno, "x64").expect("its setup");
     eprintln!("{} {} {:?}", r.version, a.name, a.sha256);
     assert!(a.name.ends_with("-setup.exe"));

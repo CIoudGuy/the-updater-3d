@@ -200,6 +200,32 @@ fn offers_the_newest_stable_release_unless_a_pre_release_is_installed() {
 }
 
 #[test]
+fn the_users_choice_of_pre_releases_wins_and_a_final_release_follows_a_beta() {
+    let feed = feed_with("obs", vec![rel("33.0.0-rc3", true), rel("32.2.2", false), rel("32.2.1", false)]);
+    let stable = inst("obs", "tools:obs", "32.2.2", "");
+    let one = |i: &Installed, f: &Feed, c: Option<bool>| latest_with(i, std::slice::from_ref(i), f, c).unwrap().version;
+    // A final copy set to pre-releases gets the release candidate.
+    assert_eq!(one(&stable, &feed, Some(true)), "33.0.0-rc3");
+    // A release candidate set back to stable stays as it is (nothing final is newer yet) ...
+    let testing = inst("obs", "tools:obs", "33.0.0-rc3", "");
+    assert_eq!(one(&testing, &feed, Some(false)), "33.0.0-rc3");
+    // ... until the final release is out, which is an update for it either way.
+    let out = feed_with("obs", vec![rel("33.0.0", false), rel("33.0.0-rc3", true), rel("32.2.2", false)]);
+    assert_eq!(one(&testing, &out, Some(false)), "33.0.0");
+    assert_eq!(one(&testing, &out, None), "33.0.0");
+    // The choice shows only where there is a pre-release to choose.
+    assert_eq!(follows_pre(&stable, &feed, None), Some(false));
+    assert_eq!(follows_pre(&testing, &feed, None), Some(true));
+    assert_eq!(follows_pre(&stable, &feed, Some(true)), Some(true));
+    let finals = feed_with("obs", vec![rel("32.2.2", false)]);
+    assert_eq!(follows_pre(&stable, &finals, None), None);
+    // An app that installs each series side by side: only its own series' pre-releases count.
+    let godot = inst("godot", "tools:godot:4.7.2", "4.7.2", "4.7.2");
+    assert_eq!(follows_pre(&godot, &feed_with("godot", vec![rel("4.8-beta1", true), rel("4.7.2", false)]), None), None);
+    assert_eq!(follows_pre(&godot, &feed_with("godot", vec![rel("4.7.3-rc1", true), rel("4.7.2", false)]), None), Some(false));
+}
+
+#[test]
 fn freecad_series_update_in_place_and_the_newest_series_is_offered_the_next() {
     let feed = feed_with("freecad", vec![rel("26.3", false), rel("1.1.4", false), rel("1.1.3", false), rel("1.0.2", false)]);
     let old = inst("freecad", "tools:freecad:1.0", "1.0.1", "1.0");

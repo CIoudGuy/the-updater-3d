@@ -57,6 +57,8 @@ export interface AppEntry {
   github?: string | null;
   /** The Updater 3D itself: its page is the app's own page, and it updates itself its own way. */
   isSelf?: boolean;
+  /** The app publishes pre-releases the user can choose for it: whether it follows them now. Null when there is nothing to choose (an Other app: until its version list shows pre-releases). */
+  preChannel?: boolean | null;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */
@@ -289,6 +291,8 @@ export interface Settings {
   downloadDir?: string;
   /** Where new apps from the catalog are installed when their installer can be told; empty: where each installer puts it */
   installRoot?: string;
+  /** Apps the user chose updates for: true gets their pre-releases (betas, release candidates), false only final versions */
+  preReleases?: Record<string, boolean>;
   /** "beta" (default) also lists Blender alpha, beta and release candidate builds; "stable" hides them */
   blenderChannel: "stable" | "beta";
   /** Bug-fix releases (5.2.2 -> 5.2.3) keep the old copy instead of replacing it */

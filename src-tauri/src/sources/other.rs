@@ -2386,22 +2386,141 @@ async fn pkg_and_versions(id: &str, feed: Option<&Feed>) -> Result<(Pkg, Vec<Ver
     Ok((p, v, None))
 }
 
-/// Versions an installed app can be set to, newest first, with their change lists.
-pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>> {
+/// Versions an installed app can be set to, newest first, with their change lists: the catalog's,
+/// and its GitHub pre-releases newer than them (`follows`: the app follows pre-releases).
+pub async fn versions(inst: &Installed, feed: &Feed, follows: bool) -> Result<Vec<VersionInfo>> {
     let (_, list, latest) = pkg_and_versions(pkg_of(inst), Some(feed)).await?;
     if list.is_empty() {
         bail!("{} has no versions in the winget catalog", inst.name);
     }
-    Ok(version_infos(&list, Some(&inst.version), &Want::for_installed(inst), latest.as_ref()).await)
+    let w = Want::for_installed(inst);
+    let base = newest_manifest(&list, latest).await;
+    let infos = version_infos(&list, Some(&inst.version), &w, base.as_ref()).await;
+    Ok(with_pre(infos, base.as_ref(), &w, Some(&inst.version), follows).await)
 }
 
-/// Versions offered on a Get apps page ("other:<package id>").
+/// Versions offered on a Get apps page ("other:<package id>"), its GitHub pre-releases included.
 pub async fn catalog_versions(id: &str, feed: Option<&Feed>, installed: &[Installed]) -> Result<Vec<VersionInfo>> {
     let pkg_id = id.strip_prefix("other:").unwrap_or(id);
     let (_, list, latest) = pkg_and_versions(pkg_id, feed).await?;
     let here = installed.iter().find(|i| pkg_of(i).eq_ignore_ascii_case(pkg_id));
     let want = here.map(Want::for_installed).unwrap_or_else(Want::fresh);
-    Ok(version_infos(&list, here.map(|i| i.version.as_str()), &want, latest.as_ref()).await)
+    let base = newest_manifest(&list, latest).await;
+    let infos = version_infos(&list, here.map(|i| i.version.as_str()), &want, base.as_ref()).await;
+    Ok(with_pre(infos, base.as_ref(), &want, here.map(|i| i.version.as_str()), false).await)
+}
+
+// ---------------------------------------------------------------- pre-releases from GitHub
+
+/// The installer of a pre-release for the catalog's installer `stable` of version `stable_ver`:
+/// the release's file named the same way with its version in place of the catalog's
+/// ("ShareX-21.0.0-setup-x64.exe" becomes "ShareX-22.0.0-setup-x64.exe"), checked by GitHub's own
+/// checksum of it. It installs the same way (the same type and switches); what only one version
+/// can say (its product code, what it writes to Windows' list) is left out.
+pub fn pre_installer(stable: &Installer, stable_ver: &str, rel: &super::ghapps::Release) -> Option<Installer> {
+    let last = stable.url.split(['?', '#']).next()?.rsplit('/').next()?;
+    let name = percent_decode(last);
+    let bare = |v: &str| v.trim().trim_start_matches(['v', 'V']).to_string();
+    let (sv, rv) = (bare(stable_ver), bare(&rel.version));
+    let want = if !sv.is_empty() && name.contains(&sv) { name.replace(&sv, &rv) } else { name };
+    let a = rel.assets.iter().find(|a| a.name.eq_ignore_ascii_case(&want))?;
+    let sha256 = a.sha256.clone()?;
+    Some(Installer { url: a.url.clone(), sha256, product_code: None, arp: vec![], release_date: rel.date.clone(), ..stable.clone() })
+}
+
+/// The project whose releases the catalog's installer is downloaded from: only then are its
+/// releases the files the catalog lists, so a pre-release installs the same way.
+fn installer_repo(i: &Installer) -> Option<String> {
+    if !i.url.contains("/releases/download/") {
+        return None;
+    }
+    github_repo(&i.url).map(|(o, r)| format!("{o}/{r}"))
+}
+
+/// The pre-releases among `rels` newer than the catalog's newest version `m` that install here
+/// like `stable` does, newest first.
+pub fn pre_of(rels: &[super::ghapps::Release], m: &Manifest, stable: &Installer) -> Vec<(super::ghapps::Release, Installer)> {
+    let mut out: Vec<(super::ghapps::Release, Installer)> = rels.iter().filter(|r| r.prerelease && is_newer(&r.version, &m.version)).filter_map(|r| pre_installer(stable, &m.version, r).map(|i| (r.clone(), i))).collect();
+    out.sort_by(|a, b| super::tools::cmp_ver(&b.0.version, &a.0.version));
+    out
+}
+
+/// The pre-releases of a package newer than its catalog version `m`, from its GitHub releases.
+pub async fn pre_releases(m: &Manifest, w: &Want) -> Vec<(super::ghapps::Release, Installer)> {
+    let Ok(stable) = choose(m, w) else { return vec![] };
+    let Some(repo) = installer_repo(stable) else { return vec![] };
+    let rels = super::ghapps::releases(&repo).await;
+    pre_of(&rels, m, stable)
+}
+
+/// The newest pre-release of each installed app that follows pre-releases (app id -> version).
+pub async fn newest_pre(apps: &[Installed], feed: &Feed) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for i in apps {
+        let Some(m) = feed.get(pkg_of(i)).and_then(|pf| pf.latest.as_ref()) else { continue };
+        if let Some((r, _)) = pre_releases(m, &Want::for_installed(i)).await.into_iter().next() {
+            out.insert(i.id.clone(), r.version);
+        }
+    }
+    out
+}
+
+/// The catalog's newest manifest of a package (read when the feed does not have it).
+async fn newest_manifest(list: &[VerRef], latest: Option<Manifest>) -> Option<Manifest> {
+    let first = list.first()?;
+    match latest.filter(|m| m.version == first.version) {
+        Some(m) => Some(m),
+        None => winget::manifest(first).await.ok(),
+    }
+}
+
+/// The version list with the package's GitHub pre-releases newer than its catalog version on
+/// top, marked. When the app follows pre-releases (`follows`), the newest is its latest.
+async fn with_pre(list: Vec<VersionInfo>, base: Option<&Manifest>, w: &Want, installed: Option<&str>, follows: bool) -> Vec<VersionInfo> {
+    let Some(m) = base else { return list };
+    let pres = pre_releases(m, w).await;
+    if pres.is_empty() {
+        return list;
+    }
+    let mut out: Vec<VersionInfo> = pres
+        .iter()
+        .enumerate()
+        .map(|(k, (r, i))| VersionInfo {
+            version: r.version.clone(),
+            date: r.date.clone(),
+            notes: crate::notes::text_lines(&r.body),
+            notes_url: Some(r.url.clone()).filter(|u| !u.is_empty()),
+            size: r.assets.iter().find(|a| a.url == i.url).and_then(|a| a.size),
+            installed: installed.is_some_and(|v| version::cmp(v, &r.version).is_eq()),
+            latest: follows && k == 0,
+            prerelease: true,
+        })
+        .collect();
+    out.extend(list.into_iter().map(|mut v| {
+        if follows {
+            v.latest = false;
+        }
+        v
+    }));
+    out
+}
+
+/// The plan that installs the pre-release `ver` of a package (from its GitHub releases), as its
+/// catalog version `base` installs. None when the package has no such pre-release.
+async fn plan_pre(p: &Pkg, base: &Manifest, w: &Want, ver: &str, kind: JobKind, current: Option<&Installed>) -> Result<Option<Plan>> {
+    let pres = pre_releases(base, w).await;
+    let Some((rel, inst)) = pres.into_iter().find(|(r, _)| r.version.eq_ignore_ascii_case(ver) || version::cmp(&r.version, ver).is_eq()) else { return Ok(None) };
+    if current.is_some() && inst.upgrade_behavior.as_deref() == Some("deny") {
+        bail!("The catalog says {} can not be installed over the copy that is here. Uninstall it first.", current.map(|c| c.name.as_str()).unwrap_or(&p.name));
+    }
+    let size = rel.assets.iter().find(|a| a.url == inst.url).and_then(|a| a.size);
+    let m = Manifest { version: rel.version.clone(), release_notes_url: Some(rel.url.clone()).filter(|u| !u.is_empty()), release_date: rel.date.clone(), installers: vec![inst], ..base.clone() };
+    let kind = match (kind, current) {
+        (JobKind::Update | JobKind::Rollback, Some(c)) if is_newer(&c.version, &m.version) => JobKind::Rollback,
+        (JobKind::Update | JobKind::Rollback, Some(_)) => JobKind::Update,
+        (k, _) => k,
+    };
+    Ok(Some(build_plan(p, &m, &m.installers[0], kind, current, size)?))
 }
 
 // ---------------------------------------------------------------- plans
@@ -2637,11 +2756,20 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
             found.ok_or_else(|| anyhow!("{label} {} is not in the winget catalog any more", c.version))?
         }
         _ => {
-            let r = match ver {
+            let found = match ver {
                 Some(v) => list.iter().find(|r| r.version == v).or_else(|| list.iter().find(|r| version::cmp(&r.version, v).is_eq())),
                 None => list.first(),
+            };
+            // Not a catalog version: one of the package's GitHub pre-releases, installed as its
+            // newest catalog version installs.
+            if let (None, Some(v)) = (found, ver) {
+                if let Some(base) = newest_manifest(&list, latest.clone()).await {
+                    if let Some(plan) = plan_pre(&p, &base, &w, v, kind, current).await? {
+                        return Ok(plan);
+                    }
+                }
             }
-            .ok_or_else(|| anyhow!("{label} {} is not in the winget catalog", ver.unwrap_or_default()))?;
+            let r = found.ok_or_else(|| anyhow!("{label} {} is not in the winget catalog", ver.unwrap_or_default()))?;
             match latest.filter(|m| m.version == r.version) {
                 Some(m) => m,
                 None => winget::manifest(r).await?,

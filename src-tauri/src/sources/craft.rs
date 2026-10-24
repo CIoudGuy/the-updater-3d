@@ -86,6 +86,10 @@ impl Release {
 pub struct Feed {
     /// key -> newest release (respecting the pre-release setting)
     pub latest: std::collections::HashMap<String, Release>,
+    /// key -> newest final release
+    pub stable: std::collections::HashMap<String, Release>,
+    /// key -> newest pre-release, when it is newer than the newest final release
+    pub pre: std::collections::HashMap<String, Release>,
 }
 
 // ---------------------------------------------------------------- feeds
@@ -102,28 +106,44 @@ pub async fn fetch(prereleases: bool) -> Result<Feed> {
                             continue;
                         }
                         let rel = parse_feed_release(lr);
-                        if rel.prerelease && !prereleases {
+                        if rel.prerelease {
+                            // Its newest final release comes from GitHub, below.
+                            feed.pre.insert(key.clone(), rel);
                             continue;
                         }
-                        feed.latest.insert(key.clone(), rel);
+                        feed.stable.insert(key.clone(), rel);
                     }
                 }
             }
         }
         Err(e) => log::warn!("craft feed: {e}"),
     }
-    // Apps the feed does not list (FigCraft, ArtCraft today) come from GitHub.
+    // Apps the feed does not list (FigCraft, ArtCraft today), and the final release of an app the
+    // feed lists a pre-release of, come from GitHub.
     for a in APPS {
-        if feed.latest.contains_key(a.key) {
+        if feed.stable.contains_key(a.key) {
             continue;
         }
-        match releases(a, prereleases).await {
+        match releases(a, true).await {
             Ok(list) => {
-                if let Some(r) = list.into_iter().next() {
-                    feed.latest.insert(a.key.to_string(), r);
+                let (stable, pre) = split_newest(list);
+                if let Some(r) = stable {
+                    feed.stable.insert(a.key.to_string(), r);
+                }
+                if let Some(r) = pre {
+                    feed.pre.entry(a.key.to_string()).or_insert(r);
                 }
             }
             Err(e) => log::warn!("{}: {e}", a.repo),
+        }
+    }
+    // A pre-release no newer than the final release is not one to move to.
+    let stable = feed.stable.clone();
+    feed.pre.retain(|k, r| stable.get(k).is_none_or(|s| version::newer(&r.version, &s.version)));
+    for a in APPS {
+        let newest = if prereleases { feed.pre.get(a.key).or(feed.stable.get(a.key)) } else { feed.stable.get(a.key) };
+        if let Some(r) = newest {
+            feed.latest.insert(a.key.to_string(), r.clone());
         }
     }
     if feed.latest.is_empty() {
@@ -335,10 +355,34 @@ pub fn scan(uninstall: &[winutil::UninstallEntry]) -> Vec<Installed> {
     out
 }
 
+/// The newest final release and the newest pre-release of a release list (newest first).
+pub fn split_newest(list: Vec<Release>) -> (Option<Release>, Option<Release>) {
+    let stable = list.iter().find(|r| !r.prerelease).cloned();
+    let pre = list.into_iter().find(|r| r.prerelease);
+    (stable, pre)
+}
+
 pub fn latest(inst: &Installed, feed: &Feed) -> Option<Latest> {
+    latest_with(inst, feed, None)
+}
+
+/// The newest release an installed app is offered: its pre-releases when the user chose them for
+/// it (`choice`), else as the Craft apps' pre-release setting says.
+pub fn latest_with(inst: &Installed, feed: &Feed, choice: Option<bool>) -> Option<Latest> {
     let SourceData::Craft { key, .. } = &inst.data else { return None };
-    let r = feed.latest.get(key)?;
+    let r = match choice {
+        Some(true) => feed.pre.get(key).or_else(|| feed.stable.get(key)),
+        Some(false) => feed.stable.get(key),
+        None => feed.latest.get(key),
+    }?;
     Some(Latest { version: r.version.clone(), size: r.installer().and_then(|a| a.size), note: None })
+}
+
+/// Does the app have a pre-release out (or did the user choose for it)? Then the user can
+/// choose: what it follows now (`choice`, else the Craft apps' setting).
+pub fn follows_pre(inst: &Installed, feed: &Feed, choice: Option<bool>, setting: bool) -> Option<bool> {
+    let SourceData::Craft { key, .. } = &inst.data else { return None };
+    (feed.pre.contains_key(key) || choice.is_some()).then(|| choice.unwrap_or(setting))
 }
 
 pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry> {
@@ -370,10 +414,15 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
     out
 }
 
+/// The versions of an app, newest first. Pre-releases newer than the newest final release are
+/// listed (marked) whatever `prereleases` says, so they can be chosen; it says which is the newest.
 pub async fn versions(key: &str, installed: Option<&str>, prereleases: bool) -> Result<Vec<VersionInfo>> {
     let a = def(key).ok_or_else(|| anyhow!("unknown app"))?;
-    let list = releases(a, prereleases).await?;
-    let newest = list.first().map(|r| r.version.clone());
+    let mut list = releases(a, true).await?;
+    if let Some(stable) = list.iter().find(|r| !r.prerelease).map(|r| r.version.clone()) {
+        list.retain(|r| !r.prerelease || version::newer(&r.version, &stable) || installed.is_some_and(|v| version::cmp(v, &r.version).is_eq()));
+    }
+    let newest = list.iter().find(|r| prereleases || !r.prerelease).map(|r| r.version.clone());
     Ok(list
         .into_iter()
         .take(25)
@@ -512,6 +561,54 @@ pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rel(v: &str, pre: bool) -> Release {
+        Release { version: v.into(), date: None, prerelease: pre, notes: String::new(), url: None, assets: vec![] }
+    }
+
+    #[test]
+    fn each_app_follows_pre_releases_by_its_own_choice() {
+        let inst = Installed {
+            id: "craft:photocraft".into(),
+            source: Source::Craft,
+            name: "PhotoCraft".into(),
+            code: "Ph".into(),
+            fg: String::new(),
+            bg: String::new(),
+            version: "1.4.0".into(),
+            install_dir: None,
+            exe: None,
+            uninstall: None,
+            updated_at: None,
+            size_hint: None,
+            tagline: None,
+            channel: None,
+            missing: false,
+            read_only: false,
+            icon_remote: None,
+            data: SourceData::Craft { key: "photocraft".into(), msi_product_code: None },
+            store: None,
+        };
+        let mut feed = Feed::default();
+        feed.stable.insert("photocraft".into(), rel("1.5.0", false));
+        feed.pre.insert("photocraft".into(), rel("1.6.0-beta.2", true));
+        // The Craft apps' setting is off: the newest is the final release.
+        feed.latest.insert("photocraft".into(), rel("1.5.0", false));
+        let v = |c: Option<bool>| latest_with(&inst, &feed, c).map(|l| l.version);
+        assert_eq!(v(None).as_deref(), Some("1.5.0"));
+        assert_eq!(v(Some(true)).as_deref(), Some("1.6.0-beta.2"));
+        assert_eq!(v(Some(false)).as_deref(), Some("1.5.0"));
+        // The choice is offered while a pre-release is out, or once the user made one.
+        assert_eq!(follows_pre(&inst, &feed, None, false), Some(false));
+        assert_eq!(follows_pre(&inst, &feed, None, true), Some(true));
+        let quiet = Feed { pre: Default::default(), ..feed.clone() };
+        assert_eq!(follows_pre(&inst, &quiet, None, false), None);
+        assert_eq!(follows_pre(&inst, &quiet, Some(true), false), Some(true));
+        // With no pre-release out, following them gets the final release.
+        assert_eq!(latest_with(&inst, &quiet, Some(true)).map(|l| l.version).as_deref(), Some("1.5.0"));
+        let (s, p) = split_newest(vec![rel("2.0.0-rc.1", true), rel("1.9.0", false), rel("1.9.0-rc.1", true)]);
+        assert_eq!((s.map(|r| r.version), p.map(|r| r.version)), (Some("1.9.0".to_string()), Some("2.0.0-rc.1".to_string())));
+    }
 
     #[test]
     fn notes_become_plain_bullets() {

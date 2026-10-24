@@ -925,3 +925,78 @@ fn a_new_app_folder_is_named_after_its_package() {
     assert_eq!(folder_name("Example.Tool:user"), "Tooluser");
     assert_eq!(folder_name("..."), "App");
 }
+
+fn gh_rel(version: &str, pre: bool, files: &[(&str, Option<&str>)]) -> crate::sources::ghapps::Release {
+    crate::sources::ghapps::Release {
+        tag: format!("v{version}"),
+        version: version.into(),
+        body: "- Added a thing".into(),
+        url: format!("https://github.com/ShareX/ShareX/releases/tag/v{version}"),
+        date: Some("2026-10-20T02:51:41Z".into()),
+        prerelease: pre,
+        assets: files.iter().map(|(n, sha)| crate::sources::ghapps::Asset { name: n.to_string(), url: format!("https://github.com/ShareX/ShareX/releases/download/v{version}/{n}"), size: Some(140_000_000), sha256: sha.map(String::from) }).collect(),
+    }
+}
+
+fn sharex_21() -> (Manifest, Installer) {
+    let i = Installer {
+        arch: "x64".into(),
+        kind: "inno".into(),
+        url: "https://github.com/ShareX/ShareX/releases/download/v21.0.0/ShareX-21.0.0-setup-x64.exe".into(),
+        sha256: "aa".repeat(32),
+        scope: Some("machine".into()),
+        product_code: Some("82E6AC09-0FEF-4390-AD9F-0DD3F5561EFC_is1".into()),
+        arp: vec![ArpEntry { display_version: Some("21.0.0".into()), ..Default::default() }],
+        ..Default::default()
+    };
+    (Manifest { id: "ShareX.ShareX".into(), version: "21.0.0".into(), name: "ShareX".into(), installers: vec![i.clone()], ..Default::default() }, i)
+}
+
+#[test]
+fn a_github_pre_release_installs_with_the_catalogs_installer_type_and_its_own_checksum() {
+    let (m, stable) = sharex_21();
+    let sha = "bb".repeat(32);
+    let rels = vec![
+        gh_rel("22.0.0", true, &[("ShareX-22.0.0-portable-x64.zip", Some(&sha)), ("ShareX-22.0.0-setup-x64.exe", Some(&sha))]),
+        gh_rel("21.0.0", false, &[("ShareX-21.0.0-setup-x64.exe", Some(&"aa".repeat(32)))]),
+        gh_rel("20.9.0", true, &[("ShareX-20.9.0-setup-x64.exe", Some(&sha))]),
+    ];
+    let pres = pre_of(&rels, &m, &stable);
+    // Only pre-releases newer than the catalog's version, with the same file the catalog lists.
+    assert_eq!(pres.iter().map(|(r, _)| r.version.as_str()).collect::<Vec<_>>(), vec!["22.0.0"]);
+    let i = &pres[0].1;
+    assert_eq!(i.url, "https://github.com/ShareX/ShareX/releases/download/v22.0.0/ShareX-22.0.0-setup-x64.exe");
+    assert_eq!(i.sha256, sha);
+    assert_eq!((i.kind.as_str(), i.scope.as_deref()), ("inno", Some("machine")));
+    // What only 21.0.0 can say is not carried over.
+    assert!(i.product_code.is_none() && i.arp.is_empty());
+    // No checksum from GitHub, or no file named like the catalog's: not offered.
+    let unchecked = vec![gh_rel("22.0.0", true, &[("ShareX-22.0.0-setup-x64.exe", None)])];
+    assert!(pre_of(&unchecked, &m, &stable).is_empty());
+    let renamed = vec![gh_rel("22.0.0", true, &[("ShareX-Setup.exe", Some(&sha))])];
+    assert!(pre_of(&renamed, &m, &stable).is_empty());
+    // A release candidate of the version the catalog has is not newer.
+    let older = vec![gh_rel("21.0.0-rc1", true, &[("ShareX-21.0.0-rc1-setup-x64.exe", Some(&sha))])];
+    assert!(pre_of(&older, &m, &stable).is_empty());
+}
+
+#[test]
+fn only_an_installer_from_the_projects_releases_gets_its_pre_releases() {
+    let (_, stable) = sharex_21();
+    assert_eq!(installer_repo(&stable).as_deref(), Some("ShareX/ShareX"));
+    let elsewhere = Installer { url: "https://download.example.com/ShareX-21.0.0-setup-x64.exe".into(), ..stable.clone() };
+    assert_eq!(installer_repo(&elsewhere), None);
+    let source = Installer { url: "https://github.com/ShareX/ShareX/archive/refs/tags/v21.0.0.zip".into(), ..stable };
+    assert_eq!(installer_repo(&source), None);
+}
+
+/// Run with `cargo test --lib live_sharex_pre_release -- --ignored --nocapture`: the catalog's
+/// ShareX and its GitHub pre-releases.
+#[tokio::test]
+#[ignore]
+async fn live_sharex_pre_release() {
+    let (_, list, latest) = pkg_and_versions("ShareX.ShareX", None).await.unwrap();
+    let m = newest_manifest(&list, latest).await.unwrap();
+    let pres = pre_releases(&m, &Want::fresh()).await;
+    eprintln!("catalog {} | pre-releases {:?}", m.version, pres.iter().map(|(r, i)| (r.version.clone(), i.url.clone(), i.sha256.len())).collect::<Vec<_>>());
+}

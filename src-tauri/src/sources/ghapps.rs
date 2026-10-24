@@ -250,8 +250,9 @@ fn in_line(rels: &[Release]) -> Vec<&Release> {
 
 /// The newest release the installed copy may move to: a pre-release only for a copy that is a
 /// pre-release itself.
-pub fn newest<'a>(rels: &'a [Release], installed: &str) -> Option<&'a Release> {
-    let pre_ok = pre_copy(rels, installed);
+pub fn newest<'a>(rels: &'a [Release], installed: &str, choice: Option<bool>) -> Option<&'a Release> {
+    // The user's choice for the app, else what the copy here is (a pre-release keeps getting them).
+    let pre_ok = choice.unwrap_or_else(|| pre_copy(rels, installed));
     in_line(rels)
         .into_iter()
         .filter(|r| pre_ok || !pre(rels, r))
@@ -337,7 +338,7 @@ pub fn fits(installed: &str, rels: &[Release]) -> bool {
 /// not sign in, and an unchanged release list (most of them) does not count.
 const MAX_REPOS: usize = 40;
 
-async fn releases(repo: &str) -> Vec<Release> {
+pub(crate) async fn releases(repo: &str) -> Vec<Release> {
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
     let Ok(Ok(f)) = tokio::time::timeout(Duration::from_secs(15), http::get_cached(&url, &[("Accept", "application/vnd.github+json")], Duration::from_secs(30 * 60))).await else { return vec![] };
     parse_releases(&serde_json::from_slice(&f.body).unwrap_or(Value::Null))
@@ -380,19 +381,27 @@ pub async fn fetch(installed: &[Installed]) -> Feed {
     Feed { apps, repos, about }
 }
 
-/// The newest version of a program from its releases.
-pub fn latest(i: &Installed, feed: &Feed) -> Option<Latest> {
+/// The newest version of a program from its releases. `choice`: the user's choice of
+/// pre-releases for it (None: as the copy here is).
+pub fn latest(i: &Installed, feed: &Feed, choice: Option<bool>) -> Option<Latest> {
     let (t, rels) = feed.get(&i.id)?;
-    let r = newest(rels, &i.version)?;
+    let r = newest(rels, &i.version, choice)?;
     let size = installer_for(r, t.kind, other::machine_arch()).and_then(|a| a.size);
     Some(Latest { version: r.version.clone(), size, note: None })
 }
 
 /// The release page to download the newest version from, when it can not be installed here.
-pub fn manual_page(i: &Installed, feed: &Feed) -> Option<String> {
+pub fn manual_page(i: &Installed, feed: &Feed, choice: Option<bool>) -> Option<String> {
     let (t, rels) = feed.get(&i.id)?;
-    let r = newest(rels, &i.version)?;
+    let r = newest(rels, &i.version, choice)?;
     installer_for(r, t.kind, other::machine_arch()).is_none().then(|| r.url.clone()).filter(|u| !u.is_empty())
+}
+
+/// Does the program's project publish pre-releases? Then the user can choose them for it: what
+/// it follows now (`choice`, else as the copy here is). None when it has none.
+pub fn follows_pre(i: &Installed, feed: &Feed, choice: Option<bool>) -> Option<bool> {
+    let (_, rels) = feed.get(&i.id)?;
+    in_line(rels).into_iter().any(|r| pre(rels, r)).then(|| choice.unwrap_or_else(|| pre_copy(rels, &i.version)))
 }
 
 /// Can an older release be put back? Windows Installer refuses to replace a newer version.
@@ -402,9 +411,9 @@ pub fn can_roll_back(i: &Installed, feed: &Feed) -> bool {
 
 /// The version history of a program: its releases, newest first, with their change lists.
 /// Pre-releases older than the newest final release are left out.
-pub fn versions(i: &Installed, feed: &Feed) -> Vec<VersionInfo> {
+pub fn versions(i: &Installed, feed: &Feed, choice: Option<bool>) -> Vec<VersionInfo> {
     let Some((t, rels)) = feed.get(&i.id) else { return vec![] };
-    let top = newest(rels, &i.version).map(|r| r.version.clone());
+    let top = newest(rels, &i.version, choice).map(|r| r.version.clone());
     let stable = in_line(rels).into_iter().find(|r| !pre(rels, r)).map(|r| r.version.clone());
     let machine = other::machine_arch();
     in_line(rels)
@@ -430,7 +439,7 @@ pub fn plan_install(i: &Installed, version: Option<&str>, kind: JobKind, feed: O
     let (t, rels) = feed.and_then(|f| f.get(&i.id)).ok_or_else(|| anyhow!("{name}: its GitHub releases could not be read. Check your connection."))?;
     let rel = match version {
         Some(v) => rels.iter().find(|r| r.version == v),
-        None => newest(rels, &i.version),
+        None => newest(rels, &i.version, None),
     }
     .ok_or_else(|| anyhow!("{name}: that release is no longer on GitHub"))?;
     let SourceData::Other { entry, .. } = &i.data else { return Err(anyhow!("{name} is not a program from Windows' list")) };
