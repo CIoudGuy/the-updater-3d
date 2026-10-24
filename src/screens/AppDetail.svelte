@@ -29,6 +29,10 @@
   let { id }: { id: string } = $props();
 
   const app = $derived(store.app(id));
+  // This app's own entry: its page is the app's own page, with every release.
+  $effect(() => {
+    if (app?.isSelf) router.replace("updater");
+  });
   const job = $derived(app ? store.jobByApp.get(app.id) : undefined);
   const isBlender = $derived(app?.source === "blender");
   const isAdobe = $derived(app?.source === "adobe");

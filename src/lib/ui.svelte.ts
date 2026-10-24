@@ -202,6 +202,14 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
     items.push(skip);
     return items;
   }
+  if (app.isSelf) {
+    // This app: its own page has its releases; it updates itself.
+    items.push({ id: "notes", label: "What's new", icon: "notes", key: "N" });
+    if (app.installDir) items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
+    items.push({ id: "sep", label: "", divider: true });
+    items.push({ id: "uninstall", label: "Uninstall", icon: "trash", key: "Del", danger: true, disabled: !app.canUninstall });
+    return items;
+  }
   if (listedOnly(app)) {
     // No catalog: no notes or other versions. A broken one is removed from the list instead.
     if (app.installDir && app.status !== "missing") items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });

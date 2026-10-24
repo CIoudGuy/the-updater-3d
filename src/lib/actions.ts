@@ -111,8 +111,12 @@ export function updateApps(ids: string[]) {
   guard(list.map(upd), () => void send("update_apps", { appIds: list.map((a) => a.id) }), "update");
 }
 export function updateOne(id: string) {
-  // A BIOS is updated from its maker's page.
+  // A BIOS is updated from its maker's page; this app by its own update.
   const a = store.apps.find((x) => x.id === id);
+  if (a?.isSelf) {
+    void updateSelf();
+    return;
+  }
   if (a?.manualUrl && a.status === "update") {
     void send("open_driver_page", { id });
     return;

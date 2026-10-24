@@ -55,6 +55,8 @@ export interface AppEntry {
   manualUrl?: string | null;
   /** An Other program updated from its GitHub releases: "owner/repo" */
   github?: string | null;
+  /** The Updater 3D itself: its page is the app's own page, and it updates itself its own way. */
+  isSelf?: boolean;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */

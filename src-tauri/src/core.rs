@@ -43,6 +43,38 @@ fn other_icon_on_disk(id: &str) -> Option<std::path::PathBuf> {
     crate::sources::icons::on_disk(&crate::sources::icons::file_stem(id))
 }
 
+/// A folder as compared with another: lowercase, backslashes, no slash at the end.
+fn norm_dir(d: &std::path::Path) -> String {
+    d.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase()
+}
+
+/// The Updater 3D's own entry in the apps list: its update is the one its own feed offers
+/// (installed by "Update and restart", never by a job), and its page is the app's own page.
+fn mark_self(a: &mut AppEntry, ready: Option<&str>) {
+    a.is_self = true;
+    a.group = Source::Other.group().into();
+    a.tagline = Some("Keeps your apps, games and drivers up to date".into());
+    a.note = None;
+    a.can_rollback = false;
+    if a.status == AppStatus::Missing {
+        return;
+    }
+    match ready.filter(|v| version::newer(v, &a.version)) {
+        Some(v) => {
+            a.status = AppStatus::Update;
+            a.latest = Some(v.to_string());
+            // Not a job: Update all, the count and auto-install leave it out.
+            a.manual_url = Some("theupdater3d://about".into());
+        }
+        None => {
+            if a.status != AppStatus::Updating && a.status != AppStatus::Queued {
+                a.status = AppStatus::Current;
+            }
+            a.latest = Some(a.version.clone());
+        }
+    }
+}
+
 /// The launchers' games among the installed apps.
 fn games_of(v: &[Installed]) -> Vec<sources::games::Game> {
     v.iter().filter_map(|i| match &i.data {
@@ -986,6 +1018,8 @@ impl Core {
         let driver_list: Vec<drivers::Found> = if self.settings.read().sources.drivers { self.drivers.lock().found.clone() } else { vec![] };
         let ignored = self.settings.read().ignored.clone();
         let gh = self.ghapps.read().clone();
+        let me = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| norm_dir(d)));
+        let self_ready = self.self_release.lock().as_ref().map(|r| r.version.clone());
         let st = self.st.lock();
         let jobs = self.jobs.lock();
         let mut out = Vec::new();
@@ -1064,9 +1098,16 @@ impl Core {
                 channel: i.channel.clone(),
                 manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)).or_else(|| if has_update { sources::games::show_uri(i) } else { None }),
                 github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
+                is_self: false,
                 note,
                 job_id: job.map(|j| j.id.clone()),
             });
+            // This app's own entry: listed like the others, updated its own way.
+            if i.source == Source::Programs && me.is_some() && i.install_dir.as_deref().map(norm_dir) == me {
+                if let Some(a) = out.last_mut() {
+                    mark_self(a, self_ready.as_deref());
+                }
+            }
         }
         for f in &driver_list {
             let e = &f.entry;
@@ -1765,7 +1806,8 @@ impl Core {
         tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
 
         let apps = self.apps();
-        let updates: Vec<&AppEntry> = apps.iter().filter(|a| a.status == AppStatus::Update).collect();
+        // This app's own update is told about by its own check (see `check_self`).
+        let updates: Vec<&AppEntry> = apps.iter().filter(|a| a.status == AppStatus::Update && !a.is_self).collect();
         self.warm_versions(updates.iter().map(|a| a.id.clone()).collect());
         let n = updates.len();
         let checked = now();
@@ -4544,6 +4586,7 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         store_url: None,
         manual_url: if manual || !installable { drivers::safe_link(e.vendor_url.clone()) } else { None },
         github: None,
+        is_self: false,
         channel: None,
         note: e.note.clone(),
         job_id,
@@ -4602,6 +4645,31 @@ mod tests {
                 assert!(!src.contains(r), "{name} uses {r}");
             }
         }
+    }
+
+    #[test]
+    fn the_apps_own_entry_shows_its_own_update_and_is_never_a_job() {
+        use crate::model::{AppStatus, DriverEntry, Source};
+        let d = DriverEntry { id: "prog:hkcu:the updater 3d".into(), name: "The Updater 3D".into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.2.0".into(), latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: Some("Mega Limited".into()), notes: vec![] };
+        let mut a = super::driver_app(&d, AppStatus::Current, false, None, None);
+        a.source = Source::Programs;
+        a.manual_url = None;
+        super::mark_self(&mut a, Some("1.2.1"));
+        assert!(a.is_self);
+        assert_eq!((a.status, a.latest.as_deref()), (AppStatus::Update, Some("1.2.1")));
+        // Update all, the update count and auto-install skip what has a manual page.
+        assert!(a.manual_url.is_some());
+        assert_eq!(a.group, "Other apps");
+        assert_eq!(a.note, None);
+        // The version it has, or an older one in the feed: current.
+        let mut b = super::driver_app(&d, AppStatus::Current, false, None, None);
+        b.manual_url = None;
+        super::mark_self(&mut b, Some("1.2.0"));
+        assert_eq!((b.status, b.manual_url.as_deref()), (AppStatus::Current, None));
+        let mut c = super::driver_app(&d, AppStatus::Current, false, None, None);
+        c.manual_url = None;
+        super::mark_self(&mut c, None);
+        assert_eq!(c.status, AppStatus::Current);
     }
 
     #[test]

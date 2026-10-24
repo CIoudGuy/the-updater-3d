@@ -14,6 +14,8 @@ test("an Other program that names its GitHub project is updated like Other apps"
   assert.equal(listedOnly({ source: "programs" }), true);
   assert.equal(listedOnly({ source: "programs", github: "CIoudGuy/tidalfast" }), false);
   assert.equal(listedOnly({ source: "other", github: null }), false);
+  // This app's own entry has its own page and update.
+  assert.equal(listedOnly({ source: "programs", github: null, isSelf: true }), false);
 });
 
 test("an app's page shows its short description, not a publisher or a driver kind", () => {
