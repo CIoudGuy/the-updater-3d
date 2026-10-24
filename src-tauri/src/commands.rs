@@ -5,7 +5,7 @@ use crate::model::*;
 use crate::services::{self, Action};
 use crate::{paths, store, winutil};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 type Res<T> = Result<T, String>;
 type C<'a> = State<'a, Arc<Core>>;
@@ -58,7 +58,8 @@ pub fn install_version(core: C<'_>, app_id: String, version: String) -> Res<()> 
     core.inner().enqueue(JobRequest::Update { app_id, version: Some(version) }).map(|_| ()).map_err(err)
 }
 
-/// The screen the tray asked for, once (the window asks on start and on each "navigate").
+/// The screen the tray or a clicked notification asked for, once (the window asks on start and on
+/// each "navigate").
 #[tauri::command]
 pub fn take_route(core: C<'_>) -> Option<String> {
     core.inner().pending_route.lock().take()
@@ -344,16 +345,8 @@ pub async fn clear_cache(core: C<'_>) -> Res<u64> {
 /// Async on purpose: a synchronous command that creates a window deadlocks on Windows, so the
 /// tray's "Open app" hung whenever the main window had been closed.
 #[tauri::command]
-pub async fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) -> Result<(), String> {
-    // Kept until the window reads it: a window built just now has not subscribed to events
-    // yet, and "Update all" from the tray must not get lost then.
-    if let Some(r) = route {
-        *core.inner().pending_route.lock() = Some(r.clone());
-        crate::tray::show_main(&app);
-        let _ = app.emit("navigate", r);
-    } else {
-        crate::tray::show_main(&app);
-    }
+pub async fn show_main(app: AppHandle, route: Option<String>) -> Result<(), String> {
+    crate::tray::open_route(&app, route);
     if let Some(w) = app.get_webview_window("tray") {
         let _ = w.hide();
     }
@@ -409,9 +402,8 @@ pub async fn install_self_update(app: AppHandle, core: C<'_>) -> Res<()> {
 }
 
 #[tauri::command]
-pub fn test_notification(app: AppHandle) -> Res<()> {
-    use tauri_plugin_notification::NotificationExt;
-    app.notification().builder().title("The Updater 3D").body("Notifications are working. You will get one when an update is ready.").sound("Default").show().map_err(err)
+pub fn test_notification(app: AppHandle) {
+    crate::notice::show(&app, "The Updater 3D", "Notifications are working. You will get one when an update is ready.", "Default", &crate::notice::Target::Home);
 }
 
 #[tauri::command]
@@ -455,7 +447,7 @@ mod window_tests {
                 continue;
             }
             if let Some(f) = &sync_fn {
-                let opens = [concat!("tray::", "show_main("), concat!("WebviewWindow", "Builder::new(")];
+                let opens = [concat!("tray::", "show_main("), concat!("tray::", "open_route("), concat!("WebviewWindow", "Builder::new(")];
                 assert!(!opens.iter().any(|o| t.contains(o)), "sync command opens a window: {f}");
             }
         }

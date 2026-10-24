@@ -18,3 +18,9 @@
     Pop $0
   ${EndIf}
 !macroend
+
+; The app writes a small key at each start so a click on a notification opens it on the right page.
+; It goes with the app.
+!macro NSIS_HOOK_POSTUNINSTALL
+  DeleteRegKey HKCU "Software\Classes\theupdater3d"
+!macroend
