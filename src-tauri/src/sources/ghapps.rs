@@ -61,6 +61,8 @@ pub struct Feed {
     /// "owner/repo" in lowercase -> its releases, newest first. Projects whose releases could
     /// not be read (or that have none) are not here.
     pub repos: HashMap<String, Vec<Release>>,
+    /// "owner/repo" in lowercase -> the project's own one-line description
+    pub about: HashMap<String, String>,
 }
 
 impl Feed {
@@ -70,6 +72,37 @@ impl Feed {
         let rels = self.repos.get(&t.repo.to_ascii_lowercase())?;
         Some((t, rels.as_slice()))
     }
+
+    /// The project's description of a tracked program, for its page and tile.
+    pub fn about_of(&self, app_id: &str) -> Option<&str> {
+        let t = self.apps.get(app_id)?;
+        self.about.get(&t.repo.to_ascii_lowercase()).map(String::as_str)
+    }
+}
+
+/// A project's description as a short line: one sentence, no emoji codes or links, at most about
+/// 140 characters.
+pub fn short_about(d: &str) -> Option<String> {
+    let t: String = d.split_whitespace().filter(|w| !(w.starts_with(':') && w.ends_with(':') && w.len() > 2) && !w.starts_with("http")).collect::<Vec<_>>().join(" ");
+    let t = t.trim().trim_end_matches('.').to_string();
+    if t.chars().filter(|c| c.is_alphanumeric()).count() < 4 {
+        return None;
+    }
+    if t.chars().count() <= 140 {
+        return Some(t);
+    }
+    let cut: String = t.chars().take(140).collect();
+    Some(match cut.rfind(' ') {
+        Some(i) => format!("{}...", cut[..i].trim_end_matches([',', ';', ':'])),
+        None => cut,
+    })
+}
+
+async fn about(repo: &str) -> Option<String> {
+    let url = format!("https://api.github.com/repos/{repo}");
+    let f = tokio::time::timeout(Duration::from_secs(15), http::get_cached(&url, &[("Accept", "application/vnd.github+json")], Duration::from_secs(24 * 3600))).await.ok()?.ok()?;
+    let v: Value = serde_json::from_slice(&f.body).ok()?;
+    v["description"].as_str().and_then(short_about)
 }
 
 fn norm(s: &str) -> String {
@@ -334,7 +367,17 @@ pub async fn fetch(installed: &[Installed]) -> Feed {
         .collect()
         .await;
     apps.retain(|id, t| repos.get(&t.repo.to_ascii_lowercase()).is_some_and(|rels| versions.get(id).is_some_and(|v| fits(v, rels))));
-    Feed { apps, repos }
+    // Each tracked project's description (kept a day; an unchanged answer costs nothing).
+    let mut wanted: Vec<String> = apps.values().map(|t| t.repo.to_ascii_lowercase()).collect();
+    wanted.sort();
+    wanted.dedup();
+    let about: HashMap<String, String> = futures_util::stream::iter(wanted)
+        .map(|k| async move { about(&k).await.map(|d| (k, d)) })
+        .buffer_unordered(4)
+        .filter_map(std::future::ready)
+        .collect()
+        .await;
+    Feed { apps, repos, about }
 }
 
 /// The newest version of a program from its releases.

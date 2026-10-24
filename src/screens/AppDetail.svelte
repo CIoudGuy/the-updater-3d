@@ -20,7 +20,7 @@
   import { router } from "../lib/router.svelte";
   import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, setIgnored, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
-  import { listedOnly } from "../lib/view";
+  import { aboutLine, listedOnly } from "../lib/view";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -169,6 +169,7 @@
       <div class="ttl">
         <span class="nm">{app.name}</span>
         <span class="ver" style="font-size:{bigSize}px" title={app.version}>{verSplit[0]}{#if verSplit[1]}<span class="vb">{verSplit[1]}</span>{/if}</span>
+        {#if aboutLine(app)}<span class="about">{aboutLine(app)}</span>{/if}
         {#if app.note}<span class="note">{app.note}</span>{/if}
       </div>
       <div class="side">
@@ -400,6 +401,12 @@
   .note {
     font-size: 13px;
     color: var(--text-3);
+  }
+  .about {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text-2);
+    max-width: 640px;
   }
   .side {
     display: flex;

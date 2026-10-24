@@ -22,6 +22,8 @@
   let { app, compact = false }: { app: AppEntry; compact?: boolean } = $props();
 
   const job = $derived(store.jobByApp.get(app.id));
+  /** a current app's note says more than "Up to date", which the status at the top already says */
+  const noteFirst = $derived(!!app.note && app.status === "current" && !job);
   const updating = $derived(app.status === "updating");
   const progress = $derived(job ? job.progress : 0);
   const level = $derived(updating ? Math.max(0.04, progress) : 0.18);
@@ -87,8 +89,8 @@
     {:else}
       <span class="big" title={app.version}>{vm}{#if vb}<span class="vb">{vb}</span>{/if}</span>
     {/if}
-    {#if subline(app)}<span class="subl ellipsis" style:color={updating ? "var(--text-2)" : subColor(app)}>{subline(app)}</span>{/if}
-    {#if app.note && !updating}<span class="note" title={app.note}>{app.note}</span>{/if}
+    {#if subline(app) && !noteFirst}<span class="subl ellipsis" style:color={updating ? "var(--text-2)" : subColor(app)}>{subline(app)}</span>{/if}
+    {#if app.note && !updating}<span class="note" class:two={noteFirst} title={app.note}>{app.note}</span>{/if}
 
     <div class="foot">
       <span class="meta ellipsis">{metaLine(app)}</span>
@@ -231,16 +233,29 @@
     margin-top: 6px;
     font-size: 12px;
   }
+  /* A note under a status line has one line (the rest on hover); a current app's note takes the
+     status line's place ("Up to date" repeats the status at the top) and has two. The name,
+     version and status keep their size. */
   .note {
     margin-top: 3px;
     font-size: 12px;
     line-height: 1.35;
     color: var(--text-3);
     display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+  .note.two {
+    margin-top: 6px;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  .body > :not(.note):not(.foot) {
+    flex-shrink: 0;
   }
   .foot {
     margin-top: auto;
