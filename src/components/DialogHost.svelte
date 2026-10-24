@@ -62,6 +62,8 @@
     ui.openDialog({ type: "leftovers", apps: [one] });
   }
   const manyApps = $derived(d?.type === "uninstall-many" ? d.appIds.map((id) => store.app(id)).filter((a) => !!a) : []);
+  /** Every one was removed already and only left its entry behind */
+  const manyLeftovers = $derived(manyApps.length > 0 && manyApps.every((a) => a?.source === "programs" && a.status === "missing"));
   const manyBytes = $derived(manyApps.reduce((n, a) => n + (a?.sizeOnDisk ?? 0), 0));
   let manyPrefs = $state(false);
   function doUninstallMany() {
@@ -131,21 +133,30 @@
   </Dialog>
 {:else if d?.type === "uninstall-many"}
   <Dialog role="alertdialog" labelledby="unm-title" width={520} onclose={() => ui.closeDialog()}>
+    {#if manyLeftovers}
+    <h2 id="unm-title">Remove {manyApps.length} programs from the list?</h2>
+    <p class="lead">
+      Their files and uninstallers are already gone: only their entries in Windows' list are left. Next you see what else they left behind, to clean up.
+    </p>
+    {:else}
     <h2 id="unm-title">Uninstall {manyApps.length} programs?</h2>
     <p class="lead">
       They are removed one after another{manyBytes ? `, freeing ${bytes(manyBytes)}` : ""}. Programs with their own uninstaller window wait for your answer there. Then it shows what each left behind, to clean up.
     </p>
+    {/if}
     <ul class="plist many selectable">
       {#each manyApps as a (a?.id)}
         {#if a}<li><span class="pp">{a.name}{a.source === "programs" && a.status === "missing" ? " (removed from the list: its uninstaller is missing)" : ""}</span><span class="ps">{a.sizeOnDisk ? bytes(a.sizeOnDisk) : ""}</span></li>{/if}
       {/each}
     </ul>
+    {#if !manyLeftovers}
     <div class="opt prefs">
       <Check checked={manyPrefs} onchange={(v) => (manyPrefs = v)}>Also delete their settings and add-ons</Check>
     </div>
+    {/if}
     <div class="actions first">
       <Btn variant="raised" onclick={() => ui.closeDialog()} hint="Esc">Cancel</Btn>
-      <Btn variant="danger" onclick={doUninstallMany}>Uninstall {manyApps.length}</Btn>
+      <Btn variant="danger" onclick={doUninstallMany}>{manyLeftovers ? "Continue" : `Uninstall ${manyApps.length}`}</Btn>
     </div>
   </Dialog>
 {:else if d?.type === "leftovers"}

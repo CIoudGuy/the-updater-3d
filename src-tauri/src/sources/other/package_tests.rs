@@ -46,6 +46,28 @@ fn index() -> Index {
     idx
 }
 
+#[test]
+fn a_store_copy_of_an_app_the_catalog_lists_as_a_classic_installer_is_found() {
+    // Seen: the Store's Minecraft Launcher (Microsoft.4297127D64EC6) showed as "Install" in Get
+    // apps, because the catalog's Mojang.MinecraftLauncher names no package family.
+    let idx = index();
+    idx.add_test_package("Mojang.MinecraftLauncher", "Minecraft Launcher", "2.0.0.0", &[], &[], &[], "Mojang");
+    let store = package("Microsoft.4297127D64EC6_2.6.2.0_x64__8wekyb3d8bbwe", "2.6.2.0", Sig::Store, "Minecraft Launcher", "Microsoft Corporation");
+    let found = package_matches(&[store.clone()], &idx, &[], &[]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].pkg.id, "Mojang.MinecraftLauncher");
+    // Only a copy the Store signed, only one catalog app with that name, and not a short name.
+    let side = package("Microsoft.4297127D64EC6_2.6.2.0_x64__8wekyb3d8bbwe", "2.6.2.0", Sig::Developer, "Minecraft Launcher", "x");
+    assert!(package_matches(&[side], &idx, &[], &[]).is_empty());
+    idx.add_test_package("Other.MinecraftLauncher", "Minecraft Launcher", "1.0", &[], &[], &[], "Other");
+    assert!(package_matches(&[store], &idx, &[], &[]).is_empty(), "two apps with that name");
+    let short = package("Contoso.App_1.0.0.0_x64__8wekyb3d8bbwe", "1.0.0.0", Sig::Store, "Twin", "Contoso");
+    assert!(package_matches(&[short], &idx, &[], &[]).is_empty());
+    // A catalog app that is itself a package of another family is not this one.
+    let classic = package("Store.Classic_1.0.0.0_x64__8wekyb3d8bbwe", "1.0.0.0", Sig::Store, "Classic", "Example");
+    assert!(package_matches(&[classic], &idx, &[], &[]).is_empty());
+}
+
 fn msix_installer(arch: &str, family: &str) -> Installer {
     Installer {
         arch: arch.into(),

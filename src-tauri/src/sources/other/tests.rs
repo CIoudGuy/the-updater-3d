@@ -853,6 +853,28 @@ fn a_check_reads_again_only_the_packages_whose_version_list_changed() {
 }
 
 #[test]
+fn a_riot_game_installs_through_the_riot_client_and_is_updated_by_it() {
+    // Seen with RiotGames.Valorant.EU: its "silent" installer opens the Riot Client on the
+    // game's Install button, and the job waited at 98% for VALORANT to show up.
+    let mut i = inst("x64", "exe", None);
+    i.url = "https://valorant.secure.dyn.riotcdn.net/channels/public/x/installer/current/live.live.eu.exe".into();
+    i.silent = Some("--skip-to-install".into());
+    let mut m = manifest(vec![i.clone()]);
+    m.id = "RiotGames.Valorant.EU".into();
+    m.name = "VALORANT".into();
+    let idx = index();
+    let mut p = idx.by_id("Example.Zipper").unwrap();
+    p.id = "RiotGames.Valorant.EU".into();
+    let plan = build_plan(&p, &m, &i, JobKind::Install, None, None).unwrap();
+    assert!(matches!(plan.verify, Verify::None), "it is done when the client takes over");
+    let Step::Run { label, .. } = plan.steps.last().unwrap() else { panic!() };
+    assert!(label.starts_with(crate::sources::WAITING_FOR_YOU) && label.contains("Riot Client"), "{label}");
+    assert_eq!(hand_off_client("RiotGames.LeagueOfLegends.EUW", ""), Some("Riot Client"));
+    assert_eq!(hand_off_client("Valve.Steam", "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"), None);
+    assert_eq!(hand_off_client("Other.App", "https://evil.example/riotcdn.net/x.exe"), None);
+}
+
+#[test]
 fn a_github_release_page_gives_its_release_text() {
     // Seen with WinMerge, Notepad++ and PrusaSlicer: the catalog links the release page, and
     // GitHub's API was out of requests, so only a link showed.

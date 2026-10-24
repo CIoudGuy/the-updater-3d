@@ -516,8 +516,15 @@ pub fn package_matches(pkgs: &[msix::AppPackage], idx: &Index, classic: &[Match]
     let mut out: Vec<Match> = Vec::new();
     for p in pkgs {
         let rows = idx.by_family(&p.family);
-        let [row] = rows.as_slice() else { continue };
-        let Some(pkg) = idx.by_row(*row) else { continue };
+        let row = match rows.as_slice() {
+            [row] => *row,
+            [] if p.store_signed() => match store_copy_of(p, idx) {
+                Some(row) => row,
+                None => continue,
+            },
+            _ => continue,
+        };
+        let Some(pkg) = idx.by_row(row) else { continue };
         if handled_package(&pkg.id) || excluded_package(&pkg.id).is_some() {
             continue;
         }
@@ -530,6 +537,23 @@ pub fn package_matches(pkgs: &[msix::AppPackage], idx: &Index, classic: &[Match]
         out.push(Match { entry: package_entry(p), pkg, how: How::PackageFamily, upgrade_code: None, package: Some(Box::new(p.clone())) });
     }
     out
+}
+
+/// A Store copy of an app the catalog lists only as its classic installer (the Store's
+/// "Minecraft Launcher" is package Microsoft.4297127D64EC6, the catalog's Mojang.MinecraftLauncher
+/// names no package): the one catalog app with exactly its name, when that app is not itself a
+/// package of another family.
+fn store_copy_of(p: &msix::AppPackage, idx: &Index) -> Option<i64> {
+    let norm = winget::normalize_name(&p.display_name).name;
+    if norm.chars().filter(|c| c.is_alphanumeric()).count() < 4 {
+        return None;
+    }
+    let mut rows = idx.by_name(&norm);
+    rows.sort_unstable();
+    rows.dedup();
+    let [row] = rows.as_slice() else { return None };
+    let families = idx.families_of(*row);
+    (families.is_empty() || families.iter().any(|f| f.eq_ignore_ascii_case(&p.family))).then_some(*row)
 }
 
 /// Every match: the uninstall list's, then this user's app packages.
@@ -1662,7 +1686,7 @@ fn make_with(m: &Match, feed: Option<&Feed>, hints: &std::cell::OnceCell<super::
         uninstall: uninstall_cmd(e, kind.as_deref()),
         updated_at: entry_date(e),
         size_hint: Some(e.estimated_size_kb * 1024).filter(|s| *s > 0),
-        tagline: man.and_then(|x| x.description.clone()).or_else(|| Some(e.publisher.clone()).filter(|p| !p.is_empty())),
+        tagline: hand_off_client(&m.pkg.id, "").map(|c| format!("Updated by the {c}")).or_else(|| man.and_then(|x| x.description.clone())).or_else(|| Some(e.publisher.clone()).filter(|p| !p.is_empty())),
         channel: None,
         missing: false,
         read_only: false,
@@ -1738,6 +1762,10 @@ fn installed_copies_with(matches: &[Match], feed: Option<&Feed>, hints: &std::ce
 
 pub fn latest(inst: &Installed, feed: &Feed) -> Option<Latest> {
     let m = feed.get(pkg_of(inst))?.latest.as_ref()?;
+    // Its maker's client keeps it up to date: running the package again only opens the client.
+    if let Some(client) = m.installers.first().and_then(|i| hand_off_client(&m.id, &i.url)) {
+        return Some(Latest { version: inst.version.clone(), size: None, note: Some(format!("Updated by the {client}")) });
+    }
     choose(m, &Want::for_installed(inst)).ok()?;
     match offered_update(inst, feed) {
         Some(v) => Some(Latest { version: v, size: None, note: None }),
@@ -2226,7 +2254,8 @@ async fn notes_detail(m: &Manifest, gh: &Gh) -> (Vec<String>, Option<String>, &'
         if let Some(src) = src {
             // Kept on disk for a while: every listed version reads the same page.
             if let Some(body) = notes::page(&src).await {
-                let lines = notes::page_notes_at(&src, &body, ver);
+                // Built by script: read as the browser shows it (see `render`).
+                let lines = crate::render::page_notes(&src, &body, ver).await;
                 if !lines.is_empty() {
                     return (lines, link, "page");
                 }
@@ -2493,7 +2522,13 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         });
     }
     let admin = needs_admin(i, &w);
-    let label = format!("Installing {} {}", name, m.version);
+    // A game that installs through its maker's client: the client is installed, the user clicks
+    // Install there, and the game shows up here once the client has put it on the PC.
+    let hand_off = hand_off_client(&p.id, &i.url);
+    let label = match hand_off {
+        Some(client) => format!("{}: {name} installs from the {client}, click Install there", super::WAITING_FOR_YOU),
+        None => format!("Installing {} {}", name, m.version),
+    };
     let mut steps = Vec::new();
     let mut cleanup = vec![dest.clone()];
     if update && i.upgrade_behavior.as_deref() == Some("uninstallPrevious") {
@@ -2536,7 +2571,7 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         steps,
         block_dirs: block_dirs.clone(),
         block_names: block_names.clone(),
-        verify: Verify::Version { app_id: app_id.clone(), version: expected_version(m, i) },
+        verify: if hand_off.is_some() { Verify::None } else { Verify::Version { app_id: app_id.clone(), version: expected_version(m, i) } },
         fallback: None,
         cleanup: cleanup.clone(),
     };
@@ -2552,6 +2587,14 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
         plan.fallback = Some(Box::new(make(again)));
     }
     Ok(plan)
+}
+
+/// Packages that only install a game maker's own client, which then downloads, installs and
+/// updates the game: the client's name. Riot's (VALORANT and League of Legends in every region)
+/// install the Riot Client and open it on the game's Install button.
+pub fn hand_off_client(pkg_id: &str, installer_url: &str) -> Option<&'static str> {
+    let riot = pkg_id.to_ascii_lowercase().starts_with("riotgames.") || super::drivers::host_is(installer_url, &["riotcdn.net"]);
+    riot.then_some("Riot Client")
 }
 
 /// Did Windows refuse to start an installer because it asks for admin rights (error 740)?

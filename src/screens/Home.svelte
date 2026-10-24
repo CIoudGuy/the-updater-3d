@@ -207,6 +207,13 @@
       <button class="lnk" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading, restarts by itself" : "Update and restart"}</button>
     </div>
   {/if}
+  {#if store.leftovers.length && hs !== "first"}
+    <div class="selfup" in:rise>
+      <Dab color="#6E6E6E" />
+      <span>{store.leftovers.length === 1 ? `${store.leftovers[0].name} was removed but left its entry in Windows' list.` : `${store.leftovers.length} removed programs left their entries in Windows' list.`}</span>
+      <button class="lnk" onclick={() => ui.openDialog({ type: "uninstall-many", appIds: store.leftovers.map((a) => a.id) })}>Remove {store.leftovers.length === 1 ? "it" : "them"} from the list</button>
+    </div>
+  {/if}
   {#if store.status.restartNeeded && hs !== "first"}
     <div class="selfup" in:rise>
       <Dab color="#D9B26A" />

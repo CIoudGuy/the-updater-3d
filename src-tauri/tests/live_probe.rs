@@ -875,6 +875,7 @@ async fn sandbox_install_data() {
 #[tokio::test]
 #[ignore]
 async fn popular_changelogs() {
+    use_exe_renderer();
     use futures_util::StreamExt;
     use updater_lib::sources::{other, winget};
     winget::refresh_index(std::time::Duration::from_secs(24 * 3600)).await.expect("index");
@@ -898,6 +899,7 @@ async fn popular_changelogs() {
         *by.entry(r.2).or_default() += 1;
     }
     println!("popular changelogs: {} apps {by:?}", rows.len());
+    println!("{}", render_line());
     for (id, v, src, _, url) in rows.iter().filter(|r| r.2 == "none" || r.2 == "link only") {
         println!("  {src:<9} {id:<40} {v:<16} {}", url.as_deref().unwrap_or(""));
     }
@@ -920,6 +922,7 @@ async fn one_release_page() {
 #[tokio::test]
 #[ignore]
 async fn catalog_changelogs() {
+    use_exe_renderer();
     use futures_util::StreamExt;
     use updater_lib::sources::{other, winget};
     winget::refresh_index(std::time::Duration::from_secs(24 * 3600)).await.expect("index");
@@ -948,7 +951,44 @@ async fn catalog_changelogs() {
     }
     let gh = rows.iter().filter(|r| (r.1 == "none" || r.1 == "link only") && r.2 == "github").count();
     println!("catalog changelogs: {} sampled {by:?}, of the missing {gh} are on GitHub", rows.len());
+    println!("{}", render_line());
     for (id, src, class) in rows.iter().filter(|r| r.1 == "none" || r.1 == "link only") {
         println!("  {src:<9} {id:<44} {class}");
     }
+}
+
+/// With `U3D_RENDER_EXE=<built app exe>`, pages built by script are rendered by that app's
+/// `--render-page` (two at a time), as the running app does in its hidden window. Prints how
+/// many pages were rendered and how many gave something.
+static RENDERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static RENDERED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn use_exe_renderer() {
+    let Ok(exe) = std::env::var("U3D_RENDER_EXE") else { return };
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+    updater_lib::render::set_renderer(Box::new(move |url| {
+        let (exe, gate) = (exe.clone(), gate.clone());
+        Box::pin(async move {
+            let _turn = gate.acquire_owned().await.ok()?;
+            RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let n = RENDERS.load(std::sync::atomic::Ordering::Relaxed);
+            let out = std::env::temp_dir().join(format!("u3d-probe-render-{}-{n}.html", std::process::id()));
+            let got = tokio::task::spawn_blocking(move || {
+                let _ = std::process::Command::new(&exe).arg("--render-page").arg(&url).arg(&out).status();
+                let s = std::fs::read_to_string(&out).ok();
+                let _ = std::fs::remove_file(&out);
+                s.filter(|s| !s.is_empty())
+            })
+            .await
+            .ok()
+            .flatten();
+            if got.is_some() {
+                RENDERED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            got
+        })
+    }));
+}
+
+fn render_line() -> String {
+    format!("pages rendered: {} ({} gave a page)", RENDERS.load(std::sync::atomic::Ordering::Relaxed), RENDERED.load(std::sync::atomic::Ordering::Relaxed))
 }

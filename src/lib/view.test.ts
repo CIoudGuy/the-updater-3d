@@ -1,7 +1,7 @@
 // node --test src/lib/view.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, lowDiskWords, timeLeft } from "./view.ts";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
 
 test("a source filter whose last app is gone falls back to all", () => {
   assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");
@@ -61,4 +61,16 @@ test("the Drivers filter says when no drivers are listed and names itself when i
   assert.match(empty.text, /No drivers listed yet/);
   assert.equal(empty.showAll, true);
   assert.match(installedNone({ query: "blender", filter: "drivers", matchesIgnoringFilter: 2 }).text, /hidden by the Drivers filter/);
+});
+
+test("removed programs that left their entry are leftovers, not apps to repair", () => {
+  // Seen: 14 removed games (Black Myth: Wukong, Far Cry 6...) showed as "14 apps need repair".
+  const apps = [
+    { id: "prog:wukong", status: "missing", source: "programs" },
+    { id: "adobe:PHSP", status: "missing", source: "adobe" },
+    { id: "other:7zip.7zip", status: "current", source: "other" },
+  ];
+  const { repair, leftovers } = splitMissing(apps);
+  assert.deepEqual(repair.map((a) => a.id), ["adobe:PHSP"]);
+  assert.deepEqual(leftovers.map((a) => a.id), ["prog:wukong"]);
 });

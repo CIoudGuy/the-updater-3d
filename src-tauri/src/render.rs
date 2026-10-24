@@ -13,12 +13,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri::AppHandle;
 
-static APP: OnceCell<AppHandle> = OnceCell::new();
+/// What renders a page: the app's hidden window (`set_app`), or a probe's own. Programs without a
+/// window system (tests) have none, so the window code is not even part of them.
+pub type Renderer = Box<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> + Send + Sync>;
+static RENDERER: OnceCell<Renderer> = OnceCell::new();
 static ONE_AT_A_TIME: Lazy<tokio::sync::Semaphore> = Lazy::new(|| tokio::sync::Semaphore::new(1));
 static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// How long a rendered page (or a miss) is kept.
-#[cfg_attr(test, allow(dead_code))]
 const KEEP: Duration = Duration::from_secs(12 * 3600);
 /// Longest wait for a page to load, and for its script to fill it in.
 const LOAD: Duration = Duration::from_secs(15);
@@ -26,9 +28,17 @@ const FILL: Duration = Duration::from_millis(1500);
 /// The most read back from one page.
 const MAX_HTML: usize = 3_000_000;
 
-/// The running app, so the notes code (which has no handle) can open the window.
+/// The running app renders pages in its hidden window (the notes code has no handle of its own).
 pub fn set_app(app: AppHandle) {
-    let _ = APP.set(app);
+    set_renderer(Box::new(move |url| {
+        let app = app.clone();
+        Box::pin(async move { render_in(&app, &url, None).await })
+    }));
+}
+
+/// Render pages some other way (a live probe: the built app's `--render-page`).
+pub fn set_renderer(r: Renderer) {
+    let _ = RENDERER.set(r);
 }
 
 /// Text a person would read on a page: without scripts, styles and tags.
@@ -90,7 +100,6 @@ fn cache_file(url: &str) -> PathBuf {
 
 /// A page kept from an earlier render: Some(page), Some("") for a page that gave nothing, None
 /// when it has to be rendered.
-#[cfg_attr(test, allow(dead_code))]
 fn cached(url: &str) -> Option<String> {
     let f = cache_file(url);
     let age = std::fs::metadata(&f).ok()?.modified().ok()?.elapsed().ok()?;
@@ -100,7 +109,6 @@ fn cached(url: &str) -> Option<String> {
     std::fs::read_to_string(f).ok()
 }
 
-#[cfg_attr(test, allow(dead_code))]
 fn keep(url: &str, html: &str) {
     let f = cache_file(url);
     if let Some(d) = f.parent() {
@@ -113,22 +121,13 @@ fn keep(url: &str, html: &str) {
 /// has no window system (a test), the page is not https, it blocks or challenges, or it does
 /// not load in time.
 pub async fn page(url: &str) -> Option<String> {
-    // Test programs have no window system (and no manifest for it): the window code stays out.
-    #[cfg(test)]
-    {
-        let _ = url;
-        None
+    let render = RENDERER.get()?;
+    if let Some(hit) = cached(url) {
+        return (!hit.is_empty()).then_some(hit);
     }
-    #[cfg(not(test))]
-    {
-        let app = APP.get()?.clone();
-        if let Some(hit) = cached(url) {
-            return (!hit.is_empty()).then_some(hit);
-        }
-        let got = render_in(&app, url, None).await;
-        keep(url, got.as_deref().unwrap_or(""));
-        got
-    }
+    let got = render(url.to_string()).await;
+    keep(url, got.as_deref().unwrap_or(""));
+    got
 }
 
 /// Render one page in a hidden window of `app`. `data_dir`: the browser's own data folder (None:
@@ -314,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_the_app_nothing_is_rendered() {
-        // Tests have no window system: nothing is opened, and nothing is written to the app's data.
+        // Tests set no renderer: nothing is opened, and nothing is written to the app's data.
         assert!(page("https://example.org/release-notes-test-page").await.is_none());
         assert!(!cache_file("https://example.org/release-notes-test-page").exists());
         let spa = r#"<html><head><script src="/app.js"></script></head><body><div id="root"></div></body></html>"#;

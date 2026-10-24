@@ -2,6 +2,12 @@
 import { countOf, nameList } from "./format.ts";
 import type { Job, JobKind, Settings } from "./types";
 
+/** Apps whose files are gone: the ones a reinstall brings back, and removed programs that only left their entry in Windows' list (nothing to repair: they are removed from the list). */
+export function splitMissing<T extends { status: string; source: string }>(apps: readonly T[]): { repair: T[]; leftovers: T[] } {
+  const gone = apps.filter((a) => a.status === "missing");
+  return { repair: gone.filter((a) => a.source !== "programs"), leftovers: gone.filter((a) => a.source === "programs") };
+}
+
 /** A source filter that points at a source with no apps left falls back to "all". */
 export function groupOrAll<T extends string>(group: T | "all", present: readonly T[]): T | "all" {
   return group !== "all" && present.includes(group as T) ? group : "all";
