@@ -638,6 +638,16 @@ fn intel_entry(e: &mut DriverEntry, r: &super::intel::Release, have: &str) {
     e.note = Some(if newer && !r.silent { format!("{} from Intel. Intel's installer opens: click through it to finish.", r.name) } else { format!("{} from Intel", r.name) });
 }
 
+/// The version Windows has now for a driver entry, read fresh: the AMD chipset drivers from
+/// their installer's record, a device from its driver. None: not known for this entry.
+pub fn installed_version(id: &str) -> Option<String> {
+    if id == "driver:amd-chipset" {
+        return super::chipset::installed();
+    }
+    let hw = id.strip_prefix("driver:dev:")?;
+    present().into_iter().find(|p| p.matching_id.eq_ignore_ascii_case(hw)).map(|p| p.version).filter(|v| !v.is_empty())
+}
+
 /// Does Windows wait for a restart to finish installing something (driver, update)?
 pub fn restart_pending() -> bool {
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};

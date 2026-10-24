@@ -233,7 +233,8 @@ fn saved_verify(plan: &Plan) -> Option<SavedVerify> {
     match &plan.verify {
         Verify::Version { app_id, version } | Verify::Wait { app_id, version, .. } => Some(SavedVerify::Version { app_id: app_id.clone(), version: version.clone() }),
         Verify::Removed { app_id } => Some(SavedVerify::Removed { app_id: app_id.clone() }),
-        Verify::None => None,
+        // Drivers are not in the installed list: a cut-off driver install is checked again.
+        Verify::None | Verify::Driver { .. } => None,
     }
 }
 
@@ -358,6 +359,25 @@ impl TurnGate {
                 }
             }
         }
+    }
+}
+
+/// A new job's place in the install line. An uninstall is asked for now: it takes the next turn,
+/// before updates and installs that only wait for theirs (after the one installing now, and
+/// after uninstalls asked for earlier). Everything else goes to the end.
+fn turn_seq(kind: JobKind, open: impl Iterator<Item = (JobKind, u64)>, next: impl FnOnce() -> u64) -> u64 {
+    if kind != JobKind::Uninstall {
+        return next();
+    }
+    let open: Vec<(JobKind, u64)> = open.collect();
+    let first_other = open.iter().filter(|(k, _)| *k != JobKind::Uninstall).map(|(_, s)| *s).min();
+    let last_uninstall = open.iter().filter(|(k, _)| *k == JobKind::Uninstall).map(|(_, s)| *s).max();
+    match (last_uninstall, first_other) {
+        // Right after the uninstalls asked for earlier (they are ahead of the updates already).
+        (Some(u), _) => u + 1,
+        // Well ahead of the waiting updates, with room for more uninstalls after it.
+        (None, Some(o)) => o.saturating_sub(1 << 20),
+        (None, None) => next(),
     }
 }
 
@@ -651,7 +671,8 @@ impl Core {
             install_gate: TurnGate::new(),
             write_locks: KeyLocks::default(),
             pending_route: Mutex::new(None),
-            next_seq: std::sync::atomic::AtomicU64::new(0),
+            // Room below for jobs that go first (uninstalls, see `turn_seq`).
+            next_seq: std::sync::atomic::AtomicU64::new(1 << 32),
             queue_saved: Mutex::new(String::new()),
             check_lock: tokio::sync::Mutex::new(()),
             check_again: std::sync::atomic::AtomicBool::new(false),
@@ -2495,6 +2516,7 @@ impl Core {
         }
         let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
         let (tx, _) = watch::channel(Control::Run);
+        let seq = turn_seq(kind, jobs.iter().filter(|j| !j.job.state.is_finished()).map(|j| (j.job.kind, j.seq)), || self.next_seq.fetch_add(1, Ordering::Relaxed));
         jobs.push(JobRec {
             job: Job {
                 id: id.clone(),
@@ -2527,7 +2549,7 @@ impl Core {
             ctl: tx,
             active: false,
             block: Default::default(),
-            seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
+            seq,
             phase: Phase::Queued,
             held: false,
             dests: vec![],
@@ -3487,7 +3509,7 @@ impl Core {
                 Verify::Removed { .. } => "Checking that it is gone".into(),
                 Verify::Wait { .. } => "Creative Cloud is installing it".into(),
                 Verify::None => String::new(),
-                Verify::Version { version, .. } => format!("Checking that {version} is installed"),
+                Verify::Version { version, .. } | Verify::Driver { version, .. } => format!("Checking that {version} is installed"),
             };
             j.progress = 0.98;
         });
@@ -3536,6 +3558,7 @@ impl Core {
                 return Err(match (&plan.verify, state) {
                     (Verify::Version { version: v, .. }, Checked::Shows { version: now_v, .. }) => anyhow!("VERIFY|The installer finished, but {} reports {} instead of {}", plan.name, now_v, v),
                     (Verify::Version { version: v, .. }, _) => anyhow!("VERIFY|The installer finished, but {} reports not installed instead of {}", plan.name, v),
+                    (Verify::Driver { version: v, .. }, Checked::Shows { version: now_v, .. }) => anyhow!("VERIFY|The installer finished, but Windows still has {} {} instead of {}", plan.name, now_v, v),
                     _ => anyhow!("VERIFY|The uninstaller finished, but {} is still installed", plan.name),
                 });
             }
@@ -3550,6 +3573,13 @@ impl Core {
     async fn check_result(self: &Arc<Self>, plan: &Plan, before: Option<&Installed>, since: std::time::SystemTime) -> Checked {
         match &plan.verify {
             Verify::None | Verify::Wait { .. } => Checked::Done,
+            Verify::Driver { app_id, version: v } => {
+                let id = app_id.clone();
+                match tauri::async_runtime::spawn_blocking(move || drivers::installed_version(&id)).await.ok().flatten() {
+                    Some(now) if version::newer(v, &now) => Checked::Shows { unchanged: before.is_some_and(|b| b.version == now), version: now },
+                    _ => Checked::Done,
+                }
+            }
             Verify::Removed { app_id } => {
                 if self.st.lock().installed.iter().any(|i| &i.id == app_id) {
                     Checked::Shows { version: String::new(), unchanged: true }
@@ -4296,6 +4326,25 @@ mod tests {
             h.await.unwrap();
         }
         assert_eq!(*order.lock(), vec!["second", "first"]);
+    }
+
+    #[test]
+    fn an_uninstall_takes_the_next_install_turn() {
+        use crate::model::JobKind;
+        use super::turn_seq;
+        // Seen: Cline's uninstall waited behind the AMD driver and the chipset update.
+        let base = 1u64 << 32;
+        let open = vec![(JobKind::Update, base), (JobKind::Update, base + 1), (JobKind::Update, base + 2)];
+        let u1 = turn_seq(JobKind::Uninstall, open.clone().into_iter(), || base + 3);
+        assert!(u1 < base, "before every waiting update");
+        // A second uninstall goes after the first, still before the updates.
+        let mut with = open.clone();
+        with.push((JobKind::Uninstall, u1));
+        let u2 = turn_seq(JobKind::Uninstall, with.into_iter(), || base + 4);
+        assert!(u1 < u2 && u2 < base, "{u1} {u2}");
+        // Updates still go to the end; an uninstall with nothing else waiting too.
+        assert_eq!(turn_seq(JobKind::Update, open.into_iter(), || base + 9), base + 9);
+        assert_eq!(turn_seq(JobKind::Uninstall, std::iter::empty(), || base + 9), base + 9);
     }
 
     #[test]

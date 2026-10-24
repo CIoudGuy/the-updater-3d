@@ -10,6 +10,7 @@ pub mod notes;
 pub mod paths;
 pub mod prefs;
 pub mod procs;
+pub mod render;
 pub mod selfupdate;
 pub mod services;
 pub mod sources;
@@ -43,6 +44,11 @@ fn log_crashes() {
     }));
 }
 
+/// The app's config and assets (one copy, for the app and the `--render-page` check).
+pub fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Info));
     log_crashes();
@@ -58,6 +64,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
+            render::set_app(app.handle().clone());
             let core = core::Core::new(app.handle().clone());
             app.manage(core.clone());
             tray::create(app.handle())?;
@@ -190,7 +197,7 @@ pub fn run() {
             commands::check_self_update,
             commands::restart_pc,
         ])
-        .build(tauri::generate_context!())
+        .build(context())
         .expect("error while building The Updater 3D")
         .run(|app, event| {
             // Closing the last window keeps the background checker alive; Quit exits for real.

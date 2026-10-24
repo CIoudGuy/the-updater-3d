@@ -213,6 +213,9 @@ pub enum Verify {
     None,
     /// Hand-off to another program (Creative Cloud): wait up to `minutes` for this version.
     Wait { app_id: String, version: String, minutes: u64 },
+    /// A driver: Windows reports at least this version for it afterwards (see
+    /// `drivers::installed_version`), whatever its installer returned.
+    Driver { app_id: String, version: String },
 }
 
 #[derive(Clone, Debug)]
@@ -352,7 +355,9 @@ mod plan_tests {
         let files = p.block_files();
         assert!(files.contains(&PathBuf::from(r"C:\Program Files\obs-studio\data\obs-plugins\win-capture\graphics-hook64.dll")), "{files:?}");
         assert!(files.contains(&PathBuf::from(r"C:\Program Files\obs-studio\data\obs-plugins\win-dshow\obs-virtualcam-module64.dll")));
-        assert!(files.iter().any(|f| f.ends_with(r"obs-studio-hook\graphics-hook64.dll")));
+        // The all-users copy games load (seen in Steam's web helper while updating OBS 32.2.2).
+        let all_users = PathBuf::from(std::env::var("ProgramData").unwrap()).join("obs-studio-hook").join("graphics-hook64.dll");
+        assert!(files.contains(&all_users), "{files:?}");
         assert!(plan("tools:krita", vec![]).block_files().is_empty());
     }
 
