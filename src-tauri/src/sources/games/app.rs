@@ -286,12 +286,17 @@ mod tests {
         g.key = "rdr2".into();
         g.uninstall_uri = None;
         g.install_dir = Some(PathBuf::from(r"D:\Games\Red Dead Redemption 2"));
+        // The launcher's uninstaller, made here: the plan runs only an uninstaller that is there.
+        let tmp = std::env::temp_dir().join(format!("u3d-rockstar-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let unins = tmp.join("uninstall.exe");
+        std::fs::write(&unins, b"MZ").unwrap();
         let e = UninstallEntry {
             key: "Rockstar Games Red Dead Redemption 2".into(),
             hive: "HKLM32",
             display_name: "Red Dead Redemption 2".into(),
             install_location: r"D:\Games\Red Dead Redemption 2\".into(),
-            uninstall_string: r#""C:\Program Files\Rockstar Games\Launcher\uninstall.exe" -uninstall=rdr2"#.into(),
+            uninstall_string: format!("\"{}\" -uninstall=rdr2", unins.display()),
             ..Default::default()
         };
         let other = UninstallEntry { key: "Other".into(), display_name: "Other".into(), install_location: r"D:\Games\Other".into(), uninstall_string: r#""D:\Games\Other\unins.exe""#.into(), ..Default::default() };
@@ -300,7 +305,8 @@ mod tests {
         let p = plan_uninstall_with(&i, &[other.clone(), e]).unwrap();
         assert_eq!(p.app_id, i.id);
         assert!(matches!(&p.verify, Verify::Removed { app_id } if app_id == &i.id));
-        assert!(matches!(&p.steps[..], [Step::Run { exe, .. }] if exe.to_string_lossy().ends_with("uninstall.exe")));
+        assert!(matches!(&p.steps[..], [Step::Run { exe, .. }] if exe == &unins));
+        let _ = std::fs::remove_dir_all(&tmp);
         // No entry in its folder: nothing to run.
         let lone = installed_with(g, &[other.clone()]);
         assert!(lone.uninstall.is_none());
