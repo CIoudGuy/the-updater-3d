@@ -19,13 +19,19 @@ pub fn cmd(exe: impl AsRef<std::ffi::OsStr>) -> Command {
 /// NSIS installers read `/D=<dir>` (install folder) and `_?=<dir>` (uninstall in place) from the
 /// raw command line: they must come last and must not be quoted, even when the path has spaces.
 pub fn is_raw_arg(a: &str) -> bool {
-    a.starts_with("/D=") || a.starts_with("_?=")
+    a.starts_with("/D=") || a.starts_with("_?=") || a.starts_with(VERBATIM)
 }
+
+/// Marks an argument passed exactly as written, with its own quotes (an install folder switch
+/// such as `/DIR="D:\Apps\Tool"`); the mark itself is not passed.
+pub const VERBATIM: char = '\u{1}';
 
 /// Add program arguments, passing the NSIS ones (`is_raw_arg`) through unquoted.
 pub fn add_args(c: &mut Command, args: &[String]) {
     for a in args {
-        if is_raw_arg(a) {
+        if let Some(v) = a.strip_prefix(VERBATIM) {
+            c.raw_arg(v);
+        } else if is_raw_arg(a) {
             c.raw_arg(a);
         } else {
             c.arg(a);

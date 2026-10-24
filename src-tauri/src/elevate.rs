@@ -500,6 +500,8 @@ pub fn execute_with(step: &Step, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> Ste
 
 /// Entry point when started as `--worker <pipe> <token>` or `--worker-task`.
 pub fn worker_main(args: &[String]) -> i32 {
+    // The download folder chosen in Settings: the installers' own helper programs run from it.
+    paths::set_downloads(Some(&crate::store::load_settings().download_dir));
     let from_task = args.iter().any(|a| a == "--worker-task");
     let (pipe, token) = if from_task {
         // Started by the scheduled task, which runs with admin rights without a prompt: worker.json

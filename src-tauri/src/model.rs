@@ -369,6 +369,12 @@ pub struct Settings {
     pub blender_install_dir: String,
     /// Root that new Godot versions go into (one folder per version)
     pub godot_install_dir: String,
+    /// Where downloads are kept (a "The Updater 3D downloads" folder is made in it); empty: in
+    /// the app's own data folder.
+    pub download_dir: String,
+    /// Where new apps from the catalog are installed when their installer can be told (each in
+    /// its own folder); empty: where each installer puts it. Updates keep an app where it is.
+    pub install_root: String,
     pub blender_channel: String,
     pub blender_keep_patch_versions: bool,
     pub craft_prereleases: bool,
@@ -403,6 +409,8 @@ impl Default for Settings {
             adobe_install_dir: format!("{pf}\\Adobe"),
             blender_install_dir: format!("{pf}\\Blender Foundation"),
             godot_install_dir: format!("{}\\Programs\\Godot", std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\Users\\Public\\AppData\\Local".into())),
+            download_dir: String::new(),
+            install_root: String::new(),
             blender_channel: "beta".into(),
             blender_keep_patch_versions: false,
             craft_prereleases: false,

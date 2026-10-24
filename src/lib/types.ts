@@ -285,6 +285,10 @@ export interface Settings {
   blenderInstallDir: string;
   /** Root that new Godot versions are unpacked into (one folder per version) */
   godotInstallDir: string;
+  /** Where downloads are kept (the app makes its own folder in it); empty: the app's own data folder */
+  downloadDir?: string;
+  /** Where new apps from the catalog are installed when their installer can be told; empty: where each installer puts it */
+  installRoot?: string;
   /** "beta" (default) also lists Blender alpha, beta and release candidate builds; "stable" hides them */
   blenderChannel: "stable" | "beta";
   /** Bug-fix releases (5.2.2 -> 5.2.3) keep the old copy instead of replacing it */

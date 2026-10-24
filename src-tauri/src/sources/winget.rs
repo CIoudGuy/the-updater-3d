@@ -569,6 +569,8 @@ pub struct Installer {
     pub success_codes: Vec<u32>,
     pub release_date: Option<String>,
     pub default_install_location: Option<String>,
+    /// The catalog's switch that installs into a chosen folder ("/DIR=\"<INSTALLPATH>\"")
+    pub install_location: Option<String>,
     /// MSIX and APPX installers: the package family name the package installs as
     pub family: Option<String>,
     /// MSIX and APPX installers: SHA-256 of the package's signature file (AppxSignature.p7x),
@@ -691,6 +693,7 @@ pub fn parse_manifest(yaml: &str) -> Result<Manifest> {
             success_codes: success,
             release_date: text(get("ReleaseDate")),
             default_install_location: text(&get("InstallationMetadata")["DefaultInstallLocation"]),
+            install_location: switch("InstallLocation"),
             family: text(get("PackageFamilyName")),
             signature_sha256: text(&inst["SignatureSha256"]).map(|s| s.to_ascii_lowercase()),
         });
