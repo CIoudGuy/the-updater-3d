@@ -1341,10 +1341,14 @@ pub fn obs_in_use_files(install_dir: &Path) -> Vec<PathBuf> {
     .iter()
     .map(|f| install_dir.join(f.replace('/', "\\")))
     .collect();
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let hook = PathBuf::from(appdata).join("obs-studio-hook");
-        v.push(hook.join("graphics-hook32.dll"));
-        v.push(hook.join("graphics-hook64.dll"));
+    // The hook copy that games load: OBS's installer runs for all users, so its "$APPDATA" is
+    // ProgramData (seen loaded in Steam's web helper); the user's own AppData for older copies.
+    for var in ["ProgramData", "APPDATA"] {
+        if let Ok(dir) = std::env::var(var) {
+            let hook = PathBuf::from(dir).join("obs-studio-hook");
+            v.push(hook.join("graphics-hook32.dll"));
+            v.push(hook.join("graphics-hook64.dll"));
+        }
     }
     v
 }

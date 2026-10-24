@@ -85,7 +85,9 @@ pub async fn latest(board: &str) -> Result<Release> {
 }
 
 /// Download AMD's chipset package and install it silently (`/S`). Windows finishes some of the
-/// drivers after a restart (3010).
+/// drivers after a restart (3010). AMD's setup also ends with 2 after a good install while
+/// Windows waits for a restart from something else (seen after graphics driver updates), so the
+/// installed version is read back: only a new version counts as done.
 pub fn plan_install(app_id: &str, name: &str, r: &Release) -> Result<Plan> {
     if !super::drivers::host_is(&r.url, &["drivers.amd.com"]) {
         return Err(anyhow!("Unexpected AMD download address: {}", r.url));
@@ -113,14 +115,14 @@ pub fn plan_install(app_id: &str, name: &str, r: &Release) -> Result<Plan> {
             exe: dest.clone(),
             args: vec!["/S".into()],
             cwd: None,
-            ok_codes: vec![0, super::drivers::EXIT_REBOOT],
+            ok_codes: vec![0, 2, super::drivers::EXIT_REBOOT],
             elevated: true,
             label: format!("Installing AMD Chipset Software {}", r.version),
             log: None,
         }],
         block_dirs: vec![],
         block_names: vec![],
-        verify: Verify::None,
+        verify: Verify::Driver { app_id: app_id.into(), version: r.version.clone() },
         fallback: None,
         cleanup: vec![dest],
     })
@@ -156,6 +158,10 @@ mod tests {
         assert_eq!(d.headers, vec![("Referer".to_string(), page_for("B850"))]);
         let Step::Run { args, elevated, ok_codes, .. } = &plan.steps[0] else { panic!() };
         assert!(*elevated && args == &vec!["/S".to_string()] && ok_codes.contains(&3010));
+        // Seen: 8.06.30.112 to 8.09.28.1124 installed fine and AMD's setup ended with 2. It
+        // counts when the chipset version really changed.
+        assert!(ok_codes.contains(&2));
+        assert!(matches!(&plan.verify, Verify::Driver { app_id, version } if app_id == "driver:amd-chipset" && version == "8.09.28.1124"));
         assert!(plan_install("x", "x", &Release { url: "https://evil.example/drivers.amd.com/a.exe".into(), ..r }).is_err());
     }
 

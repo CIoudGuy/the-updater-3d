@@ -150,6 +150,22 @@ pub fn close(pids: &[u32], grace: std::time::Duration) -> Vec<u32> {
 }
 
 #[cfg(test)]
+mod live {
+    /// The programs on this PC that hold OBS Studio's files: `cargo test --lib live_obs_files -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_obs_files() {
+        let files = crate::sources::tools::obs_in_use_files(&std::path::PathBuf::from(r"C:\Program Files\obs-studio"));
+        let pids = super::using_files(&files);
+        let list = super::list_fresh();
+        for p in &pids {
+            println!("{p} {}", list.iter().find(|x| x.pid == *p).map(|x| x.name.as_str()).unwrap_or("?"));
+        }
+        println!("{} of {} files exist", files.iter().filter(|f| f.exists()).count(), files.len());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn a_program_holding_a_file_open_is_found() {
