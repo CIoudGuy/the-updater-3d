@@ -96,7 +96,7 @@ pub struct DriverEntry {
     pub maker: String,
     /// Where the newest driver comes from: "nvidia", "amd", "intel" (the maker's own driver),
     /// "windowsUpdate", "device" (installed, nothing newer offered), "vendor" (the maker's own
-    /// updater has it) or "gigabyte" (a BIOS)
+    /// updater has it) or the BIOS maker ("gigabyte", "asus", "dell")
     pub source: String,
     pub version: String,
     pub latest: Option<String>,

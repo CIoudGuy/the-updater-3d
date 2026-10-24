@@ -2122,9 +2122,43 @@ impl Gh {
 /// The GitHub repository a package comes from: where its installers are downloaded from, else
 /// its release notes or home page.
 fn repo_of(m: &Manifest) -> Option<(String, String)> {
-    m.installers.iter().find_map(|i| github_repo(&i.url).filter(|_| i.url.contains("/releases/download/"))).or_else(|| {
-        [&m.release_notes_url, &m.package_url, &m.publisher_url].into_iter().flatten().find_map(|u| github_repo(u))
-    })
+    m.installers
+        .iter()
+        .find_map(|i| github_repo(&i.url).filter(|_| i.url.contains("/releases/download/")))
+        .or_else(|| [&m.release_notes_url, &m.package_url, &m.publisher_url].into_iter().flatten().find_map(|u| github_repo(u)))
+        .or_else(|| notes_known::repo_for(&m.id).map(|(o, r)| (o.to_string(), r.to_string())))
+}
+
+/// The notes on a GitHub or Codeberg release page ("/releases/tag/<tag>"): the release text of
+/// the page the catalog names, read from the page itself (GitHub) or Codeberg's API.
+async fn release_page_notes(url: &str) -> Vec<String> {
+    if let Some(rest) = url.strip_prefix("https://codeberg.org/") {
+        let mut it = rest.splitn(5, '/');
+        let (Some(o), Some(r), Some("releases"), Some("tag"), Some(tag)) = (it.next(), it.next(), it.next(), it.next(), it.next()) else { return vec![] };
+        let api = format!("https://codeberg.org/api/v1/repos/{o}/{r}/releases/tags/{tag}");
+        let Some(body) = notes::fetch_page(&api).await else { return vec![] };
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        return v["body"].as_str().map(notes::text_lines).unwrap_or_default();
+    }
+    if github_repo(url).is_none() || !url.contains("/releases/tag/") {
+        return vec![];
+    }
+    notes::page(url).await.map(|html| github_release_body(&html)).unwrap_or_default()
+}
+
+/// The release text on a GitHub release page: its "markdown-body" block, up to the assets list.
+pub fn github_release_body(html: &str) -> Vec<String> {
+    let Some(start) = html.find("class=\"markdown-body") else { return vec![] };
+    let rest = &html[start..];
+    let end = ["data-test-selector=\"release-assets\"", "<details", "class=\"Box-footer", "id=\"repo-content-pjax-container\""].iter().filter_map(|m| rest.find(m)).min().unwrap_or(rest.len());
+    let mut cut = end.min(400_000);
+    while !rest.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let lines = notes::outline(&rest[rest.find('>').map(|i| i + 1).unwrap_or(0)..cut]);
+    // A contents list at the top repeats the headings that follow: not changes.
+    let heads: std::collections::HashSet<String> = lines.iter().filter_map(|l| l.strip_prefix("## ").or_else(|| l.strip_prefix("### "))).map(str::to_string).collect();
+    notes::tidy_headings(lines.into_iter().filter(|l| l.starts_with('#') || !heads.contains(l)).collect())
 }
 
 /// "https://github.com/o/r/blob/main/CHANGELOG.md" -> the raw file.
@@ -2166,7 +2200,9 @@ async fn notes_uncached(m: &Manifest, gh: &Gh) -> Notes {
 async fn notes_detail(m: &Manifest, gh: &Gh) -> (Vec<String>, Option<String>, &'static str) {
     let ver = &m.version;
     let tag = m.installers.iter().find_map(|i| github_tag(&i.url)).or_else(|| m.release_notes_url.as_deref().and_then(github_tag));
-    let mut link = m.release_notes_url.clone().or_else(|| gh.page.clone());
+    // A publisher page known for apps whose catalog entry names none.
+    let known = notes_known::page_for(&m.id, ver);
+    let mut link = m.release_notes_url.clone().or_else(|| gh.page.clone()).or_else(|| known.clone());
     // 1. The manifest's own notes.
     if let Some(t) = &m.release_notes {
         let lines = notes::text_lines(t);
@@ -2177,13 +2213,20 @@ async fn notes_detail(m: &Manifest, gh: &Gh) -> (Vec<String>, Option<String>, &'
             return (lines, link, "manifest");
         }
     }
-    // 2. The release notes page, or the one page another version names (GitHub release pages
-    // are read through the API below).
-    if let Some(u) = m.release_notes_url.as_ref().or(gh.page.as_ref()) {
+    // 2. The release notes page, or the one page another version names. A GitHub or Codeberg
+    // release page is read for its release text; other GitHub pages as raw files.
+    if let Some(u) = m.release_notes_url.as_ref() {
+        let lines = release_page_notes(u).await;
+        if !lines.is_empty() {
+            return (lines, link, "page");
+        }
+    }
+    if let Some(u) = m.release_notes_url.as_ref().or(gh.page.as_ref()).or(known.as_ref()) {
         let src = if github_repo(u).is_some() { github_raw(u) } else { Some(u.clone()) };
         if let Some(src) = src {
-            if let Some(body) = notes::fetch_page(&src).await {
-                let lines = notes::page_notes(&body, ver);
+            // Kept on disk for a while: every listed version reads the same page.
+            if let Some(body) = notes::page(&src).await {
+                let lines = notes::page_notes_at(&src, &body, ver);
                 if !lines.is_empty() {
                     return (lines, link, "page");
                 }
@@ -2198,6 +2241,29 @@ async fn notes_detail(m: &Manifest, gh: &Gh) -> (Vec<String>, Option<String>, &'
             return (lines, url, "github");
         }
         link = link.or(url);
+    }
+    // 4. The release page of the forge the download comes from (GitHub, Codeberg, GitLab), read
+    // from the page itself: no API, so no request limit.
+    let mut pages: Vec<String> = m.installers.iter().filter_map(|i| notes_web::release_page_of(&i.url)).collect();
+    if let Some((o, r)) = repo_of(m) {
+        // A project whose downloads are elsewhere: its release for this version, as tagged.
+        for t in [format!("v{ver}"), ver.to_string()] {
+            pages.push(format!("https://github.com/{o}/{r}/releases/tag/{t}"));
+        }
+    }
+    pages.dedup();
+    for page in pages.iter().filter(|p| Some(*p) != m.release_notes_url.as_ref()).take(3) {
+        let lines = if page.starts_with("https://gitlab.com/") { notes_web::gitlab_release_notes(page).await } else { release_page_notes(page).await };
+        if !lines.is_empty() {
+            return (lines, Some(page.clone()), "release page");
+        }
+    }
+    // 5. The publisher's own site: the changelog its homepage links to.
+    let home = [&m.package_url, &m.publisher_url].into_iter().flatten().find(|u| github_repo(u).is_none() && !u.contains("gitlab.com/") && u.starts_with("https://"));
+    if let Some(home) = home {
+        if let Some((page, lines)) = notes_web::publisher_notes(home, ver).await {
+            return (lines, Some(page), "site");
+        }
     }
     (vec![], link, "")
 }
@@ -2310,7 +2376,7 @@ pub async fn catalog_versions(id: &str, feed: Option<&Feed>, installed: &[Instal
 
 // ---------------------------------------------------------------- plans
 
-fn safe_name(s: &str) -> String {
+pub(crate) fn safe_name(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect()
 }
 
@@ -2574,7 +2640,9 @@ pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
             cleanup: vec![],
         });
     }
-    let u = inst.uninstall.clone().filter(|u| !u.is_empty()).ok_or_else(|| anyhow!("{} has no silent uninstaller registered", inst.name))?;
+    // No silent command known: its own uninstaller runs (silently when its kind is recognised,
+    // otherwise in its window), as for Other programs.
+    let Some(u) = inst.uninstall.clone().filter(|u| !u.is_empty()) else { return crate::uninstall::run::plan(inst) };
     let user = matches!(&inst.data, SourceData::Other { entry, .. } if entry.hive == "HKCU");
     let exe = PathBuf::from(&u[0]);
     let in_pf = starts_dir(&u[0], &paths::program_files()) || starts_dir(&u[0], &paths::program_files_x86());
@@ -2601,6 +2669,8 @@ pub fn install_seconds(mb: f64) -> f64 {
 
 #[cfg(test)]
 mod tests;
+pub mod notes_known;
+pub mod notes_web;
 #[cfg(test)]
 mod package_tests;
 #[cfg(test)]

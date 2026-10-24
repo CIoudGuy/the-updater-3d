@@ -55,6 +55,7 @@ pub fn outline(fragment: &str) -> Vec<String> {
 /// bigger level, or by the end of the list), so empty sections do not show.
 pub fn tidy_headings(lines: Vec<String>) -> Vec<String> {
     let level = |s: &str| s.chars().take_while(|c| *c == '#').count();
+    let lines = without_boilerplate(lines);
     let mut keep = vec![true; lines.len()];
     // From the end, so a section whose subsections were all dropped is dropped too.
     let mut next_kept: Option<usize> = None;
@@ -82,6 +83,35 @@ pub fn tidy_headings(lines: Vec<String>) -> Vec<String> {
             let lv = level(l) - (min - 2);
             *l = format!("{} {}", "#".repeat(lv.min(3)), l[level(l)..].trim());
         }
+    }
+    out
+}
+
+/// Sections that list no changes: package and image lists, older versions, sign-offs.
+const BOILERPLATE: [&str; 10] = ["packages updated", "new contributors", "packages updated in this release", "prior versions", "previous versions", "older versions", "docker images", "checksums", "sha256 checksums", "contributors"];
+
+/// The lines without boilerplate sections (a heading from `BOILERPLATE` and everything under it).
+fn without_boilerplate(lines: Vec<String>) -> Vec<String> {
+    let level = |s: &str| s.chars().take_while(|c| *c == '#').count();
+    let mut out = Vec::with_capacity(lines.len());
+    let mut skip: Option<usize> = None;
+    for l in lines {
+        let lv = level(&l);
+        let heading = lv > 0 && l.chars().nth(lv) == Some(' ');
+        if heading {
+            if skip.is_some_and(|s| lv > s) {
+                continue;
+            }
+            let text = l[lv..].trim().trim_end_matches(':').to_ascii_lowercase();
+            if BOILERPLATE.contains(&text.as_str()) {
+                skip = Some(lv);
+                continue;
+            }
+            skip = None;
+        } else if skip.is_some() {
+            continue;
+        }
+        out.push(l);
     }
     out
 }
@@ -209,7 +239,8 @@ fn parse_date(s: &str) -> Option<String> {
     None
 }
 
-async fn page(url: &str) -> Option<String> {
+/// A page, kept on disk for 12 hours (every version of an app asks for the same pages).
+pub async fn page(url: &str) -> Option<String> {
     let f = tokio::time::timeout(Duration::from_secs(12), http::get_cached(url, &[], Duration::from_secs(12 * 3600))).await.ok()?.ok()?;
     Some(String::from_utf8_lossy(&f.body).into_owned())
 }
@@ -974,9 +1005,84 @@ pub async fn krita(ver: &str, year: i32) -> Option<(String, Vec<String>)> {
 
 /// Does `text` name version `ver`? "1.2" also counts for "1.2.0". Digits or dots right next to
 /// it make it another version ("11.2.3", "1.2.30").
+/// `page_notes` for a page at `url`: when the address itself names the version
+/// ("/changelogs/25.03/", "gimp-3.2.html" for 3.2.6, "RN-...-8-09-28-1124.html") the whole page
+/// is about it, so its main content is the change list even when no heading repeats the version.
+pub fn page_notes_at(url: &str, body: &str, ver: &str) -> Vec<String> {
+    let lines = page_notes(body, ver);
+    if !lines.is_empty() || !url_names_version(url, ver) {
+        return lines;
+    }
+    // A page for a whole series ("Changelog-7.2") that names other releases of it but not this
+    // one has no notes for this one yet.
+    if series_page_without(body, ver) {
+        return vec![];
+    }
+    let mut html = body.to_string();
+    for tag in ["script", "style", "nav", "svg", "noscript", "title", "header", "footer", "aside"] {
+        let re = regex::Regex::new(&format!(r"(?is)<{tag}[\s>].*?</{tag}>")).unwrap();
+        html = re.replace_all(&html, "").into_owned();
+    }
+    let main = ["<main", "<article"].iter().find_map(|t| html.find(t)).map(|i| &html[i..]).unwrap_or(&html);
+    outline(main)
+}
+
+/// Does `body` name other releases of `ver`'s series ("7.2.20" for 7.2.22) but not `ver`?
+fn series_page_without(body: &str, ver: &str) -> bool {
+    let parts: Vec<&str> = ver.trim().trim_start_matches(['v', 'V']).split('.').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let series = format!("{}.{}.", parts[0], parts[1]);
+    let re = regex::Regex::new(&format!(r"(^|[^0-9.]){}\d+", regex::escape(&series))).unwrap();
+    re.is_match(body) && !names_version(body, ver)
+}
+
+/// Does the path of `url` name `ver`, or its first two parts for a bug-fix version ("3.2" of
+/// "3.2.6"), written with dots, dashes or underscores?
+pub fn url_names_version(url: &str, ver: &str) -> bool {
+    let Ok(u) = url::Url::parse(url) else { return false };
+    let path = u.path().to_ascii_lowercase();
+    let ver = ver.trim().trim_start_matches(['v', 'V']).to_ascii_lowercase();
+    let parts: Vec<&str> = ver.split('.').collect();
+    let mut forms = vec![ver.clone()];
+    if parts.len() >= 3 {
+        forms.push(parts[..2].join("."));
+    }
+    forms.iter().filter(|f| f.contains('.') && f.len() >= 3).any(|f| {
+        [f.clone(), f.replace('.', "-"), f.replace('.', "_")].iter().any(|g| {
+            let mut from = 0;
+            while let Some(i) = path[from..].find(g.as_str()) {
+                let (s, e) = (from + i, from + i + g.len());
+                let before = path[..s].chars().last();
+                let mut rest = path[e..].chars();
+                let after = rest.next();
+                let edge_before = before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '.');
+                let edge_after = after.is_none_or(|c| !c.is_ascii_digit() && c != '.' && c != '-' && c != '_') || (matches!(after, Some('.' | '-' | '_')) && rest.next().is_none_or(|c| !c.is_ascii_digit()));
+                if edge_before && edge_after {
+                    return true;
+                }
+                from = e;
+            }
+            false
+        })
+    })
+}
+
 pub fn names_version(text: &str, ver: &str) -> bool {
     let base = ver.trim().trim_start_matches(['v', 'V']).to_string();
     let mut forms = vec![base.clone()];
+    // A packaged build of a release: "21.0.12.101" and "6.0.6-1" are 21.0.12 and 6.0.6 on the
+    // publisher's page.
+    if let Some((rel, n)) = base.rsplit_once('-') {
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && rel.contains('.') {
+            forms.push(rel.to_string());
+        }
+    }
+    let parts: Vec<&str> = base.split('.').collect();
+    if parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
+        forms.push(parts[..3].join("."));
+    }
     let mut short = base;
     while let Some(s) = short.strip_suffix(".0") {
         short = s.to_string();
@@ -1338,6 +1444,47 @@ mod tests {
         // No cap: a long list stays whole.
         let long: String = (0..60).map(|i| format!("- Fixed problem number {i}\n")).collect();
         assert_eq!(text_lines(&long).len(), 60);
+    }
+
+    #[test]
+    fn a_packaged_build_is_found_under_its_release() {
+        // Seen with OpenJDK, TreeSize and BleachBit: the catalog's version has a build part.
+        assert!(names_version("Release notes for 21.0.12 (October 2026)", "21.0.12.101"));
+        assert!(names_version("BleachBit 6.0.6 was released", "6.0.6-1"));
+        assert!(!names_version("Release notes for 21.0.13", "21.0.12.101"));
+        assert!(!names_version("Version 2.1", "2.1.0.4-beta"), "only a number after the dash");
+    }
+
+    #[test]
+    fn package_lists_and_older_versions_are_not_changes() {
+        let lines: Vec<String> = ["## Security fixes", "Fixed CVE-2026-1234 in the runtime", "## Packages updated in this release", "Microsoft.NETCore.App 8.0.32", "Microsoft.AspNetCore.App 8.0.32", "## Known issues", "A known issue that is still open", "## Prior Versions", "### 4.6.8", "Older fix"].iter().map(|s| s.to_string()).collect();
+        let out = tidy_headings(lines);
+        assert_eq!(out, vec!["## Security fixes", "Fixed CVE-2026-1234 in the runtime", "## Known issues", "A known issue that is still open"]);
+    }
+
+    #[test]
+    fn a_series_page_without_this_release_gives_nothing() {
+        // Seen with VirtualBox: "Changelog-7.2" lists 7.2.20 and older, not yet 7.2.22.
+        let page = "<html><body><main><h3>VirtualBox 7.2.20 (released 2026-09-01)</h3><ul><li>Fixed a crash when resizing a window</li></ul></main></body></html>";
+        assert!(page_notes_at("https://www.virtualbox.org/wiki/Changelog-7.2", page, "7.2.22").is_empty());
+        let one = "<html><body><main><h2>New in this release</h2><ul><li>Faster startup on large projects here</li></ul></main></body></html>";
+        assert!(!page_notes_at("https://www.gimp.org/release-notes/gimp-3.2.html", one, "3.2.6").is_empty());
+    }
+
+    #[test]
+    fn a_page_whose_address_names_the_version_is_read_whole() {
+        assert!(url_names_version("https://www.codeblocks.org/changelogs/25.03/", "25.03"));
+        assert!(url_names_version("https://www.gimp.org/release-notes/gimp-3.2.html", "3.2.6"));
+        assert!(url_names_version("https://www.amd.com/en/resources/release-notes/RN-RYZEN-CHIPSET-8-09-28-1124.html", "8.09.28.1124"));
+        assert!(!url_names_version("https://www.gimp.org/release-notes/gimp-3.20.html", "3.2.6"));
+        assert!(!url_names_version("https://example.org/news/", "3.2.6"));
+        assert!(!url_names_version("https://example.org/v13.2.6/", "3.2.6"), "13.2.6 is not 3.2.6");
+        // Seen with Code::Blocks: the page for 25.03 never repeats "25.03" in a heading.
+        let page = "<html><head><title>Changelog</title></head><body><nav><ul><li>Home page link item here</li></ul></nav><main><h2>Editor</h2><ul><li>Fixed a crash when closing many tabs</li></ul></main></body></html>";
+        assert!(page_notes(page, "25.03").is_empty());
+        let whole = page_notes_at("https://www.codeblocks.org/changelogs/25.03/", page, "25.03");
+        assert!(whole.iter().any(|l| l == "Fixed a crash when closing many tabs") && !whole.iter().any(|l| l.contains("Home page")), "{whole:?}");
+        assert!(page_notes_at("https://www.codeblocks.org/news/", page, "25.03").is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Drivers, listed with the apps (group "Drivers"): every graphics card with its maker's own
 //! newest driver (NVIDIA, AMD, Intel), every other device that has a driver from its maker,
 //! Intel's own drivers for Intel Wi-Fi, Bluetooth and network adapters, the AMD chipset drivers,
-//! the BIOS (Gigabyte boards: the newest one Gigabyte lists), and every driver update Windows
+//! the BIOS (the newest one the board's or PC's maker lists, see `board`), and every driver update Windows
 //! Update offers this PC (`Type='Driver'`, the same list as Settings > Windows Update > Optional
 //! updates). Microsoft signs every Windows Update driver; a maker's own package must be signed by
 //! that maker. Windows Update installs run this program again elevated
@@ -82,7 +82,7 @@ pub fn host_is(url: &str, hosts: &[&str]) -> bool {
 }
 
 /// The makers' and Microsoft's sites: the only addresses a driver's links may open.
-const LINK_HOSTS: [&str; 7] = ["nvidia.com", "amd.com", "intel.com", "gigabyte.com", "microsoft.com", "windowsupdate.com", "realtek.com"];
+const LINK_HOSTS: [&str; 13] = ["nvidia.com", "amd.com", "intel.com", "gigabyte.com", "microsoft.com", "windowsupdate.com", "realtek.com", "asus.com", "msi.com", "asrock.com", "dell.com", "hp.com", "lenovo.com"];
 
 /// A link from a maker's answer, kept only when it points to a maker's or Microsoft's site.
 pub fn safe_link(url: Option<String>) -> Option<String> {
@@ -274,6 +274,8 @@ pub enum How {
     Amd(super::amd::Release),
     Intel(super::intel::Release),
     AmdChipset(super::chipset::Release),
+    /// A package from the board's or PC's maker (Dell, HP, Lenovo catalogs)
+    Maker(Box<super::board::MakerDriver>),
 }
 
 /// A driver as the apps list shows it, with how to install its update (if there is one).
@@ -358,7 +360,17 @@ pub struct Inputs<'a> {
     /// The AMD chipset drivers: the installed version and AMD's newest
     pub chipset: Option<(&'a str, Option<&'a super::chipset::Release>)>,
     pub bios: Option<&'a super::board::Bios>,
+    /// Drivers and tools the board's or PC's maker lists for it, and the maker's name
+    pub maker: &'a [super::board::MakerDriver],
+    pub maker_name: &'a str,
     pub windows11: bool,
+}
+
+/// Does a hardware id from a maker's list name this installed device? The same id, or one
+/// that is the other with more parts ("PCI\VEN_8086&DEV_A0F0" and "...&SUBSYS_0A1F1028").
+pub fn hw_match(listed: &str, installed: &str) -> bool {
+    let (a, b) = (listed.trim().to_ascii_uppercase(), installed.trim().to_ascii_uppercase());
+    !a.is_empty() && !b.is_empty() && (a == b || a.starts_with(&format!("{b}&")) || b.starts_with(&format!("{a}&")))
 }
 
 /// Everything listed under Drivers, one entry per device.
@@ -537,6 +549,54 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
         }
     }
 
+    // What the board's or PC's maker lists: for its devices when it is newer than what is
+    // listed for them, and its own tools whose installed version the maker says how to read.
+    let maker_src = inp.maker_name.to_ascii_lowercase();
+    for d in inp.maker {
+        let how = d.install.clone().map(|_| How::Maker(Box::new(d.clone())));
+        let fill = |e: &mut DriverEntry, have: &str| {
+            let newer = super::update_offered(&d.version, have, false);
+            e.latest = Some(d.version.clone());
+            e.status = if newer { AppStatus::Update } else { AppStatus::Current };
+            e.size = if newer { d.size } else { None };
+            e.date = d.date.clone();
+            e.notes = d.notes.clone();
+            e.notes_url = safe_link(d.page.clone());
+            e.source = maker_src.clone();
+            if newer && d.install.is_none() {
+                e.vendor_url = safe_link(d.page.clone());
+                e.note = Some(format!("{} from {}: get it from {}'s page", d.name, inp.maker_name, inp.maker_name));
+            } else {
+                e.note = Some(format!("{} from {}", d.name, inp.maker_name));
+            }
+            newer
+        };
+        let devices: Vec<&Present> = present.iter().filter(|p| d.hardware_ids.iter().any(|h| hw_match(h, &p.matching_id))).collect();
+        if !devices.is_empty() {
+            for p in devices {
+                let Some(&k) = by_device.get(&p.matching_id.to_ascii_lowercase()) else { continue };
+                // Not newer than the installed driver, or than what is already offered for it.
+                if !super::update_offered(&d.version, &p.version, false) {
+                    continue;
+                }
+                let cur = &out[k];
+                let offered = cur.how.is_some() && cur.entry.latest.as_deref().is_some_and(|l| !super::update_offered(&d.version, l, false));
+                if offered {
+                    continue;
+                }
+                let mut e = cur.entry.clone();
+                fill(&mut e, &p.version);
+                out[k] = Found { entry: e, how: how.clone() };
+            }
+            continue;
+        }
+        if let Some(have) = d.installed.as_deref() {
+            let mut e = base_entry(format!("driver:maker:{maker_src}:{}", d.id.to_ascii_lowercase()), d.name.clone(), d.kind.clone(), inp.maker_name.to_string(), &maker_src, have.to_string());
+            let newer = fill(&mut e, have);
+            out.push(Found { entry: e, how: if newer { how } else { None } });
+        }
+    }
+
     // The AMD chipset drivers (one package for all of them).
     if let Some((have, rel)) = inp.chipset {
         let mut e = base_entry("driver:amd-chipset".into(), "AMD Chipset Software".into(), "Chipset".into(), "AMD".into(), "amd", have.to_string());
@@ -641,6 +701,7 @@ pub fn plan(f: &Found) -> Result<Plan> {
         How::Amd(r) => super::amd::plan_install(&e.id, &e.name, r),
         How::Intel(r) => super::intel::plan_install(&e.id, &e.name, r),
         How::AmdChipset(r) => super::chipset::plan_install(&e.id, &e.name, r),
+        How::Maker(d) => super::board::plan_install(&e.id, &e.name, d),
         How::WindowsUpdate { update_id } => {
             let me = std::env::current_exe()?;
             Ok(Plan {
