@@ -230,16 +230,15 @@
   const otherHave = $derived(found.filter((c) => c.group === "Other apps" && c.installed).length);
   const otherTotal = $derived(ui.otherBrowse?.total ?? 0);
   const counts = $derived(Object.fromEntries(SECTIONS.map((x) => [x.group, x.group === "Other apps" ? otherTotal : found.filter((c) => c.group === x.group).length])) as Record<Group, number>);
-  // a filter on a source that was switched off falls back to All
-  const filter = $derived(ui.getGroup !== "all" && onSources.some((x) => x.group === ui.getGroup) ? ui.getGroup : "all");
-  const filterOpts = $derived([
-    { value: "all", label: "All", badge: onSources.reduce((n, x) => n + counts[x.group], 0) },
-    ...onSources.map((x) => ({ value: x.group as string, label: x.group, badge: counts[x.group] })),
-  ]);
+  // One source at a time, Other apps first; one that was switched off falls back to Other apps
+  // (or the first source that is on).
+  const filter = $derived(onSources.some((x) => x.group === ui.getGroup) ? ui.getGroup : (onSources.find((x) => x.group === "Other apps") ?? onSources[0])?.group ?? "Other apps");
+  const filterOpts = $derived(onSources.map((x) => ({ value: x.group as string, label: x.group, badge: counts[x.group] })));
 
   const sections = $derived(
     onSources
-      .filter((x) => filter === "all" || filter === x.group)
+      // A search looks through every source.
+      .filter((x) => !!q || filter === x.group)
       .map((x) => {
         // Other apps: one place per entry of the whole list, null until its page is loaded
         if (x.group === "Other apps") return { ...x, items: [] as CatalogEntry[], slots: ui.otherBrowse?.entries ?? [], total: otherTotal };
@@ -273,7 +272,7 @@
     <label class="search">
       <Icon d={I.search} />
       <input bind:this={searchInput} bind:value={ui.getQuery} aria-label="Search apps to install" placeholder="Search apps" spellcheck="false" autocomplete="off" />
-      {#if !ui.compact}<span class="kbd">Ctrl F</span>{/if}
+      {#if ui.getQuery}<button class="clr" aria-label="Clear the search" title="Clear  Esc" onclick={(e) => { e.preventDefault(); ui.getQuery = ""; searchInput?.focus(); }}><Icon d={I.close} size={12} width={2.5} /></button>{:else if !ui.compact}<span class="kbd">Ctrl F</span>{/if}
     </label>
   </div>
 
@@ -406,6 +405,20 @@
   }
   .search input::placeholder {
     color: var(--text-3);
+  }
+  .clr {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin-right: -4px;
+    border-radius: 6px;
+    color: var(--text-3);
+    flex: none;
+  }
+  .clr:hover {
+    color: var(--text);
+    background: #2a2a2a;
   }
   .kbd {
     font-size: 12px;

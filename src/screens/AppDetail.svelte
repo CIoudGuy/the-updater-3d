@@ -16,9 +16,9 @@
   import { DAB } from "../lib/paths";
   import { call, on, send } from "../lib/api";
   import { store, statusColor } from "../lib/store.svelte";
-  import { canRepair, ui } from "../lib/ui.svelte";
+  import { canRepair, isIgnored, ui } from "../lib/ui.svelte";
   import { router } from "../lib/router.svelte";
-  import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, showInFolder, updateOne } from "../lib/actions";
+  import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, setIgnored, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
@@ -33,6 +33,8 @@
   const isAdobe = $derived(app?.source === "adobe");
   /** a device driver, the chipset or the BIOS: installs only its newest version, never rolls back */
   const isDriver = $derived(app?.source === "drivers");
+  /** its updates are turned off ("Don't update") */
+  const ignored = $derived(!!app && isIgnored(app.id));
   /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
   const sideBySide = $derived(isBlender || (app?.source === "tools" && app.id.split(":").length > 2));
 
@@ -132,6 +134,7 @@
     if (!app) return "";
     if (app.source === "programs" && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
     if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
+    if (!job && ignored) return app.latest && cmpVersion(app.latest, app.version) > 0 ? `Updates off, ${app.latest} is out` : "Updates off";
     switch (app.status) {
       case "update":
         return `${app.latest} available${app.updateSize ? ", " + bytes(app.updateSize) : ""}`;
@@ -180,6 +183,9 @@
           {:else}
             {#if app.status !== "missing" && !isDriver}
               <Btn variant="ghost" title="Open {app.name}  O" onclick={() => openApp(app.id)}>Open</Btn>
+            {/if}
+            {#if ignored}
+              <Btn variant="secondary" title="Show and install its updates again" onclick={() => setIgnored(app.id, false)}>Turn updates on</Btn>
             {/if}
             {#if isDriver && store.status.restartNeeded}
               <Btn variant="secondary" title="Restart the PC in a minute to finish installing drivers" onclick={() => send("restart_pc", {})}>Restart PC</Btn>

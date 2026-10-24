@@ -7,6 +7,14 @@
   import { pop } from "../lib/motion";
 
   const p = $derived(ui.popover);
+  let query = $state("");
+  let searchEl = $state<HTMLInputElement>();
+  /** The items shown: all of them, or the ones whose name has the search text */
+  const items = $derived.by(() => {
+    if (!p) return [];
+    const q = query.trim().toLowerCase();
+    return p.search && q ? p.items.filter((it) => !it.divider && it.label.toLowerCase().includes(q)) : p.items;
+  });
   let root = $state<HTMLElement>();
   let marker = $state<HTMLElement>();
   let els: Array<HTMLElement | undefined> = [];
@@ -16,8 +24,10 @@
   const isMenu = $derived(p?.kind === "menu");
   const itemH = $derived(isMenu ? 32 : 30);
   const width = $derived(isMenu ? 256 : (p?.width ?? 180));
-  const fullHeight = $derived(p ? 8 + p.items.reduce((n, it) => n + (it.divider ? 9 : itemH), 0) : 0);
-  const height = $derived(Math.min(fullHeight, 336));
+  const searchH = $derived(p?.search ? 40 : 0);
+  // With a search box the list keeps its size while it narrows down.
+  const fullHeight = $derived(p ? 8 + searchH + (p.search ? p.items : items).reduce((n, it) => n + (it.divider ? 9 : itemH), 0) : 0);
+  const height = $derived(Math.min(fullHeight, 336 + searchH));
 
   const pos = $derived.by(() => {
     if (!p) return { left: 0, top: 0, origin: "top left" };
@@ -36,12 +46,12 @@
   });
 
   function enabled(i: number) {
-    const it = p?.items[i];
+    const it = items[i];
     return !!it && !it.divider && !it.disabled;
   }
   function move(dir: 1 | -1) {
     if (!p) return;
-    const n = p.items.length;
+    const n = items.length;
     let i = hi;
     for (let k = 0; k < n; k++) {
       i = (i + dir + n) % n;
@@ -53,7 +63,7 @@
   }
   function pick(i: number) {
     if (!p || !enabled(i)) return;
-    const id = p.items[i].id;
+    const id = items[i].id;
     const fn = p.onpick;
     ui.closePopover();
     fn(id);
@@ -76,13 +86,14 @@
     const cur = p;
     if (!cur) {
       animMarker = false;
+      query = "";
       return;
     }
     const sel = cur.selected ? cur.items.findIndex((x) => x.id === cur.selected) : -1;
     hi = sel >= 0 ? sel : cur.items.findIndex((_, i) => enabled(i));
     tick().then(() => {
       layoutMarker();
-      root?.focus({ preventScroll: true });
+      (cur.search ? searchEl : root)?.focus({ preventScroll: true });
       requestAnimationFrame(() => (animMarker = true));
     });
   });
@@ -90,10 +101,16 @@
     hi;
     tick().then(layoutMarker);
   });
+  // A new search text: the first match is the one Enter picks.
+  $effect(() => {
+    if (ui.popover?.search && query) hi = items.findIndex((_, i) => enabled(i));
+  });
 
   function onkey(e: KeyboardEvent) {
     if (!p) return;
     const k = e.key;
+    // In the search box, Space, Home and End edit the text.
+    const typing = e.target instanceof HTMLInputElement;
     if (k === "ArrowDown") {
       e.preventDefault();
       move(1);
@@ -101,12 +118,14 @@
       e.preventDefault();
       move(-1);
     } else if (k === "Home") {
+      if (typing) return;
       e.preventDefault();
-      hi = p.items.findIndex((_, i) => enabled(i));
+      hi = items.findIndex((_, i) => enabled(i));
     } else if (k === "End") {
+      if (typing) return;
       e.preventDefault();
-      hi = p.items.map((_, i) => i).filter(enabled).pop() ?? hi;
-    } else if (k === "Enter" || k === " ") {
+      hi = items.map((_, i) => i).filter(enabled).pop() ?? hi;
+    } else if (k === "Enter" || (k === " " && !typing)) {
       e.preventDefault();
       pick(hi);
     } else if (k === "Escape") {
@@ -118,7 +137,7 @@
       ui.closePopover();
     } else if (isMenu && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const want = k === "Delete" ? "del" : k.toLowerCase();
-      const i = p.items.findIndex((it) => it.key?.toLowerCase() === want && !it.disabled);
+      const i = items.findIndex((it) => it.key?.toLowerCase() === want && !it.disabled);
       if (i >= 0) {
         e.preventDefault();
         pick(i);
@@ -142,10 +161,16 @@
     out:pop|global={{ origin: pos.origin, duration: 70 }}
   >
     <Paint kind="blob" fill="#262626" />
-    <div class="scroll" style="max-height:{height - 8}px">
+    {#if p.search}
+      <label class="find">
+        <Icon d={I.search} size={14} />
+        <input bind:this={searchEl} bind:value={query} placeholder={p.search} aria-label={p.search} spellcheck="false" autocomplete="off" />
+      </label>
+    {/if}
+    <div class="scroll" style="max-height:{height - 8 - searchH}px">
     <span class="hi" class:anim={animMarker} bind:this={marker}><Paint kind="swatch" fill="#323232" /></span>
     <div class="items">
-      {#each p.items as it, i (it.id + i)}
+      {#each items as it, i (it.id + i)}
         {#if it.divider}
           <div class="div"></div>
         {:else if it.skeleton}
@@ -172,11 +197,41 @@
         {/if}
       {/each}
     </div>
+    {#if p.search && !items.length}<p class="nomatch">No app matches "{query.trim()}"</p>{/if}
     </div>
   </div>
 {/if}
 
 <style>
+  .find {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    margin: 0 0 8px;
+    padding: 0 10px;
+    border-radius: 7px;
+    background: #1c1c1c;
+    color: var(--text-3);
+  }
+  .find input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+  }
+  .nomatch {
+    position: relative;
+    margin: 0;
+    padding: 6px 10px 8px;
+    font-size: 13px;
+    color: var(--text-3);
+  }
   .backdrop {
     position: fixed;
     inset: 0;

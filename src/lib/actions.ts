@@ -193,5 +193,23 @@ export function runAppMenu(app: AppEntry, id: string) {
     case "uninstall":
       askUninstall(app.id);
       break;
+    case "ignore":
+    case "unignore":
+      setIgnored(app.id, id === "ignore");
+      break;
+    case "maker":
+      void send("open_driver_page", { id: app.id });
+      break;
   }
+}
+
+/** Turn an app's updates off ("Don't update") or on again. Its exception rule goes with it. */
+export function setIgnored(id: string, off: boolean) {
+  const now = store.settings.ignored ?? [];
+  const ignored = off ? [...new Set([...now, id])] : now.filter((x) => x !== id);
+  const exceptions = { ...store.settings.exceptions };
+  if (off) delete exceptions[id];
+  store.patchSettings({ ignored, exceptions });
+  const name = store.apps.find((a) => a.id === id)?.name ?? "This app";
+  store.toast("info", off ? `${name} is not updated any more. Turn it back on from its menu or in Settings.` : `${name} shows its updates again.`);
 }

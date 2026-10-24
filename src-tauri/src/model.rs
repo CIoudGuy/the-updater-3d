@@ -1,7 +1,7 @@
 //! Types shared with the UI. Mirrors src/lib/types.ts field for field.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -332,6 +332,10 @@ pub struct Settings {
     pub window_start: String,
     pub window_end: String,
     pub exceptions: BTreeMap<String, AutoMode>,
+    /// Apps and drivers the user does not want updated: their updates are not shown, counted,
+    /// notified or installed. Its own list (not an AutoMode), so older versions still read
+    /// these settings.
+    pub ignored: BTreeSet<String>,
     pub keep_previous_versions: bool,
     pub bandwidth_limit: u64,
     pub bandwidth_limit_enabled: bool,
@@ -366,6 +370,7 @@ impl Default for Settings {
             window_start: "02:00".into(),
             window_end: "06:00".into(),
             exceptions: BTreeMap::new(),
+            ignored: BTreeSet::new(),
             keep_previous_versions: false,
             bandwidth_limit: 40 * 1024 * 1024,
             bandwidth_limit_enabled: false,

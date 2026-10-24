@@ -2,6 +2,7 @@
 import type { AppEntry, CatalogEntry } from "./types";
 import type { BrowseState, OtherSort } from "./browse";
 import { focusAfterLeave } from "./keys";
+import { store } from "./store.svelte";
 
 export interface PopItem {
   id: string;
@@ -26,6 +27,8 @@ export interface Popover {
   label: string;
   anchor: HTMLElement | null;
   onpick: (id: string) => void;
+  /** a search box above a long list, with this placeholder */
+  search?: string;
 }
 
 export type DialogState =
@@ -94,8 +97,8 @@ class Ui {
   sort = $state<SortKey>(load("sort", ["name", "size", "updated", "status"] as const, "name"));
   query = $state("");
   getQuery = $state("");
-  /** Get apps source filter: "all", or a group name */
-  getGroup = $state<"all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps">("all");
+  /** Get apps: the source shown (a search looks through all of them) */
+  getGroup = $state<"Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps">("Other apps");
 
   /** Get apps list kept across visits, so coming back from a detail page does not reload it */
   catalog = $state<CatalogEntry[] | null>(null);
@@ -175,8 +178,20 @@ class Ui {
 
 export const ui = new Ui();
 
+/** The app's updates are turned off ("Don't update"). */
+export function isIgnored(id: string): boolean {
+  return (store.settings.ignored ?? []).includes(id);
+}
+
 export function menuItemsFor(app: AppEntry): PopItem[] {
   const items: PopItem[] = [];
+  const skip: PopItem = isIgnored(app.id) ? { id: "unignore", label: "Show its updates again", icon: "play" } : { id: "ignore", label: "Don't update", icon: "pause" };
+  if (app.source === "drivers") {
+    items.push({ id: "notes", label: "Release notes", icon: "notes", key: "N" });
+    if (app.manualUrl) items.push({ id: "maker", label: "Open the maker's page", icon: "external" });
+    items.push(skip);
+    return items;
+  }
   if (app.source === "programs") {
     // No catalog: no notes or other versions. A broken one is removed from the list instead.
     if (app.installDir && app.status !== "missing") items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
@@ -191,6 +206,7 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
   if (app.storeUrl) items.push({ id: "store", label: "Open in Microsoft Store", icon: "external", key: "S" });
   if (repairable && app.status !== "missing") items.push({ id: "repair", label: "Repair", icon: "repair", key: "R" });
   if (app.status !== "missing") items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
+  if (!app.readOnly) items.push(skip);
   items.push({ id: "sep", label: "", divider: true });
   items.push({ id: "uninstall", label: "Uninstall", icon: "trash", key: "Del", danger: true, disabled: !app.canUninstall });
   return items;

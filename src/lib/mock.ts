@@ -1165,6 +1165,7 @@ const handlers: H = {
   open_app: () => {},
   open_store_page: () => {},
   open_driver_page: () => {},
+  check_self_update: () => (MODE === "selfupdate" ? "1.2.0" : null),
   restart_pc: () => {},
   show_in_folder: () => {},
   get_versions: ({ appId }) => {

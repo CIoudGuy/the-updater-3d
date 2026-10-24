@@ -39,6 +39,8 @@ export interface Commands {
   open_store_page: { args: { appId: string }; ret: void };
   /** A driver's maker page: where a BIOS is updated from, or the maker's own updater for a card. */
   open_driver_page: { args: { id: string }; ret: void };
+  /** Look for a new version of this app only (not for app updates); the newer version or null. */
+  check_self_update: { args: {}; ret: string | null };
   /** Restart the PC in a minute to finish installing drivers. */
   restart_pc: { args: {}; ret: void };
   show_in_folder: { args: { appId: string }; ret: void };

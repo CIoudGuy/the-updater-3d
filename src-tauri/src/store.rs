@@ -7,7 +7,54 @@ use std::io::Write;
 
 pub fn load_settings() -> Settings {
     migrate_from_old_id();
-    std::fs::read(paths::settings_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let Ok(b) = std::fs::read(paths::settings_file()) else { return Settings::default() };
+    let (s, whole) = read_settings(&b);
+    if !whole {
+        // Keep the file as it was, in case something in it is wanted back.
+        let _ = std::fs::copy(paths::settings_file(), paths::settings_file().with_extension("json.unread"));
+    }
+    s
+}
+
+/// Settings from the saved file, keeping every value this version can read: one it can not (a
+/// rule from a newer version, a damaged value) falls back to its default alone, instead of all
+/// the settings going back to defaults. `true` when every value was read.
+pub fn read_settings(bytes: &[u8]) -> (Settings, bool) {
+    if let Ok(s) = serde_json::from_slice::<Settings>(bytes) {
+        return (s, true);
+    }
+    let Ok(serde_json::Value::Object(saved)) = serde_json::from_slice::<serde_json::Value>(bytes) else { return (Settings::default(), false) };
+    let mut v = serde_json::to_value(Settings::default()).unwrap_or_default();
+    for (k, val) in saved {
+        let Some(obj) = v.as_object_mut() else { break };
+        let before = obj.get(&k).cloned();
+        // Maps and lists value by value, so one unknown entry does not drop the rest.
+        let val = match (&val, &before) {
+            (serde_json::Value::Object(entries), Some(serde_json::Value::Object(defaults))) => {
+                let mut kept = defaults.clone();
+                for (ek, ev) in entries {
+                    let mut trial = obj.clone();
+                    let mut m = kept.clone();
+                    m.insert(ek.clone(), ev.clone());
+                    trial.insert(k.clone(), serde_json::Value::Object(m.clone()));
+                    if serde_json::from_value::<Settings>(serde_json::Value::Object(trial)).is_ok() {
+                        kept = m;
+                    }
+                }
+                serde_json::Value::Object(kept)
+            }
+            _ => val,
+        };
+        obj.insert(k.clone(), val);
+        if serde_json::from_value::<Settings>(v.clone()).is_err() {
+            let obj = v.as_object_mut().unwrap();
+            match before {
+                Some(b) => obj.insert(k, b),
+                None => obj.remove(&k),
+            };
+        }
+    }
+    (serde_json::from_value(v).unwrap_or_default(), false)
 }
 
 /// 1.0.0 used another app id and data folder. Bring its settings, state and activity across
@@ -316,6 +363,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn one_value_this_version_can_not_read_keeps_all_the_other_settings() {
+        // Before: one unknown value (a rule saved by a newer version, here "ignore") sent every
+        // setting back to its default, and the next save wrote the defaults over the file.
+        let saved = br#"{"checkInterval":12,"autoMode":"install","closeToTray":false,"bandwidthLimit":"fast",
+            "exceptions":{"craft:photocraft":"notify","blender:4.5":"ignore","other:7zip.7zip":"off"},
+            "sources":{"adobe":false,"craft":true,"blender":true,"tools":true,"other":true},"silentElevation":false,"someNewThing":1}"#;
+        let (s, whole) = super::read_settings(saved);
+        assert!(!whole);
+        assert_eq!((s.check_interval, s.auto_mode, s.close_to_tray, s.silent_elevation, s.sources.adobe), (12, crate::model::AutoMode::Install, false, false, false));
+        assert_eq!(s.bandwidth_limit, crate::model::Settings::default().bandwidth_limit, "only the damaged value is a default");
+        assert_eq!(s.exceptions.len(), 2, "{:?}", s.exceptions);
+        assert_eq!(s.exceptions.get("craft:photocraft"), Some(&crate::model::AutoMode::Notify));
+        // A file this version reads in full is read as it is.
+        let (s, whole) = super::read_settings(br#"{"checkInterval":6,"ignored":["other:7zip.7zip"]}"#);
+        assert!(whole && s.check_interval == 6 && s.ignored.contains("other:7zip.7zip"));
+        assert!(!super::read_settings(b"not json").1);
     }
 
     #[test]
