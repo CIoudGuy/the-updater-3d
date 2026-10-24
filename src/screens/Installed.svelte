@@ -111,7 +111,7 @@
       <label class="search">
         <Icon d={I.search} />
         <input bind:this={searchInput} bind:value={ui.query} aria-label="Search apps" placeholder="Search apps" spellcheck="false" autocomplete="off" />
-        {#if !ui.compact}<span class="kbd">Ctrl F</span>{/if}
+        {#if ui.query}<button class="clr" aria-label="Clear the search" title="Clear  Esc" onclick={(e) => { e.preventDefault(); ui.query = ""; searchInput?.focus(); }}><Icon d={I.close} size={12} width={2.5} /></button>{:else if !ui.compact}<span class="kbd">Ctrl F</span>{/if}
       </label>
       <Segmented variant="icon" options={viewOpts} value={ui.view} onchange={(v) => ui.setView(v)} label="View" />
     </div>
@@ -234,6 +234,20 @@
   }
   .search input::placeholder {
     color: var(--text-3);
+  }
+  .clr {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin-right: -4px;
+    border-radius: 6px;
+    color: var(--text-3);
+    flex: none;
+  }
+  .clr:hover {
+    color: var(--text);
+    background: #2a2a2a;
   }
   .kbd {
     font-size: 12px;

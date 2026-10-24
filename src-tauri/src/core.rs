@@ -915,6 +915,7 @@ impl Core {
         let sizes = self.adobe_sizes.lock().clone();
         let recorded = self.persisted.lock().updated_at.clone();
         let driver_list: Vec<drivers::Found> = if self.settings.read().sources.drivers { self.drivers.lock().found.clone() } else { vec![] };
+        let ignored = self.settings.read().ignored.clone();
         let st = self.st.lock();
         let jobs = self.jobs.lock();
         let mut out = Vec::new();
@@ -1003,6 +1004,7 @@ impl Core {
             };
             out.push(driver_app(e, status, f.how.is_some(), recorded.get(&e.id).cloned(), job.map(|j| j.id.clone())));
         }
+        skip_ignored(&mut out, &ignored);
         out
     }
 
@@ -1652,22 +1654,33 @@ impl Core {
         if !manual {
             self.auto_install(&apps);
         }
-        if online && crate::selfupdate::enabled() {
-            match crate::selfupdate::check().await {
-                Ok(Some(r)) => {
-                    let v = r.version.clone();
-                    let first = self.self_release.lock().as_ref().map(|x| x.version.clone()) != Some(v.clone());
-                    *self.self_release.lock() = Some(r);
-                    self.set_status(|s| s.self_update = Some(v.clone()));
-                    if first && settings.notify_updates {
-                        self.notify(&format!("The Updater 3D {v} is ready"), "Open the app to update it.");
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => log::warn!("self update check: {e:#}"),
+        if online {
+            if let Err(e) = self.check_self(settings.notify_updates).await {
+                log::warn!("self update check: {e:#}");
             }
         }
         Ok(())
+    }
+
+    /// Is there a newer version of this app? Only this app: Settings > About asks this alone.
+    /// Returns the newer version, if there is one.
+    pub async fn check_self(&self, notify: bool) -> Result<Option<String>> {
+        if !crate::selfupdate::enabled() {
+            return Ok(None);
+        }
+        match crate::selfupdate::check().await? {
+            Some(r) => {
+                let v = r.version.clone();
+                let first = self.self_release.lock().as_ref().map(|x| x.version.clone()) != Some(v.clone());
+                *self.self_release.lock() = Some(r);
+                self.set_status(|s| s.self_update = Some(v.clone()));
+                if first && notify {
+                    self.notify(&format!("The Updater 3D {v} is ready"), "Open the app to update it.");
+                }
+                Ok(Some(v))
+            }
+            None => Ok(None),
+        }
     }
 
     fn in_window(start: &str, end: &str) -> bool {
@@ -4052,6 +4065,16 @@ fn newest_update(recorded: Option<&str>, source: Option<&str>) -> Option<String>
 
 /// An update's size from the download server when its source did not give one.
 /// Why a copy that Steam or the Microsoft Store manages is not changed here.
+/// Updates the user turned off (Settings > Apps, or "Don't update" on the app) are not shown
+/// as updates: not listed, counted, notified or installed.
+fn skip_ignored(apps: &mut [AppEntry], ignored: &std::collections::BTreeSet<String>) {
+    for a in apps.iter_mut().filter(|a| a.status == AppStatus::Update && ignored.contains(&a.id)) {
+        a.status = AppStatus::Current;
+        a.update_size = None;
+        a.note = Some(format!("Updates are turned off for {}", a.name));
+    }
+}
+
 /// A driver as the apps list shows it. `installable`: its update installs here.
 fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at: Option<String>, job_id: Option<String>) -> AppEntry {
     let (fg, bg) = driver_colors(&e.maker);
@@ -4456,7 +4479,17 @@ mod tests {
 
 #[cfg(test)]
 mod job_fix_tests {
-    use super::{blockers, explain, step_failure};
+    use super::{blockers, explain, skip_ignored, step_failure};
+
+    #[test]
+    fn an_app_set_to_dont_update_shows_no_update() {
+        let d = crate::model::DriverEntry { id: "other:7zip.7zip".into(), name: "7-Zip".into(), kind: "x".into(), maker: "x".into(), source: "x".into(), version: "24.0".into(), latest: Some("25.0".into()), status: crate::model::AppStatus::Update, size: Some(1), date: None, notes_url: None, vendor_url: None, note: None, notes: vec![] };
+        let mut apps = vec![super::driver_app(&d, crate::model::AppStatus::Update, true, None, None), super::driver_app(&crate::model::DriverEntry { id: "other:vlc".into(), ..d.clone() }, crate::model::AppStatus::Update, true, None, None)];
+        skip_ignored(&mut apps, &["other:7zip.7zip".to_string()].into_iter().collect());
+        assert_eq!((apps[0].status, apps[0].update_size, apps[0].latest.as_deref()), (crate::model::AppStatus::Current, None, Some("25.0")));
+        assert!(apps[0].note.as_deref().unwrap().contains("turned off"));
+        assert_eq!(apps[1].status, crate::model::AppStatus::Update, "other apps are left alone");
+    }
     use crate::elevate::StepResult;
     use crate::model::JobKind;
     use crate::procs::Proc;

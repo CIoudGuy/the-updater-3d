@@ -187,6 +187,7 @@ pub fn run() {
             commands::leftover_restore,
             commands::leftover_backups,
             commands::open_driver_page,
+            commands::check_self_update,
             commands::restart_pc,
         ])
         .build(tauri::generate_context!())

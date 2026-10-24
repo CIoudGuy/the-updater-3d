@@ -15,7 +15,7 @@
   import { ui } from "../lib/ui.svelte";
   import { router, SETTINGS_SECTIONS, type SettingsSection } from "../lib/router.svelte";
   import { bytes, clock, driveOf } from "../lib/format";
-  import { checkNow, updateSelf } from "../lib/actions";
+  import { setIgnored, updateSelf } from "../lib/actions";
   import { MARKER_BASE, pageIn, pageOut, place, rise } from "../lib/motion";
   import type { AutoMode } from "../lib/types";
 
@@ -116,6 +116,8 @@
     { value: "notify", label: "Notify only" },
     { value: "install", label: "Install automatically" },
   ];
+  /** An app's own rule can also turn its updates off entirely. */
+  const ruleOpts: { value: AutoMode | "ignore"; label: string }[] = [...modeOpts, { value: "ignore", label: "Don't update" }];
   const hours = Array.from({ length: 24 }, (_, i) => ({ value: `${String(i).padStart(2, "0")}:00`, label: `${String(i).padStart(2, "0")}:00` }));
   const timeOpts = (cur: string) => (hours.some((h) => h.value === cur) ? hours : [...hours, { value: cur, label: cur }].sort((a, b) => a.value.localeCompare(b.value)));
   const parOpts = [1, 2, 3, 4].map((n) => ({ value: String(n), label: String(n) }));
@@ -134,17 +136,34 @@
     { value: "ja_JP", label: "Japanese" },
   ];
 
-  const exceptionIds = $derived(Object.keys(s.exceptions));
-  function setException(id: string, mode: AutoMode | null) {
+  const ignoredIds = $derived(s.ignored ?? []);
+  const exceptionIds = $derived([...new Set([...Object.keys(s.exceptions), ...ignoredIds])]);
+  /** The rule shown for an app: its exception, or "Don't update" */
+  const ruleOf = (id: string) => (ignoredIds.includes(id) ? "ignore" : s.exceptions[id]);
+  function setException(id: string, mode: AutoMode | "ignore" | null) {
+    if (mode === "ignore") return setIgnored(id, true);
     const next = { ...s.exceptions };
     if (mode) next[id] = mode;
     else delete next[id];
-    store.patchSettings({ exceptions: next });
+    store.patchSettings({ exceptions: next, ignored: ignoredIds.filter((x) => x !== id) });
+  }
+  /** Settings > About: only this app's own update, not the apps' */
+  let selfChecking = $state(false);
+  async function checkSelf() {
+    selfChecking = true;
+    try {
+      const v = await call("check_self_update", {});
+      if (!v) store.toast("info", "The Updater 3D is up to date.");
+    } catch (e) {
+      store.toast("err", `Could not check for a new version: ${e}`);
+    } finally {
+      selfChecking = false;
+    }
   }
   let addBtn = $state<HTMLElement>();
   function addException() {
     if (!addBtn) return;
-    const avail = store.apps.filter((a) => !(a.id in s.exceptions));
+    const avail = store.apps.filter((a) => !exceptionIds.includes(a.id)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     if (!avail.length) return store.toast("info", "Every app already has its own rule.");
     ui.openList({
       rect: addBtn.getBoundingClientRect(),
@@ -152,6 +171,7 @@
       width: 240,
       align: "end",
       label: "Add app",
+      search: "Search apps",
       anchor: addBtn,
       onpick: (id) => setException(id, "notify"),
     });
@@ -290,7 +310,7 @@
                 <div class="exc" in:rise>
                   {#if a}<Mark app={a} size={24} fs={10} />{:else}<span class="ph-mark"></span>{/if}
                   <span class="en ellipsis">{a?.name ?? id}</span>
-                  <Select options={modeOpts} value={s.exceptions[id]} onchange={(v) => setException(id, v as AutoMode)} width={180} height={30} label="Rule for {a?.name ?? id}" />
+                  <Select options={ruleOpts} value={ruleOf(id)} onchange={(v) => setException(id, v as AutoMode | "ignore")} width={180} height={30} label="Rule for {a?.name ?? id}" />
                   <button class="x" aria-label="Remove exception for {a?.name ?? id}" title="Remove" onclick={() => setException(id, null)}><Icon d={I.close} size={14} width={2.5} /></button>
                 </div>
               {/each}
@@ -383,7 +403,7 @@
           <SRow label={st.selfUpdate ? `Version ${st.selfUpdate} is ready` : "You have the latest version"} desc={st.selfUpdate ? "The app restarts itself to finish the update. Running installs are not interrupted." : "The Updater 3D keeps itself up to date."}>
             {#snippet control()}
               {#if st.selfUpdate}<Btn variant="primary" size="md" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading" : "Update and restart"}</Btn>{/if}
-              <Btn variant="raised" size="md" disabled={st.checking} onclick={checkNow}>{st.checking ? "Checking" : "Check now"}</Btn>
+              <Btn variant="raised" size="md" disabled={selfChecking} onclick={checkSelf} title="Looks for a new version of The Updater 3D only">{selfChecking ? "Checking" : "Check now"}</Btn>
             {/snippet}
           </SRow>
           {#if st.machine}<SRow label="Tuned for this PC" desc={`${st.machine}. Downloads and checks do as much at once as this PC handles well.`} />{/if}

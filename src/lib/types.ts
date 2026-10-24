@@ -246,6 +246,8 @@ export interface Settings {
   windowEnd: string;
   /** appId -> mode, overrides autoMode */
   exceptions: Record<string, AutoMode>;
+  /** apps and drivers whose updates are turned off: not shown, counted, notified or installed */
+  ignored?: string[];
   keepPreviousVersions: boolean;
   /** bytes per second, 0 = unlimited */
   bandwidthLimit: number;

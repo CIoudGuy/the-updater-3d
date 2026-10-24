@@ -2,8 +2,9 @@
   import { MARK, MARK_LINES, MARK_LINES_BIG } from "../lib/paths";
   import { mostlyDark } from "../lib/iconlook";
 
-  // The painted brand mark is always drawn first. The real icon fades in over it once it has loaded,
-  // and if it never loads (or fails) the mark simply stays, so an icon is never blank.
+  // Apps from the catalog and other programs show a soft shimmer until their real icon has loaded
+  // (it is looked up in the background). Apps with a painted brand mark (Adobe, Blender, drivers)
+  // show that mark, with the real icon fading in over it when there is one.
   let {
     app,
     size = 32,
@@ -11,7 +12,7 @@
     dim = false,
     eager = true,
   }: {
-    app: { code: string; fg: string; bg: string; iconUrl: string | null };
+    app: { id?: string; code: string; fg: string; bg: string; iconUrl: string | null };
     size?: number;
     fs?: number;
     dim?: boolean;
@@ -25,6 +26,8 @@
   const showImg = $derived(!!url && failedUrl !== url);
   const loaded = $derived(!!url && loadedUrl === url);
   const font = $derived(fs || Math.max(9, Math.round(size * 0.4)));
+  /** No painted mark for these: their icon comes from the app's own files or site. */
+  const shimmer = $derived(!loaded && /^(other:|prog:|msstore:)/.test(app.id ?? ""));
 
   /** Cached images can finish before Svelte attaches onload, so check `complete` when the node mounts. */
   function watch(img: HTMLImageElement) {
@@ -57,11 +60,15 @@
 </script>
 
 <span class="mark" class:dim class:plate style="width:{size}px;height:{size}px" aria-hidden="true">
-  <svg class:gone={loaded} viewBox="0 0 48 48" width={size} height={size}>
-    <path d={MARK} fill={app.bg} />
-    <path d={size >= 64 ? MARK_LINES_BIG : MARK_LINES} fill="none" stroke={app.fg} stroke-opacity="0.3" stroke-width="1.6" stroke-linecap="round" />
-  </svg>
-  <span class="code" class:gone={loaded} style="font-size:{font}px;color:{app.fg}">{app.code}</span>
+  {#if shimmer}
+    <span class="shim"></span>
+  {:else}
+    <svg class:gone={loaded} viewBox="0 0 48 48" width={size} height={size}>
+      <path d={MARK} fill={app.bg} />
+      <path d={size >= 64 ? MARK_LINES_BIG : MARK_LINES} fill="none" stroke={app.fg} stroke-opacity="0.3" stroke-width="1.6" stroke-linecap="round" />
+    </svg>
+    <span class="code" class:gone={loaded} style="font-size:{font}px;color:{app.fg}">{app.code}</span>
+  {/if}
   {#if showImg}
     {#key url}
       <img
@@ -116,6 +123,34 @@
     box-sizing: border-box;
     padding: 9%;
     background: #ececf0;
+  }
+  /* one moving highlight per icon, moved by the compositor only (no layout or paint work) */
+  .shim {
+    position: absolute;
+    inset: 0;
+    border-radius: 22%;
+    overflow: hidden;
+    background: #232323;
+  }
+  .shim::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.07) 50%, transparent 80%);
+    transform: translateX(-100%);
+    animation: shim 1.3s ease-in-out infinite;
+    will-change: transform;
+  }
+  @keyframes shim {
+    to {
+      transform: translateX(100%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .shim::after {
+      animation: none;
+      opacity: 0;
+    }
   }
   .code {
     position: relative;

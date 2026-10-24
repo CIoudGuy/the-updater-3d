@@ -360,6 +360,12 @@ pub async fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) -> Re
     Ok(())
 }
 
+/// Look for a newer version of this app only (Settings > About), not for app updates.
+#[tauri::command]
+pub async fn check_self_update(core: C<'_>) -> Res<Option<String>> {
+    core.inner().check_self(false).await.map_err(err)
+}
+
 // ------------------------------------------------------------ drivers
 
 /// Restart the PC to finish installing drivers (in a minute, so work can be saved).
