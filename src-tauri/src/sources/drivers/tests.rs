@@ -89,6 +89,35 @@ fn one_entry_per_device_named_after_it() {
 }
 
 #[test]
+fn an_nvidia_card_follows_nvidias_beta_drivers_only_when_chosen() {
+    let rel = crate::sources::nvidia::Release { version: "621.01".into(), url: "u".into(), name: "GeForce Game Ready Driver".into(), ..Default::default() };
+    let beta = crate::sources::nvidia::Release { version: "622.07".into(), url: "b".into(), name: "GeForce Game Ready Driver".into(), beta: true, ..Default::default() };
+    let cards = vec![gpu("PCI\\VEN_10DE&DEV_2803", "NVIDIA GeForce RTX 4060 Ti", "32.0.16.1088")];
+    let nv = vec![("PCI\\VEN_10DE&DEV_2803".to_string(), "1022".to_string(), Some(rel.clone()))];
+    let betas = vec![("1022".to_string(), beta.clone())];
+    // Not chosen: the release, and the choice is offered.
+    let list = collect(&Inputs { nvidia: &nv, nvidia_beta: &betas, ..with(None, &cards) });
+    assert_eq!((list[0].entry.latest.as_deref(), list[0].entry.pre_channel), (Some("621.01"), Some(false)));
+    // Chosen: the beta, named so.
+    let choice: std::collections::BTreeMap<String, bool> = [("driver:nvidia:1022".to_string(), true)].into();
+    let list = collect(&Inputs { nvidia: &nv, nvidia_beta: &betas, pre: Some(&choice), ..with(None, &cards) });
+    assert_eq!((list[0].entry.latest.as_deref(), list[0].entry.pre_channel), (Some("622.07"), Some(true)));
+    assert_eq!(list[0].how, Some(How::Nvidia(beta)));
+    assert!(list[0].entry.note.as_deref().is_some_and(|n| n.contains("(beta)")), "{:?}", list[0].entry.note);
+    // A beta older than the release, or none: no choice to make.
+    let old = vec![("1022".to_string(), crate::sources::nvidia::Release { version: "620.02".into(), beta: true, ..rel.clone() })];
+    assert_eq!(collect(&Inputs { nvidia: &nv, nvidia_beta: &old, ..with(None, &cards) })[0].entry.pre_channel, None);
+    assert_eq!(collect(&Inputs { nvidia: &nv, ..with(None, &cards) })[0].entry.pre_channel, None);
+}
+
+#[test]
+fn nvidias_beta_flag_is_read_from_its_answer() {
+    let answer = r#"{"Success":"1","IDS":[{"downloadInfo":{"Success":"1","Version":"622.07","Name":"GeForce%20Game%20Ready%20Driver","IsBeta":"1","IsWHQL":"0","DownloadURL":"https://us.download.nvidia.com/Windows/622.07/622.07-desktop-win10-win11-64bit-international-dch-whql.exe","ReleaseDateTime":"Wed Oct 28, 2026"}}]}"#;
+    assert!(crate::sources::nvidia::parse_lookup(answer).unwrap().beta);
+    assert!(!crate::sources::nvidia::parse_lookup(&answer.replace(r#""IsBeta":"1""#, r#""IsBeta":"0""#)).unwrap().beta);
+}
+
+#[test]
 fn every_graphics_card_is_listed() {
     let rel = crate::sources::nvidia::Release { version: "621.01".into(), url: "u".into(), name: "GeForce Game Ready Driver".into(), notes: vec!["### Fixed Gaming Bugs".into(), "Star Citizen: crash with Vulkan".into()], ..Default::default() };
     let cards = vec![

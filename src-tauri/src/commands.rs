@@ -504,11 +504,21 @@ pub async fn leftover_delete(core: C<'_>, scan_id: String, ids: Vec<String>) -> 
 /// Put back what a cleanup saved ("Restore" in Activity).
 #[tauri::command]
 pub async fn leftover_restore(core: C<'_>, backup_id: String) -> Res<()> {
+    // An app's settings saved before an update ("settings:<id>").
+    if let Some(id) = backup_id.strip_prefix("settings:") {
+        return core.inner().clone().restore_settings(id).await.map_err(err);
+    }
     crate::uninstall::run::restore(core.inner().clone(), &backup_id).await.map_err(err)
 }
 
-/// Cleanups that can still be restored.
+/// Cleanups, and apps' saved settings, that can still be restored.
 #[tauri::command]
 pub async fn leftover_backups() -> Res<Vec<crate::uninstall::run::BackupInfo>> {
-    tauri::async_runtime::spawn_blocking(crate::uninstall::run::backups).await.map_err(err)
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut list = crate::uninstall::run::backups();
+        list.extend(crate::snapshots::list(&crate::snapshots::root()).into_iter().filter(|s| !s.restored).map(|s| crate::uninstall::run::BackupInfo { id: format!("settings:{}", s.id), created: s.created, app: s.app, items: s.places.len() + s.keys.len() }));
+        list
+    })
+    .await
+    .map_err(err)
 }

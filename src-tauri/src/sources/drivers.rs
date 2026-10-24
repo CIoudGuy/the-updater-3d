@@ -366,6 +366,8 @@ pub struct Inputs<'a> {
     pub windows11: bool,
     /// The user's choice of beta drivers (entry id -> follows them)
     pub pre: Option<&'a std::collections::BTreeMap<String, bool>>,
+    /// NVIDIA's beta drivers: product id and its newest beta
+    pub nvidia_beta: &'a [(String, super::nvidia::Release)],
 }
 
 /// Intel's driver for a device listed under `id`, and whether that entry follows Intel's betas:
@@ -407,7 +409,14 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
             if out.iter().any(|f| f.entry.id == id) {
                 continue;
             }
+            // NVIDIA's beta: offered when the user chose betas for this card; the choice is
+            // there while a beta newer than the release is out (or the user follows them).
+            let choice = inp.pre.and_then(|m| m.get(&id).copied());
+            let beta = inp.nvidia_beta.iter().find(|(f, _)| !pfid.is_empty() && *f == pfid).map(|(_, b)| b.clone()).filter(|b| rel.as_ref().is_none_or(|r| super::update_offered(&b.version, &r.version, false)));
+            let follows = (beta.is_some() || choice == Some(true)).then(|| choice.unwrap_or(false));
+            let rel = if choice == Some(true) { beta.or(rel) } else { rel };
             let mut e = base_entry(id, p.desc.clone(), "Graphics".into(), "NVIDIA".into(), "nvidia", have.clone());
+            e.pre_channel = follows;
             let how = match rel {
                 Some(r) => {
                     e.latest = Some(r.version.clone());
@@ -417,7 +426,7 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
                     let newer = super::update_offered(&r.version, &have, false);
                     e.size = if newer { r.size.or(r.approx_size) } else { None };
                     e.status = if newer { AppStatus::Update } else { AppStatus::Current };
-                    e.note = Some(format!("{} from NVIDIA", r.name));
+                    e.note = Some(if r.beta && !r.name.to_ascii_lowercase().contains("beta") { format!("{} (beta) from NVIDIA", r.name) } else { format!("{} from NVIDIA", r.name) });
                     newer.then_some(How::Nvidia(r))
                 }
                 None => {

@@ -16,6 +16,7 @@ pub mod procs;
 pub mod render;
 pub mod selfupdate;
 pub mod services;
+pub mod snapshots;
 pub mod sources;
 pub mod store;
 pub mod tray;

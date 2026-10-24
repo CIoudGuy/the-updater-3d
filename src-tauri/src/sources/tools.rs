@@ -527,7 +527,8 @@ async fn unity_notes(src: &str) -> Vec<String> {
 
 pub async fn fetch(installed: &[Installed]) -> Result<Feed> {
     let mut feed = Feed::default();
-    let godot_pre = installed.iter().any(|i| matches!(&i.data, SourceData::Tools { key, .. } if key == "godot") && is_pre(&i.version));
+    // Godot's betas and release candidates: offered to a copy that follows pre-releases.
+    let godot_pre = installed.iter().any(|i| matches!(&i.data, SourceData::Tools { key, .. } if key == "godot"));
     let unity_series: Vec<String> = {
         let mut s: Vec<String> = installed.iter().filter(|i| matches!(&i.data, SourceData::Tools { key, .. } if key == "unity")).map(|i| version::series(&i.version)).collect();
         s.sort();
@@ -1069,17 +1070,25 @@ fn list_for<'a>(inst: &Installed, feed: &'a Feed) -> Option<&'a [Rel]> {
     }
 }
 
-/// Does the app publish pre-releases this copy could move to (its own series for an app that
-/// installs each series side by side)? Then the user can choose them: what it follows now
-/// (`choice`, else as the copy is). None when there are none.
-pub fn follows_pre(inst: &Installed, feed: &Feed, choice: Option<bool>) -> Option<bool> {
+/// Does the app publish pre-releases this copy could move to? Then the user can choose them:
+/// what it follows now (`choice`, else as the copy is). None when there are none. For an app
+/// that installs each series side by side, its own series' pre-releases count, and for the copy
+/// of the newest series here (`all`: the installed apps) a newer series' ones too, which install
+/// next to it (see `latest_with`).
+pub fn follows_pre(inst: &Installed, all: &[Installed], feed: &Feed, choice: Option<bool>) -> Option<bool> {
     if inst.read_only {
         return None;
     }
-    let d = def(tools_key(inst))?;
+    let key = tools_key(inst);
+    let d = def(key)?;
     let list = list_for(inst, feed)?;
     let same = |r: &&Rel| !d.side_by_side || version::series(&r.version) == version::series(&inst.version);
-    list.iter().filter(same).any(|r| r.prerelease && !r.url.is_empty()).then(|| choice.unwrap_or_else(|| is_pre(&inst.version)))
+    let newest_here = all.iter().filter(|o| tools_key(o) == key).map(|o| version::series(&o.version)).max_by(|a, b| version::cmp(a, b)).unwrap_or_else(|| version::series(&inst.version));
+    let top_final = list.iter().find(|r| !r.prerelease).map(|r| r.version.clone());
+    let next = |r: &&Rel| {
+        d.side_by_side && key != "unity" && version::series(&inst.version) == newest_here && version::newer(&version::series(&r.version), &newest_here) && top_final.as_ref().is_none_or(|t| cmp_ver(&r.version, t) == Ordering::Greater)
+    };
+    list.iter().filter(|r| same(r) || next(r)).any(|r| r.prerelease && !r.url.is_empty()).then(|| choice.unwrap_or_else(|| is_pre(&inst.version)))
 }
 
 /// `latest` with the user's choice of pre-releases for the app (None: as the copy is).
@@ -1114,7 +1123,8 @@ pub fn latest_with(inst: &Installed, all: &[Installed], feed: &Feed, choice: Opt
     if d.side_by_side && key != "unity" {
         let newest_installed = all.iter().filter(|o| tools_key(o) == key).map(|o| version::series(&o.version)).max_by(|a, b| version::cmp(a, b))?;
         if version::series(&inst.version) == newest_installed {
-            if let Some(m) = list.iter().find(|r| !r.prerelease && !r.url.is_empty()) {
+            // Its pre-releases too when the copy follows them.
+            if let Some(m) = list.iter().find(|r| (allow_pre || !r.prerelease) && !r.url.is_empty()) {
                 if version::newer(&version::series(&m.version), &newest_installed) {
                     return Some(Latest { version: m.version.clone(), size: m.size, note: Some(format!("{} installs next to {}, your {} stays", m.version, inst.version, inst.version)) });
                 }

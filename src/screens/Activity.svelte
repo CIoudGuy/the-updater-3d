@@ -160,7 +160,7 @@
               <span class="tx ellipsis" style:color={e.kind === "check" || e.kind === "service" ? "var(--text-2)" : "var(--text)"}>{e.title}</span>
               {#if e.meta}<span class="mt">{e.meta}</span>{/if}
               {#if e.restoreId && restorable.includes(e.restoreId)}
-                <Btn variant="raised" size="sm" title="Put back the registry entries, services and tasks this cleanup removed" disabled={restoring === e.restoreId} onclick={(ev: MouseEvent) => { ev.stopPropagation(); restore(e.restoreId!); }}>{restoring === e.restoreId ? "Restoring" : "Restore"}</Btn>
+                <Btn variant="raised" size="sm" title={e.restoreId.startsWith("settings:") ? "Put back these settings. The current ones are saved first." : "Put back the registry entries, services and tasks this cleanup removed"} disabled={restoring === e.restoreId} onclick={(ev: MouseEvent) => { ev.stopPropagation(); restore(e.restoreId!); }}>{restoring === e.restoreId ? "Restoring" : "Restore"}</Btn>
               {/if}
               {#if expandable}
                 <button class="ib" aria-expanded={isOpen} aria-label={isOpen ? "Hide details" : "Show details"} title="{isOpen ? 'Hide' : 'Show'} details  Enter" onclick={(ev) => { ev.stopPropagation(); toggle(e.id); }}>
