@@ -1128,7 +1128,7 @@ impl Core {
                     let choice = pre.get(&i.id).copied();
                     match i.source {
                         Source::Craft => cf.as_deref().and_then(|f| craft::follows_pre(i, f, choice, craft_pre)),
-                        Source::Tools => tf.as_deref().and_then(|f| tools::follows_pre(i, f, choice)),
+                        Source::Tools => tf.as_deref().and_then(|f| tools::follows_pre(i, &st.installed, f, choice)),
                         Source::Programs => gh.as_deref().and_then(|f| ghapps::follows_pre(i, f, choice)),
                         // Its GitHub pre-releases show in its version list, which offers the
                         // choice; a copy that is one follows them until the user chooses.
@@ -1236,12 +1236,13 @@ impl Core {
             let asks = gpus.iter().map(|(matching, desc)| {
                 let pfid = sources::nvidia::product_id(desc, &products).unwrap_or_default();
                 async move {
-                    let rel = if pfid.is_empty() {
-                        None
+                    let (rel, beta) = if pfid.is_empty() {
+                        (None, None)
                     } else {
-                        sources::nvidia::latest(&pfid).await.map_err(|e| log::warn!("nvidia lookup {desc}: {e:#}")).ok()
+                        let (rel, beta) = tokio::join!(sources::nvidia::latest(&pfid), sources::nvidia::latest_beta(&pfid));
+                        (rel.map_err(|e| log::warn!("nvidia lookup {desc}: {e:#}")).ok(), beta)
                     };
-                    (matching.clone(), pfid, rel)
+                    ((matching.clone(), pfid.clone(), rel), beta.map(|b| (pfid, b)))
                 }
             });
             anyhow::Ok(futures_util::future::join_all(asks).await)
@@ -1273,6 +1274,8 @@ impl Core {
             warn("nvidia", e);
             vec![]
         });
+        let (nv, nv_beta): (Vec<drivers::NvidiaAnswer>, Vec<Option<(String, sources::nvidia::Release)>>) = nv.into_iter().unzip();
+        let nv_beta: Vec<(String, sources::nvidia::Release)> = nv_beta.into_iter().flatten().collect();
         let amd = amd.unwrap_or_else(|e| {
             warn("amd", e);
             None
@@ -1304,6 +1307,7 @@ impl Core {
                 maker_name,
                 windows11: win11,
                 pre: Some(&pre),
+                nvidia_beta: &nv_beta,
             })
         };
         // The makers answered: show that now, with Windows Update's last answer.
@@ -2648,6 +2652,29 @@ impl Core {
         });
     }
 
+    /// Put back an app's saved settings (Activity's Restore): the app must be closed; its current
+    /// settings are saved first, so this can be undone the same way.
+    pub async fn restore_settings(self: &Arc<Self>, id: &str) -> Result<()> {
+        let root = crate::snapshots::root();
+        let s = crate::snapshots::load(&root, id).filter(|s| !s.restored).ok_or_else(|| anyhow!("Those saved settings are gone"))?;
+        let running = procs::running_as(&procs::list_fresh(), &s.app);
+        if !running.is_empty() {
+            return Err(anyhow!("Close {} first, then use Restore", s.app));
+        }
+        let now_ver = self.installed(&s.app_id).map(|i| i.version).unwrap_or_default();
+        let (r, s2) = (root.clone(), s.clone());
+        let (current, n) = tauri::async_runtime::spawn_blocking(move || -> Result<(Option<crate::snapshots::Saved>, usize)> {
+            let current = crate::snapshots::save_to(&r, &s2.app_id, &s2.app, &now_ver, "", &crate::snapshots::locations_of(&s2))?;
+            let n = crate::snapshots::put_back(&r, &s2, crate::snapshots::import_reg)?;
+            Ok((current, n))
+        })
+        .await
+        .map_err(|e| anyhow!("{e}"))??;
+        let undo = current.map(|c| format!("settings:{}", c.id));
+        self.log_activity(ActivityKind::Rollback, format!("Put back the settings of {} {}", s.app, s.version), Some(format!("{n} files{}. The settings it had before are saved.", if s.keys.is_empty() { String::new() } else { " and its registry keys".into() })), undo);
+        Ok(())
+    }
+
     /// The other builds of an Other app or catalog package (its beta, preview or nightly
     /// packages), for its page.
     pub async fn other_builds(&self, id: &str) -> Vec<OtherBuild> {
@@ -3630,7 +3657,25 @@ impl Core {
                     };
                     self.notify(&title, body, notice::finished_target(kind, &app_id));
                 }
-                self.toast("ok", title, Some(app_id));
+                self.toast("ok", title, Some(app_id.clone()));
+                // Back on an older version: the settings it had before the update can be put back.
+                if kind == JobKind::Rollback {
+                    let (aid, ver) = (app_id.clone(), to.clone());
+                    let saved = tauri::async_runtime::spawn_blocking(move || crate::snapshots::for_version(&crate::snapshots::root(), &aid, &ver)).await.ok().flatten();
+                    if let Some(s) = saved {
+                        let day = s.created.get(..10).unwrap_or(&s.created).to_string();
+                        self.log_activity(ActivityKind::Rollback, format!("{} {}: its settings from before the update can be put back", name, s.version), Some(format!("Saved {day}, before {} {}. Restore puts them back; the current ones are saved first.", name, s.to_version)), Some(format!("settings:{}", s.id)));
+                        self.toast("info", format!("{name}'s settings from {} are saved. Activity can put them back.", s.version), Some(app_id.clone()));
+                    }
+                }
+                // Another copy of the app stays (ShareX from Steam next to the installed one):
+                // some uninstallers remove the shortcuts and menu entries both copies use.
+                if kind == JobKind::Uninstall {
+                    let other = self.st.lock().installed.iter().find(|i| i.id != app_id && i.name.trim().eq_ignore_ascii_case(name.trim())).map(|i| i.id.clone());
+                    if let Some(other) = other {
+                        self.toast("info", format!("Another {name} is still installed. If its shortcuts or right-click menu are gone, use Repair on its page."), Some(other));
+                    }
+                }
                 self.emit_apps();
                 let me = self.clone();
                 tauri::async_runtime::spawn_blocking(move || me.update_disk_status()).await.ok();
@@ -3850,6 +3895,17 @@ impl Core {
         // Saved before anything runs: after a crash from here on, the installer is not run
         // again by itself.
         self.save_queue();
+        // The app's settings before it changes version, closed now: a rollback can put back
+        // the ones the older version wrote (see `snapshots`).
+        if let (JobKind::Update | JobKind::Rollback, Some(b)) = (plan.kind, before.clone()) {
+            let others: Vec<Installed> = self.installed_all().into_iter().filter(|i| i.id != b.id).collect();
+            let to = plan.to_version.clone();
+            match tauri::async_runtime::spawn_blocking(move || crate::snapshots::save_before(&b, &others, &to)).await {
+                Ok(Err(e)) => log::warn!("saving the settings of {}: {e:#}", plan.name),
+                Err(e) => log::warn!("saving the settings of {}: {e}", plan.name),
+                _ => {}
+            }
+        }
         let me = self.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || me.emit_apps()).await;
         // The program's own files before it is updated, to tell afterwards that they are still
@@ -4089,6 +4145,9 @@ impl Core {
         // Installers sometimes finish registering a while after they exit (a process they
         // started writes the uninstall entry): keep checking, longest while the app is not in
         // the list at all.
+        // An uninstall handed to a launcher waits for the user to confirm it there.
+        let launcher = crate::uninstall::run::handed_to(plan);
+        let mut ctl = ctl.clone();
         let t0 = Instant::now();
         loop {
             self.rescan().await;
@@ -4100,13 +4159,24 @@ impl Core {
                 return Ok(Outcome::Done);
             }
             let waited = t0.elapsed();
-            if !keep_checking(&state, waited) {
+            if !keep_checking(&state, waited, launcher.is_some()) {
+                if let Some(by) = &launcher {
+                    return Err(anyhow!("VERIFY|{} is still installed: {by} did not uninstall it. Confirm the uninstall in {by}, then use Retry.", plan.name));
+                }
                 return Err(match (&plan.verify, state) {
                     (Verify::Version { version: v, .. }, Checked::Shows { version: now_v, .. }) => anyhow!("VERIFY|The installer finished, but {} reports {} instead of {}", plan.name, now_v, v),
                     (Verify::Version { version: v, .. }, _) => anyhow!("VERIFY|The installer finished, but {} reports not installed instead of {}", plan.name, v),
                     (Verify::Driver { version: v, .. }, Checked::Shows { version: now_v, .. }) => anyhow!("VERIFY|The installer finished, but Windows still has {} {} instead of {}", plan.name, now_v, v),
                     _ => anyhow!("VERIFY|The uninstaller finished, but {} is still installed", plan.name),
                 });
+            }
+            if let Some(by) = &launcher {
+                self.set_job(id, |j| j.step = format!("Confirm the uninstall in {by}"));
+                if *ctl.borrow() == Control::Cancel {
+                    return Ok(Outcome::Canceled);
+                }
+                let _ = tokio::time::timeout(Duration::from_secs(5), ctl.changed()).await;
+                continue;
             }
             if waited >= Duration::from_secs(10) {
                 self.set_job(id, |j| j.step = "Waiting for the installer to finish registering".into());
@@ -4417,9 +4487,11 @@ enum Checked {
 /// Check again after `waited`? Installers that hand the work to another process can exit before
 /// that one writes the uninstall entry, and remove the old entry first: a missing app gets three
 /// minutes, an entry the install has not changed yet one, anything else ten seconds.
-fn keep_checking(state: &Checked, waited: Duration) -> bool {
+fn keep_checking(state: &Checked, waited: Duration, handed_off: bool) -> bool {
     let limit = match state {
         Checked::Done => return false,
+        // A launcher asked to uninstall: the user confirms there, then it removes the app.
+        _ if handed_off => 15 * 60,
         Checked::Missing => 180,
         Checked::Shows { unchanged: true, .. } => 60,
         Checked::Shows { .. } => 10,
@@ -5575,16 +5647,27 @@ mod install_check_tests {
     #[test]
     fn a_missing_app_is_checked_for_three_minutes_after_its_installer_exits() {
         let s = Duration::from_secs;
-        assert!(keep_checking(&Checked::Missing, s(60)));
-        assert!(keep_checking(&Checked::Missing, s(170)));
-        assert!(!keep_checking(&Checked::Missing, s(181)));
+        assert!(keep_checking(&Checked::Missing, s(60), false));
+        assert!(keep_checking(&Checked::Missing, s(170), false));
+        assert!(!keep_checking(&Checked::Missing, s(181), false));
         let unchanged = Checked::Shows { version: "1.0".into(), unchanged: true };
-        assert!(keep_checking(&unchanged, s(30)));
-        assert!(!keep_checking(&unchanged, s(61)));
+        assert!(keep_checking(&unchanged, s(30), false));
+        assert!(!keep_checking(&unchanged, s(61), false));
         let other = Checked::Shows { version: "1.5".into(), unchanged: false };
-        assert!(keep_checking(&other, s(5)));
-        assert!(!keep_checking(&other, s(11)));
-        assert!(!keep_checking(&Checked::Done, s(0)));
+        assert!(keep_checking(&other, s(5), false));
+        assert!(!keep_checking(&other, s(11), false));
+        assert!(!keep_checking(&Checked::Done, s(0), false));
+    }
+
+    // ShareX from Steam: Steam asks the user to confirm its uninstall; the check gave up after
+    // a minute, before the user had answered.
+    #[test]
+    fn an_uninstall_handed_to_a_launcher_waits_for_the_user_to_confirm_it() {
+        let s = Duration::from_secs;
+        let unchanged = Checked::Shows { version: String::new(), unchanged: true };
+        assert!(keep_checking(&unchanged, s(5 * 60), true));
+        assert!(!keep_checking(&unchanged, s(15 * 60 + 1), true));
+        assert!(!keep_checking(&Checked::Done, s(0), true));
     }
 
     // Python 3.14.7: "Another installation is already running" (1618) failed the update.

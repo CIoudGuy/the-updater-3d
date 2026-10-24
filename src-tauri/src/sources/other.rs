@@ -1592,6 +1592,11 @@ pub fn uninstall_cmd(e: &winutil::UninstallEntry, kind: Option<&str>) -> Option<
     if u.is_empty() {
         return None;
     }
+    // A launcher's entry hands the uninstall to the launcher (see `uninstall::run::plan`): no
+    // switches of the catalog's installer type go with it.
+    if crate::uninstall::run::launcher_link(&winutil::split_program_line(u)).is_some() {
+        return None;
+    }
     if (e.windows_installer || u.to_ascii_lowercase().contains("msiexec")) && is_guid(&e.key) {
         return Some(vec!["msiexec.exe".into(), "/x".into(), e.key.clone(), "/qn".into(), "/norestart".into()]);
     }
@@ -2524,9 +2529,17 @@ pub fn pre_of(rels: &[super::ghapps::Release], m: &Manifest, stable: &Installer)
 }
 
 /// The pre-releases of a package newer than its catalog version `m`, from its GitHub releases.
+/// The GitHub project whose pre-releases a package gets: the one its installer is downloaded
+/// from, else the one the catalog names for it (an app downloaded from its own site that
+/// publishes its betas on GitHub, as Telegram does). Its files must be named like the
+/// catalog's installer and carry GitHub's checksum (see `pre_installer`).
+pub fn pre_repo(m: &Manifest, stable: &Installer) -> Option<String> {
+    installer_repo(stable).or_else(|| repo_of(m).map(|(o, r)| format!("{o}/{r}")))
+}
+
 pub async fn pre_releases(m: &Manifest, w: &Want) -> Vec<(super::ghapps::Release, Installer)> {
     let Ok(stable) = choose(m, w) else { return vec![] };
-    let Some(repo) = installer_repo(stable) else { return vec![] };
+    let Some(repo) = pre_repo(m, stable) else { return vec![] };
     let rels = super::ghapps::releases(&repo).await;
     pre_of(&rels, m, stable)
 }

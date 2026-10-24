@@ -243,15 +243,27 @@ fn the_users_choice_of_pre_releases_wins_and_a_final_release_follows_a_beta() {
     assert_eq!(one(&testing, &out, Some(false)), "33.0.0");
     assert_eq!(one(&testing, &out, None), "33.0.0");
     // The choice shows only where there is a pre-release to choose.
-    assert_eq!(follows_pre(&stable, &feed, None), Some(false));
-    assert_eq!(follows_pre(&testing, &feed, None), Some(true));
-    assert_eq!(follows_pre(&stable, &feed, Some(true)), Some(true));
+    assert_eq!(follows_pre(&stable, &[], &feed, None), Some(false));
+    assert_eq!(follows_pre(&testing, &[], &feed, None), Some(true));
+    assert_eq!(follows_pre(&stable, &[], &feed, Some(true)), Some(true));
     let finals = feed_with("obs", vec![rel("32.2.2", false)]);
-    assert_eq!(follows_pre(&stable, &finals, None), None);
-    // An app that installs each series side by side: only its own series' pre-releases count.
+    assert_eq!(follows_pre(&stable, &[], &finals, None), None);
+    // An app that installs each series side by side: its own series' pre-releases count, and
+    // for the newest series here a newer series' ones, which install next to it.
     let godot = inst("godot", "tools:godot:4.7.2", "4.7.2", "4.7.2");
-    assert_eq!(follows_pre(&godot, &feed_with("godot", vec![rel("4.8-beta1", true), rel("4.7.2", false)]), None), None);
-    assert_eq!(follows_pre(&godot, &feed_with("godot", vec![rel("4.7.3-rc1", true), rel("4.7.2", false)]), None), Some(false));
+    let beta = feed_with("godot", vec![rel("4.8-beta1", true), rel("4.7.2", false)]);
+    assert_eq!(follows_pre(&godot, std::slice::from_ref(&godot), &beta, None), Some(false));
+    assert_eq!(follows_pre(&godot, std::slice::from_ref(&godot), &feed_with("godot", vec![rel("4.7.3-rc1", true), rel("4.7.2", false)]), None), Some(false));
+    // An older copy next to a newer one: the newer series' copy gets the choice.
+    let old = inst("godot", "tools:godot:4.6.3", "4.6.3", "4.6.3");
+    assert_eq!(follows_pre(&old, &[old.clone(), godot.clone()], &beta, None), None);
+    // A beta older than the newest final release is not offered.
+    assert_eq!(follows_pre(&godot, std::slice::from_ref(&godot), &feed_with("godot", vec![rel("4.8", false), rel("4.8-beta1", true), rel("4.7.2", false)]), None), None);
+    // Chosen: the beta installs next to 4.7.2; not chosen, nothing newer.
+    let next = latest_with(&godot, std::slice::from_ref(&godot), &beta, Some(true)).unwrap();
+    assert_eq!(next.version, "4.8-beta1");
+    assert!(next.note.as_deref().is_some_and(|n| n.contains("installs next to 4.7.2")), "{:?}", next.note);
+    assert_eq!(latest_with(&godot, std::slice::from_ref(&godot), &beta, None).unwrap().version, "4.7.2");
 }
 
 #[test]

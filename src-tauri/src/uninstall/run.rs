@@ -40,13 +40,59 @@ fn starts_dir(p: &str, root: &Path) -> bool {
     super::under(Path::new(p.trim_matches('"')), root) && !super::safety::same_dir(Path::new(p.trim_matches('"')), root)
 }
 
-/// How an Other program is uninstalled: its own uninstaller (silent when it is known how).
+/// The link an uninstall entry hands its uninstall to, and the launcher that opens it: a game
+/// launcher's entry ("steam.exe steam://uninstall/400040") asks the launcher, which runs for the
+/// user, to uninstall, and the launcher asks the user to confirm. None for an uninstaller.
+pub fn launcher_link(args: &[String]) -> Option<(String, String)> {
+    let uri = args.iter().skip(1).find(|a| {
+        let Some((scheme, rest)) = a.split_once("://") else { return false };
+        scheme.len() >= 2 && !rest.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')) && !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "file" | "ftp")
+    })?;
+    let scheme = uri.split_once("://").map(|(s, _)| s.to_ascii_lowercase()).unwrap_or_default();
+    let by = match scheme.as_str() {
+        "steam" => "Steam".to_string(),
+        "uplay" => "Ubisoft Connect".to_string(),
+        "goggalaxy" => "GOG Galaxy".to_string(),
+        "com.epicgames.launcher" => "the Epic Games Launcher".to_string(),
+        "origin" | "origin2" | "link2ea" => "the EA app".to_string(),
+        "battlenet" => "Battle.net".to_string(),
+        _ => args.first().and_then(|a| Path::new(a).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "its launcher".into()),
+    };
+    Some((uri.clone(), by))
+}
+
+/// The launcher a plan hands an uninstall to ("Steam"), from its step's label.
+pub fn handed_to(plan: &Plan) -> Option<String> {
+    plan.steps.iter().find_map(|s| match s {
+        Step::OpenUri { label, .. } if plan.kind == JobKind::Uninstall => label.split_once(": confirm it in ").map(|(_, by)| by.to_string()),
+        _ => None,
+    })
+}
+
+/// How an Other program is uninstalled: its own uninstaller (silent when it is known how), or
+/// the launcher its entry hands the uninstall to.
 pub fn plan(inst: &Installed) -> Result<Plan> {
     let SourceData::Other { entry, .. } = &inst.data else { bail!("{} is not a program from the uninstall list", inst.name) };
     if inst.missing {
         bail!("The uninstaller of {} is missing. Use Remove from list to clean up what is left.", inst.name);
     }
     let c = programs::choice_for(inst).ok_or_else(|| anyhow!("{} names no uninstaller", inst.name))?;
+    // Opened as the user: an elevated copy of the launcher would not reach the one that runs.
+    if let Some((uri, by)) = launcher_link(&c.args) {
+        return Ok(Plan {
+            app_id: inst.id.clone(),
+            kind: JobKind::Uninstall,
+            name: inst.name.clone(),
+            to_version: inst.version.clone(),
+            downloads: vec![],
+            steps: vec![Step::OpenUri { uri, label: format!("Uninstalling {}: confirm it in {by}", inst.name) }],
+            block_dirs: vec![],
+            block_names: vec![],
+            verify: Verify::Removed { app_id: inst.id.clone() },
+            fallback: None,
+            cleanup: vec![],
+        });
+    }
     let in_pf = starts_dir(&c.args[0], &crate::paths::program_files()) || starts_dir(&c.args[0], &crate::paths::program_files_x86());
     let elevated = entry.hive != "HKCU" || in_pf;
     // An uninstaller with its own window: the user answers it, and the uninstall list tells

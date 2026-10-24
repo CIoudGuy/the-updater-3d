@@ -1032,6 +1032,23 @@ fn an_apps_beta_and_nightly_packages_are_its_other_builds() {
 }
 
 #[test]
+fn an_app_from_its_own_site_gets_the_betas_its_github_project_publishes() {
+    let (m, stable) = sharex_21();
+    // Telegram: the catalog's installer comes from Telegram's site; its betas are GitHub
+    // pre-releases, named like it.
+    let site = Installer { url: "https://td.telegram.org/tx64/tsetup-x64.6.1.3.exe".into(), ..stable.clone() };
+    let m = Manifest { id: "Telegram.TelegramDesktop".into(), version: "6.1.3".into(), release_notes_url: Some("https://github.com/telegramdesktop/tdesktop/blob/dev/changelog.txt".into()), installers: vec![site.clone()], ..m };
+    assert_eq!(pre_repo(&m, &site).as_deref(), Some("telegramdesktop/tdesktop"));
+    let sha = "dd".repeat(32);
+    let rels = vec![gh_rel("6.2.1", true, &[("tsetup-x64.6.2.1.beta.exe", Some(&sha)), ("tsetup.6.2.1.beta.exe", Some(&sha)), ("tportable-x64.6.2.1.beta.zip", Some(&sha))])];
+    let pres = pre_of(&rels, &m, &site);
+    assert_eq!(pres.iter().map(|(_, i)| i.url.rsplit('/').next().unwrap_or("")).collect::<Vec<_>>(), vec!["tsetup-x64.6.2.1.beta.exe"]);
+    // A package that names no GitHub project gets none.
+    let plain = Manifest { release_notes_url: None, package_url: None, publisher_url: None, id: "Example.Plain".into(), ..m.clone() };
+    assert_eq!(pre_repo(&plain, &site), None);
+}
+
+#[test]
 fn only_an_installer_from_the_projects_releases_gets_its_pre_releases() {
     let (_, stable) = sharex_21();
     assert_eq!(installer_repo(&stable).as_deref(), Some("ShareX/ShareX"));

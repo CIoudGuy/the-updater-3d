@@ -95,3 +95,61 @@ async fn a_pre_release_installs_updates_rolls_back_and_uninstalls() {
     assert!(sharex().is_none(), "ShareX is gone after the uninstall");
     println!("ALL STEPS PASSED");
 }
+
+/// Settings files as a ShareX version writes them (it cannot be started without a desktop here).
+fn write_settings(docs: &std::path::Path, version: &str) {
+    let d = docs.join("ShareX");
+    std::fs::create_dir_all(d.join("Screenshots")).unwrap();
+    std::fs::write(d.join("ApplicationConfig.json"), format!("{{\"ApplicationVersion\":\"{version}\",\"FirstTimeRunWindow\":false}}")).unwrap();
+    std::fs::write(d.join("HotkeysConfig.json"), format!("{{\"ApplicationVersion\":\"{version}\",\"Hotkeys\":[]}}")).unwrap();
+    std::fs::write(d.join("Screenshots").join(format!("shot-{version}.png")), "png").unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn sharex_settings_survive_the_pre_release_and_come_back_after_the_rollback() {
+    if !in_windows_sandbox() {
+        println!("not in Windows Sandbox: nothing installed");
+        return;
+    }
+    winget::refresh_index(Duration::from_secs(3600)).await.expect("catalog index");
+    let docs = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap()).join("Documents");
+    let config = docs.join("ShareX").join("ApplicationConfig.json");
+
+    // ShareX 21 from the catalog, with its settings.
+    run(&other::plan_install(ID, None, JobKind::Install, None, None).await.unwrap()).await;
+    let here = sharex().unwrap();
+    write_settings(&docs, &here.version);
+    let v21 = std::fs::read(&config).unwrap();
+
+    // Saved before the update, as a job does.
+    let saved = updater_lib::snapshots::save_before(&here, &[], "22.0.0").unwrap().expect("settings saved");
+    println!("saved {} places, {} bytes: {:?}", saved.places.len(), saved.bytes, saved.places.iter().map(|p| p.orig.clone()).collect::<Vec<_>>());
+    assert!(saved.places.iter().any(|p| p.orig == docs.join("ShareX")));
+
+    // ShareX 22's installer leaves the settings alone; then 22 rewrites them.
+    let base = other::read_package("ShareX.ShareX").await.and_then(|p| p.latest).unwrap();
+    let pres = other::pre_releases(&base, &other::Want::for_installed(&here)).await;
+    let (offer, _) = other::pre_offer(&pres, &here.version).expect("ShareX has a newer pre-release on GitHub");
+    run(&other::plan_install(ID, Some(&offer.version), JobKind::Update, Some(&here), None).await.unwrap()).await;
+    let beta = sharex().unwrap();
+    assert_eq!(std::fs::read(&config).unwrap(), v21, "the pre-release's installer left the settings as they were");
+    write_settings(&docs, &beta.version);
+
+    // Back to 21: the installer leaves 22's settings; the ones 21 had are offered and come back,
+    // and the screenshots taken meanwhile stay.
+    run(&other::plan_install(ID, Some(&here.version), JobKind::Rollback, Some(&beta), None).await.unwrap()).await;
+    assert!(std::fs::read_to_string(&config).unwrap().contains(&beta.version));
+    let root = updater_lib::snapshots::root();
+    let s = updater_lib::snapshots::for_version(&root, ID, &here.version).expect("the settings 21 had are offered");
+    let n = updater_lib::snapshots::put_back(&root, &s, updater_lib::snapshots::import_reg).unwrap();
+    println!("put back {n} files");
+    assert_eq!(std::fs::read(&config).unwrap(), v21, "21's settings are back as they were");
+    assert!(docs.join("ShareX").join("Screenshots").join(format!("shot-{}.png", beta.version)).exists());
+
+    // Uninstalling leaves the settings folder (ShareX keeps it in Documents).
+    let back = sharex().unwrap();
+    run(&other::plan_uninstall(&back).unwrap()).await;
+    assert!(config.exists(), "uninstalling keeps the settings");
+    println!("SETTINGS CHECK PASSED");
+}

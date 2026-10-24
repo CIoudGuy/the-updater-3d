@@ -494,6 +494,27 @@ fn leftover_files_are_deleted_and_an_emptied_start_menu_folder_is_not_left() {
 }
 
 #[test]
+fn a_launchers_uninstall_link_is_opened_as_the_user_and_waits_for_it() {
+    // ShareX from Steam, as Windows lists it (machine wide).
+    let e = entry("Steam App 400040", "ShareX", r#""C:\Program Files (x86)\Steam\steam.exe" steam://uninstall/400040"#);
+    let i = programs::make(&e, None, None, &|_| true, None);
+    let p = super::run::plan(&i).unwrap();
+    assert_eq!(p.steps.len(), 1);
+    let crate::sources::Step::OpenUri { uri, label } = &p.steps[0] else { panic!("{:?}", p.steps[0]) };
+    assert_eq!(uri, "steam://uninstall/400040");
+    assert_eq!(label, "Uninstalling ShareX: confirm it in Steam");
+    assert_eq!(super::run::handed_to(&p).as_deref(), Some("Steam"));
+    assert!(matches!(p.verify, crate::sources::Verify::Removed { .. }));
+    // Matched to the catalog's ShareX (an Inno installer): no Inno switches go with the link.
+    assert_eq!(crate::sources::other::uninstall_cmd(&e, Some("inno")), None);
+    // Other launchers; an ordinary uninstaller and a web address are no hand-off.
+    let link = |l: &str| super::run::launcher_link(&crate::winutil::split_program_line(l)).map(|(_, by)| by);
+    assert_eq!(link(r#""C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\upc.exe" uplay://uninstall/5595"#).as_deref(), Some("Ubisoft Connect"));
+    assert_eq!(link(r#""C:\Program Files\Odd\remove.exe" /S"#), None);
+    assert_eq!(link(r#""C:\Program Files\Odd\remove.exe" https://example.com/bye"#), None);
+}
+
+#[test]
 fn a_program_plan_runs_its_uninstaller_and_checks_it_is_gone() {
     let mut e = entry("Odd", "Odd App", r#""C:\Program Files\Odd\remove.exe""#);
     e.hive = "HKCU";

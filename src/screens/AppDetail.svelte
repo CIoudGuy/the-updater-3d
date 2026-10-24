@@ -309,7 +309,7 @@
             <Btn variant="raised" size="md" disabled={!pick || !!job} title="{pickBack ? 'Roll back to' : 'Install'} {pick}  Ctrl Enter" onclick={doInstallPick}>{pickBack ? "Roll back" : "Install"}</Btn>
           </div>
           <span class="hint">
-            {#if sideBySide && !pickOpts.length}No other version is offered right now.{:else if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if isAdobe}Your preferences and plugins stay as they are.{:else}Your settings stay as they are.{/if}
+            {#if sideBySide && !pickOpts.length}No other version is offered right now.{:else if sideBySide}Installs next to {app.version}, your {app.version} stays.{:else if pickBack}Your settings are saved first. After the rollback, Activity can put back the ones {pick} had.{:else if isAdobe}Your preferences and plugins stay as they are.{:else}Your settings stay as they are, and are saved first.{/if}
           </span>
         </div>
         {/if}

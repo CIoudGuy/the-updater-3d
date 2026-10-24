@@ -34,6 +34,9 @@ pub struct Release {
     /// What is new, from NVIDIA's release highlights
     #[serde(default)]
     pub notes: Vec<String>,
+    /// NVIDIA marks it a beta
+    #[serde(default)]
+    pub beta: bool,
 }
 
 /// Is this installed driver for an NVIDIA graphics card?
@@ -122,6 +125,7 @@ pub fn parse_lookup(json: &str) -> Result<Release> {
         notes_url: s("DetailsURL").filter(|u| super::drivers::host_is(u, &["nvidia.com"])),
         name: s("Name").map(|n| super::drivers::percent_decode(&n)).unwrap_or_else(|| "NVIDIA driver".into()),
         notes,
+        beta: s("IsBeta").as_deref() == Some("1"),
     })
 }
 
@@ -153,6 +157,16 @@ pub async fn latest(pfid: &str) -> Result<Release> {
     let mut r = parse_lookup(&String::from_utf8_lossy(&f.body))?;
     r.size = exact_size(&r.url).await;
     Ok(r)
+}
+
+/// The newest beta driver NVIDIA lists for a product id, if it has one (NVIDIA's own beta
+/// filter; most of the time there is none).
+pub async fn latest_beta(pfid: &str) -> Option<Release> {
+    let url = format!("{LOOKUP_URL}?func=DriverManualLookup&pfid={pfid}&osID={}&dch=1&beta=1", os_id());
+    let f = crate::http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await.ok()?;
+    let mut r = parse_lookup(&String::from_utf8_lossy(&f.body)).ok().filter(|r| r.beta)?;
+    r.size = exact_size(&r.url).await;
+    Some(r)
 }
 
 /// The file's exact size from the download server (the lookup only gives a rounded one).
