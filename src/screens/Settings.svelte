@@ -177,8 +177,8 @@
     });
   }
 
-  async function changeFolder(key: "blenderInstallDir" | "adobeInstallDir" | "godotInstallDir") {
-    const picked = await call("pick_folder", { current: s[key] });
+  async function changeFolder(key: "blenderInstallDir" | "adobeInstallDir" | "godotInstallDir" | "downloadDir" | "installRoot") {
+    const picked = await call("pick_folder", { current: s[key] ?? "" });
     if (picked) store.patchSettings({ [key]: picked });
   }
   const freeOf = (path: string) => {
@@ -356,6 +356,18 @@
             {#snippet control()}<Toggle checked={s.startMinimized && s.launchAtStartup} disabled={!s.launchAtStartup} labelledby="tray" onchange={(v) => store.patchSettings({ startMinimized: v })} />{/snippet}
           </SRow>
         {:else if active === "downloads"}
+          <SRow label="Download folder" desc={s.downloadDir ? `${s.downloadDir}\\The Updater 3D downloads${freeOf(s.downloadDir)}. Old downloads in that folder are cleared by themselves.` : `In the app's own folder${freeOf("C:\\")}. Pick a folder on another drive to keep C: free.`}>
+            {#snippet control()}
+              {#if s.downloadDir}<Btn variant="ghost" size="md" title="Keep downloads in the app's own folder again" onclick={() => store.patchSettings({ downloadDir: "" })}>Use the default</Btn>{/if}
+              <Btn variant="raised" size="md" onclick={() => changeFolder("downloadDir")}>Change</Btn>
+            {/snippet}
+          </SRow>
+          <SRow label="Install new apps to" desc={s.installRoot ? `${s.installRoot}${freeOf(s.installRoot)}. Each new app gets its own folder there when its installer can be told; updates keep every app where it is.` : "Where each app's installer puts it, usually Program Files on C:. Pick a folder on any drive."}>
+            {#snippet control()}
+              {#if s.installRoot}<Btn variant="ghost" size="md" title="Let each installer choose again" onclick={() => store.patchSettings({ installRoot: "" })}>Use the default</Btn>{/if}
+              <Btn variant="raised" size="md" onclick={() => changeFolder("installRoot")}>Change</Btn>
+            {/snippet}
+          </SRow>
           <SRow label="Parallel downloads" desc="How many apps download at the same time.">
             {#snippet control()}<Segmented options={parOpts} value={String(s.parallelDownloads)} onchange={(v) => store.patchSettings({ parallelDownloads: Number(v) })} label="Parallel downloads" />{/snippet}
           </SRow>

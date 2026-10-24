@@ -889,3 +889,39 @@ fn a_github_release_page_gives_its_release_text() {
     assert!(!lines.iter().any(|l| l.contains("Setup.exe") || l.contains("Sign in")), "assets and page chrome stay out: {lines:?}");
     assert!(github_release_body("<html>no release here</html>").is_empty());
 }
+
+#[test]
+fn a_new_app_goes_into_the_chosen_folder_when_its_installer_can_be_told() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    let dir = std::path::Path::new(r"D:\My Apps\Zipper");
+    // Inno Setup and NSIS take their usual switches (NSIS last, unquoted).
+    let inno = inst("x64", "inno", None);
+    assert_eq!(location_arg(&inno, dir), Some(format!(r#"{}/DIR="D:\My Apps\Zipper""#, winutil::VERBATIM)));
+    let nsis = inst("x64", "nsis", None);
+    assert_eq!(location_arg(&nsis, dir).as_deref(), Some(r"/D=D:\My Apps\Zipper"));
+    // The catalog's own switch wins; an MSI without one is left where it installs itself.
+    let mut msi = inst("x64", "msi", None);
+    assert_eq!(location_arg(&msi, dir), None);
+    msi.install_location = Some("INSTALLFOLDER=\"<INSTALLPATH>\"".into());
+    assert_eq!(location_arg(&msi, dir), Some(format!(r#"{}INSTALLFOLDER="D:\My Apps\Zipper""#, winutil::VERBATIM)));
+    // The installer step and its second try with admin rights both get it.
+    let mut plan = build_plan(&p, &manifest(vec![nsis.clone()]), &nsis, JobKind::Install, None, None).unwrap();
+    assert!(place_in(&mut plan, &nsis, dir));
+    let Step::Run { args, .. } = plan.steps.last().unwrap() else { panic!() };
+    assert_eq!(args.last().map(String::as_str), Some(r"/D=D:\My Apps\Zipper"));
+    if let Some(fb) = &plan.fallback {
+        let Step::Run { args, .. } = fb.steps.last().unwrap() else { panic!() };
+        assert_eq!(args.last().map(String::as_str), Some(r"/D=D:\My Apps\Zipper"));
+    }
+    // A folder name with a quote in it is never passed.
+    assert_eq!(location_arg(&inno, std::path::Path::new(r#"D:\a"b"#)), None);
+}
+
+#[test]
+fn a_new_app_folder_is_named_after_its_package() {
+    assert_eq!(folder_name("VideoLAN.VLC"), "VLC");
+    assert_eq!(folder_name("Notepad++.Notepad++"), "Notepad++");
+    assert_eq!(folder_name("Example.Tool:user"), "Tooluser");
+    assert_eq!(folder_name("..."), "App");
+}

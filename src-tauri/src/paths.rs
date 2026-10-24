@@ -21,8 +21,43 @@ fn sub(name: &str) -> PathBuf {
     p
 }
 
+/// The download folder chosen in Settings, if any (see `set_downloads`).
+static DOWNLOADS: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// The folder made in a chosen download folder: the cache cleaner only ever deletes in it, never
+/// the user's own files next to it.
+pub const OWN_DOWNLOADS: &str = "The Updater 3D downloads";
+
+/// Keep downloads in `parent` (on any drive), or in the app's data folder when None or empty.
+pub fn set_downloads(parent: Option<&str>) {
+    let dir = parent.map(str::trim).filter(|p| !p.is_empty()).map(|p| PathBuf::from(p).join(OWN_DOWNLOADS));
+    if let Ok(mut d) = DOWNLOADS.write() {
+        *d = dir;
+    }
+}
+
+#[cfg(test)]
+mod download_folder_tests {
+    #[test]
+    fn a_chosen_download_folder_gets_the_apps_own_folder_in_it() {
+        let parent = std::env::temp_dir().join(format!("u3d-dl-{}", std::process::id()));
+        super::set_downloads(Some(&parent.to_string_lossy()));
+        // Downloads, and the cache cleaner, stay in the app's own folder, not next to the user's files.
+        assert_eq!(super::downloads(), parent.join(super::OWN_DOWNLOADS));
+        super::set_downloads(Some("  "));
+        assert!(super::downloads().ends_with("downloads"));
+        super::set_downloads(None);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+}
+
 /// Downloaded installers. Cleared by Settings > Storage > Clear cache.
 pub fn downloads() -> PathBuf {
+    if let Some(d) = DOWNLOADS.read().ok().and_then(|d| d.clone()) {
+        if std::fs::create_dir_all(&d).is_ok() {
+            return d;
+        }
+    }
     sub("downloads")
 }
 

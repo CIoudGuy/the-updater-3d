@@ -2667,6 +2667,70 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
     build_plan(&p, &m, i, kind, current, size)
 }
 
+/// `plan_install` for a new app, placed in its own folder under `root` when its installer can
+/// be told where to install (see `place_in`).
+pub async fn plan_install_in(id: &str, ver: Option<&str>, feed: Option<&Feed>, root: Option<&Path>) -> Result<Plan> {
+    let mut plan = plan_install(id, ver, JobKind::Install, None, feed).await?;
+    if let Some(root) = root {
+        let pkg_id = id.strip_prefix("other:").unwrap_or(id);
+        if let Ok((p, _, Some(m))) = pkg_and_versions(pkg_id, feed).await.map(|(p, l, m)| (p, l, m.filter(|m| m.version == plan.to_version))) {
+            if let Ok(i) = choose(&m, &Want::fresh()) {
+                place_in(&mut plan, i, &root.join(folder_name(&p.id)));
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// The folder a new app gets under the chosen install folder: the last part of its package id
+/// ("VideoLAN.VLC" gives "VLC").
+pub fn folder_name(pkg_id: &str) -> String {
+    let last = pkg_id.rsplit('.').find(|s| !s.is_empty()).unwrap_or(pkg_id);
+    let clean: String = last.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '+' | ' ')).collect();
+    if clean.trim().is_empty() { "App".into() } else { clean.trim().to_string() }
+}
+
+/// The argument that installs into `dir`: the catalog's own switch for it, else the one Inno
+/// Setup and NSIS installers always take (as winget does). None when the installer can not be
+/// told (an MSI without the catalog's switch, an app package, a portable copy).
+pub fn location_arg(i: &Installer, dir: &Path) -> Option<String> {
+    let path = dir.display().to_string();
+    if path.contains('"') {
+        return None;
+    }
+    if let Some(sw) = i.install_location.as_deref().filter(|s| s.contains("<INSTALLPATH>")) {
+        return Some(format!("{}{}", winutil::VERBATIM, sw.replace("<INSTALLPATH>", &path)));
+    }
+    match kind_of(i) {
+        "inno" => Some(format!("{}/DIR=\"{path}\"", winutil::VERBATIM)),
+        // NSIS reads /D= as the last argument, without quotes, spaces and all.
+        "nsis" => Some(format!("/D={path}")),
+        _ => None,
+    }
+}
+
+/// Install into `dir`: the installer step (and its second try with admin rights) gets the folder
+/// argument. False when the installer can not be told.
+pub fn place_in(plan: &mut Plan, i: &Installer, dir: &Path) -> bool {
+    let Some(arg) = location_arg(i, dir) else { return false };
+    let mut done = false;
+    let mut put = |p: &mut Plan| {
+        for s in p.steps.iter_mut() {
+            if let Step::Run { args, label, .. } = s {
+                if label.starts_with("Installing") {
+                    args.push(arg.clone());
+                    done = true;
+                }
+            }
+        }
+    };
+    put(plan);
+    if let Some(fb) = plan.fallback.as_deref_mut() {
+        put(fb);
+    }
+    done
+}
+
 pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
     if let Some(family) = package_family(inst) {
         // An app package: Windows' package manager removes it (and its data) for this user.

@@ -721,6 +721,7 @@ fn fmt_dur(d: Duration) -> String {
 impl Core {
     pub fn new(app: AppHandle) -> Arc<Self> {
         let settings = store::load_settings();
+        paths::set_downloads(Some(&settings.download_dir));
         let throttle = Arc::new(Throttle::new());
         throttle.set(if settings.bandwidth_limit_enabled { settings.bandwidth_limit } else { 0 });
         let persisted = store::load_state();
@@ -1596,6 +1597,11 @@ impl Core {
     pub fn update_disk_status(&self) {
         let s = self.settings.read().clone();
         let mut roots: Vec<PathBuf> = vec![paths::downloads(), PathBuf::from(&s.adobe_install_dir), PathBuf::from(&s.blender_install_dir), PathBuf::from(&s.godot_install_dir), paths::program_files()];
+        if !s.install_root.trim().is_empty() {
+            roots.push(PathBuf::from(s.install_root.trim()));
+        }
+        // Every fixed drive, for the free space Settings and Get apps show.
+        roots.extend(winutil::fixed_drives());
         roots.dedup();
         let mut disks: Vec<DiskInfo> = Vec::new();
         for r in roots {
@@ -3291,7 +3297,9 @@ impl Core {
                     }
                     "other" => {
                         let feed = self.other.read().clone();
-                        other::plan_install(id, version.as_deref(), JobKind::Install, None, feed.as_deref()).await
+                        // A new app goes into the chosen install folder when its installer can be told.
+                        let root = Some(s.install_root.trim()).filter(|r| !r.is_empty()).map(PathBuf::from);
+                        other::plan_install_in(id, version.as_deref(), feed.as_deref(), root.as_deref()).await
                     }
                     _ => Err(anyhow!("Unknown app {id}")),
                 }
@@ -4068,6 +4076,11 @@ impl Core {
         *self.settings.write() = new.clone();
         store::save_settings(&new);
         self.throttle.set(if new.bandwidth_limit_enabled { new.bandwidth_limit } else { 0 });
+        if new.download_dir != old.download_dir || new.install_root != old.install_root {
+            paths::set_downloads(Some(&new.download_dir));
+            let me = self.clone();
+            tauri::async_runtime::spawn_blocking(move || me.update_disk_status());
+        }
         if new.launch_at_startup != old.launch_at_startup {
             use tauri_plugin_autostart::ManagerExt;
             let m = self.app.autolaunch();
