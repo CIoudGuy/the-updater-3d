@@ -41,6 +41,31 @@
   /** a game from a launcher (Steam, Epic Games...): updated and uninstalled there, its versions are its news */
   const isGame = $derived(app?.source === "games");
   const launcher = $derived(app ? launcherOf(app.id) : "");
+  /** a game this app installed from Epic Games or GOG: updates, repairs and undoes here */
+  const gameHere = $derived(!!app?.gameHere);
+  /** Undo asks for a second click before it puts the last update back */
+  let undoArmed = $state(false);
+  let undoing = $state(false);
+  let undoTimer: ReturnType<typeof setTimeout> | undefined;
+  async function undoGame() {
+    if (!app || undoing) return;
+    if (!undoArmed) {
+      undoArmed = true;
+      clearTimeout(undoTimer);
+      undoTimer = setTimeout(() => (undoArmed = false), 4000);
+      return;
+    }
+    undoArmed = false;
+    undoing = true;
+    try {
+      const v = await call("game_undo", { appId: app.id });
+      store.toast("ok", v ? `${app.name} is back at ${v}` : `${app.name}'s last update was put back`);
+    } catch (e) {
+      store.toast("err", `Could not undo the update: ${e}`);
+    } finally {
+      undoing = false;
+    }
+  }
   /** its updates are turned off ("Don't update") */
   const ignored = $derived(!!app && isIgnored(app.id));
   /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
@@ -142,7 +167,7 @@
     if (!app) return "";
     if (listedOnly(app) && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
     if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
-    if (isGame && !job) return ignored ? "Updates off" : app.status === "update" ? `Update waiting in ${launcher}` : `Kept up to date by ${launcher}`;
+    if (isGame && !gameHere && !job) return ignored ? "Updates off" : app.status === "update" ? `Update waiting in ${launcher}` : `Kept up to date by ${launcher}`;
     if (!job && ignored) return app.latest && cmpVersion(app.latest, app.version) > 0 ? `Updates off, ${app.latest} is out` : "Updates off";
     switch (app.status) {
       case "update":
@@ -211,6 +236,12 @@
             {/if}
             {#if app.storeUrl}
               <Btn variant="secondary" title="Updates and removal happen in the Microsoft Store" onclick={() => openStorePage(app.id)}>Open in Microsoft Store <Icon d={I.external} size={14} width={2.5} /></Btn>
+            {/if}
+            {#if gameHere && app.status !== "failed"}
+              <Btn variant="secondary" title="Check every file of {app.name} and download the missing or broken ones" onclick={() => repairApp(app.id)}>Repair</Btn>
+            {/if}
+            {#if gameHere && app.canUndo}
+              <Btn variant="secondary" disabled={undoing} title="Put back the files the last update or repair changed" onclick={undoGame}>{undoing ? "Undoing" : undoArmed ? "Click again to undo" : "Undo last update"}</Btn>
             {/if}
             {#if isGame && !app.canUninstall && app.manualUrl}
               <!-- its launcher keeps no uninstall address or entry: it is uninstalled there -->

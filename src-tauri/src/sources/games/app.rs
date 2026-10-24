@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use std::time::Duration;
 
 /// Two letters and colors for a game without a picture.
-fn mark(name: &str, l: Launcher) -> (String, String, String) {
+pub(crate) fn mark(name: &str, l: Launcher) -> (String, String, String) {
     let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
     let mut code = String::new();
     if let Some(w) = words.first() {

@@ -99,7 +99,7 @@ class Ui {
   query = $state("");
   getQuery = $state("");
   /** Get apps: the source shown (a search looks through all of them) */
-  getGroup = $state<"Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps">("Other apps");
+  getGroup = $state<"Adobe" | "Craft apps" | "Blender" | "More apps" | "Games" | "Other apps">("Other apps");
 
   /** Get apps list kept across visits, so coming back from a detail page does not reload it */
   catalog = $state<CatalogEntry[] | null>(null);
@@ -188,8 +188,9 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
   const items: PopItem[] = [];
   const skip: PopItem = isIgnored(app.id) ? { id: "unignore", label: "Show its updates again", icon: "play" } : { id: "ignore", label: "Don't update", icon: "pause" };
   if (app.source === "games") {
-    // Updated and uninstalled in its launcher.
+    // Updated and uninstalled in its launcher; a game installed here is repaired here too.
     items.push({ id: "notes", label: "Patch notes", icon: "notes", key: "N" });
+    if (app.gameHere) items.push({ id: "repair", label: "Repair", icon: "repair", key: "R" });
     if (app.installDir) items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
     items.push(skip);
     items.push({ id: "sep", label: "", divider: true });
@@ -230,7 +231,7 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
   return items;
 }
 
-/** Repair is valid for Adobe and Craft apps; the backend rejects Blender. */
+/** Repair is valid for Adobe and Craft apps, and games installed here; the backend rejects Blender. */
 export function canRepair(app: AppEntry): boolean {
-  return app.source === "adobe" || app.source === "craft";
+  return app.source === "adobe" || app.source === "craft" || !!app.gameHere;
 }

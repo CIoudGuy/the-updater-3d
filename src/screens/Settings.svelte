@@ -10,14 +10,14 @@
   import Icon from "../components/Icon.svelte";
   import Dab from "../components/Dab.svelte";
   import { I } from "../lib/icons";
-  import { call, send } from "../lib/api";
+  import { call, on, send } from "../lib/api";
   import { store } from "../lib/store.svelte";
   import { ui } from "../lib/ui.svelte";
   import { router, SETTINGS_SECTIONS, type SettingsSection } from "../lib/router.svelte";
   import { bytes, clock, driveOf } from "../lib/format";
   import { setIgnored, updateSelf } from "../lib/actions";
   import { MARKER_BASE, pageIn, pageOut, place, rise } from "../lib/motion";
-  import type { AutoMode } from "../lib/types";
+  import type { AccountInfo, AutoMode, Platform } from "../lib/types";
 
   let { section = null }: { section: string | null } = $props();
 
@@ -31,6 +31,7 @@
   const NAV: NavItem[] = [
     { id: "general", label: "General", blurb: "When to check, what to do with updates, and notifications." },
     { id: "apps", label: "Apps", blurb: "Which apps The Updater 3D looks after, and their options." },
+    { id: "games", label: "Games", blurb: "Sign in to Steam, Epic Games and GOG to see every game you own, installed or not." },
     { id: "downloads", label: "Downloads", blurb: "How many apps download at once, and how fast." },
     { id: "startup", label: "Startup", blurb: "Keep checking for updates when the window is closed." },
     { id: "cleanup", label: "Cleanup", blurb: "Free up space and tidy what removed apps left behind." },
@@ -177,7 +178,144 @@
     });
   }
 
-  async function changeFolder(key: "blenderInstallDir" | "adobeInstallDir" | "godotInstallDir" | "downloadDir" | "installRoot") {
+  // ----- game platforms -----
+  let accounts = $state<AccountInfo[]>([]);
+  /** The platform being signed in to, refreshed or signed out right now */
+  let accBusy = $state<Platform | null>(null);
+  /** Epic Games or GOG: its page is open in the browser, waiting for what the user pastes */
+  let codeFor = $state<Platform | null>(null);
+  let codeText = $state("");
+  let codeError = $state<string | null>(null);
+  let codeInput = $state<HTMLInputElement>();
+  /** Steam's QR code while it waits for the phone (an image address) */
+  let qrImage = $state<string | null>(null);
+  /** Steam's sign-in window is open */
+  let steamWindow = $state(false);
+  onMount(() => {
+    let gone = false;
+    let off: (() => void) | undefined;
+    on("account_qr", (img) => {
+      if (qrImage) qrImage = img;
+    }).then((u) => (gone ? u() : (off = u)));
+    return () => {
+      gone = true;
+      off?.();
+    };
+  });
+  async function loadAccounts() {
+    try {
+      accounts = await call("accounts", {});
+    } catch (e) {
+      store.toast("err", `Could not read the sign-ins: ${e}`);
+    }
+  }
+  $effect(() => {
+    if (active === "games") loadAccounts();
+  });
+  function accDesc(a: AccountInfo): string {
+    if (!a.signedIn) return a.installsHere ? `Sign in to see every game you own on ${a.title}. They install, update and repair here, and the last update can be undone.` : `Sign in with the Steam mobile app or a Steam window to see every game you own on ${a.title}. They install and update in Steam.`;
+    const who = a.name ? `Signed in as ${a.name}` : "Signed in";
+    const n = `${a.games} game${a.games === 1 ? "" : "s"} in your library`;
+    return `${who}. ${n}${a.syncedAt ? `, read at ${clock(a.syncedAt)}` : ""}.`;
+  }
+  function signedInToast(a: AccountInfo) {
+    store.toast(a.problem ? "info" : "ok", a.problem ? `Signed in to ${a.title}. ${a.problem}` : `Signed in to ${a.title}. ${a.games} game${a.games === 1 ? "" : "s"} found.`);
+  }
+  /** Starts a sign-in: Steam shows a QR code (or, `window`, a Steam window); Epic Games and GOG open in the browser and show a code to paste here. */
+  /** The newest sign-in started: an older one that ends later (a canceled QR wait) leaves the screen alone */
+  let signSeq = 0;
+  async function signIn(p: Platform, window = false) {
+    const seq = ++signSeq;
+    accBusy = p;
+    codeFor = null;
+    codeError = null;
+    qrImage = null;
+    steamWindow = p === "steam" && window;
+    try {
+      const step = await call("account_sign_in", { platform: p, window });
+      if (step.kind === "done") signedInToast(step.account);
+      else if (step.kind === "paste") {
+        codeFor = p;
+        codeText = "";
+        tick().then(() => codeInput?.focus());
+      } else {
+        qrImage = step.image;
+        signedInToast(await call("account_wait", { platform: p }));
+      }
+    } catch (e) {
+      if (String(e) !== "CANCELED") store.toast("err", String(e));
+    } finally {
+      if (seq === signSeq) {
+        accBusy = null;
+        qrImage = null;
+        steamWindow = false;
+      }
+      loadAccounts();
+    }
+  }
+  /** From the QR code to a Steam window. */
+  async function steamByWindow() {
+    await call("account_cancel", { platform: "steam" });
+    signIn("steam", true);
+  }
+  function cancelSignIn(p: Platform) {
+    if (p === "steam") send("account_cancel", { platform: p });
+    if (codeFor === p) codeFor = null;
+  }
+  async function sendCode(text = codeText) {
+    const p = codeFor;
+    if (!p || !text.trim() || accBusy) return;
+    accBusy = p;
+    codeError = null;
+    try {
+      const a = await call("account_code", { platform: p, text });
+      codeFor = null;
+      codeText = "";
+      signedInToast(a);
+    } catch (e) {
+      codeError = String(e);
+    } finally {
+      accBusy = null;
+      loadAccounts();
+    }
+  }
+  /** Pasting the code signs in at once. */
+  function pasted(e: ClipboardEvent) {
+    const t = e.clipboardData?.getData("text") ?? "";
+    if (!t.trim()) return;
+    e.preventDefault();
+    codeText = t.trim();
+    sendCode(codeText);
+  }
+  const codeHelp = (p: Platform) =>
+    p === "epic"
+      ? "Sign in on the Epic Games page that opened in your browser. It then shows a short text with authorizationCode in it: select all of it (Ctrl A), copy it (Ctrl C) and paste it here."
+      : "Sign in on the GOG page that opened in your browser. It then shows an empty page: copy that page's address from the address bar and paste it here.";
+  async function refreshAccount(p: Platform) {
+    accBusy = p;
+    try {
+      await call("account_sync", { platform: p });
+    } catch (e) {
+      store.toast("err", String(e));
+    } finally {
+      accBusy = null;
+      loadAccounts();
+    }
+  }
+  async function signOut(a: AccountInfo) {
+    accBusy = a.platform;
+    try {
+      await call("account_sign_out", { platform: a.platform });
+      store.toast("info", `Signed out of ${a.title}. Its games are no longer shown.`);
+    } catch (e) {
+      store.toast("err", String(e));
+    } finally {
+      accBusy = null;
+      loadAccounts();
+    }
+  }
+
+  async function changeFolder(key: "blenderInstallDir" | "adobeInstallDir" | "godotInstallDir" | "downloadDir" | "installRoot" | "gamesDir") {
     const picked = await call("pick_folder", { current: s[key] ?? "" });
     if (picked) store.patchSettings({ [key]: picked });
   }
@@ -275,7 +413,7 @@
           <SRow label="Other apps" desc="Every other app on this PC from Microsoft's winget catalog, updated with its publisher's own installer.">
             {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}
           </SRow>
-          <SRow label="Games" desc="Games and apps from Steam, Epic Games, Ubisoft Connect, GOG Galaxy, EA app, Battle.net, Amazon Games, itch and Rockstar, with their patch notes. Each launcher installs its own updates: Update opens it there. Nothing is signed in to.">
+          <SRow label="Games" desc="Your games from Steam, Epic Games and GOG once you sign in to them in Settings, Games, and the games of Ubisoft Connect, EA app, Battle.net, Amazon Games, itch and Rockstar on this PC, with their patch notes.">
             {#snippet control()}<Toggle checked={s.sources.games !== false} label="Games" onchange={(v) => store.patchSettings({ sources: { ...s.sources, games: v } })} />{/snippet}
           </SRow>
           <SRow label="Drivers" desc="Graphics, network, audio, Bluetooth and chipset drivers from NVIDIA, AMD, Intel and Windows Update, and the newest BIOS for your board or PC (Gigabyte, ASUS, MSI, ASRock, Dell, HP and Lenovo). A BIOS is never flashed by this app.">
@@ -377,6 +515,76 @@
               <Toggle checked={bwOn} labelledby="bw-limit" onchange={(v) => store.patchSettings({ bandwidthLimitEnabled: v, bandwidthLimit: s.bandwidthLimit || 40e6 })} />
             {/snippet}
           </SRow>
+        {:else if active === "games"}
+          {#if !s.sources.games}
+            <SRow label="Games are off" desc="Turn Games on in Apps to see and update your games.">
+              {#snippet control()}<Btn variant="raised" size="md" onclick={() => store.patchSettings({ sources: { ...s.sources, games: true } })}>Turn on</Btn>{/snippet}
+            </SRow>
+          {/if}
+          {#each accounts as a (a.platform)}
+            <SRow label={a.title} desc={accDesc(a)}>
+              {#snippet control()}
+                {#if a.platform === "steam" && steamWindow}
+                  <span class="ccs">Finish signing in in the Steam window</span>
+                  <Btn variant="ghost" size="md" onclick={() => cancelSignIn("steam")}>Cancel</Btn>
+                {:else if a.platform === "steam" && qrImage}
+                  <Btn variant="ghost" size="md" onclick={() => cancelSignIn("steam")}>Cancel</Btn>
+                {:else if a.signedIn}
+                  {#if a.problem}<span class="ccs" style:color="var(--err)" title={a.problem}><Dab color="var(--err)" />{a.problem.startsWith("Sign in") ? "Sign in again" : "Not read"}</span>{/if}
+                  {#if a.problem?.startsWith("Sign in")}
+                    <Btn variant="primary" size="md" disabled={accBusy !== null} onclick={() => signIn(a.platform)}>{accBusy === a.platform ? "Signing in" : "Sign in"}</Btn>
+                  {:else}
+                    <Btn variant="raised" size="md" disabled={accBusy !== null} title="Read your {a.title} library again" onclick={() => refreshAccount(a.platform)}>{accBusy === a.platform ? "Reading" : "Refresh"}</Btn>
+                  {/if}
+                  <Btn variant="ghost" size="md" disabled={accBusy !== null} title="Forget this sign-in on this PC" onclick={() => signOut(a)}>Sign out</Btn>
+                {:else if a.platform === "steam"}
+                  <Btn variant="ghost" size="md" disabled={accBusy !== null} title="Sign in with your Steam password in a Steam window" onclick={() => signIn("steam", true)}>Use a Steam window</Btn>
+                  <Btn variant="primary" size="md" disabled={accBusy !== null} title="Shows a QR code to scan with the Steam mobile app" onclick={() => signIn("steam")}>{accBusy === "steam" ? "Starting" : "Sign in"}</Btn>
+                {:else if codeFor !== a.platform}
+                  <Btn variant="primary" size="md" disabled={accBusy !== null} title="Opens {a.title}'s own sign-in page in your browser" onclick={() => signIn(a.platform)}>{accBusy === a.platform ? "Opening" : "Sign in"}<Icon d={I.external} size={13} width={2.5} /></Btn>
+                {/if}
+              {/snippet}
+            </SRow>
+            {#if a.platform === "steam" && qrImage}
+              <div class="qr" in:rise>
+                <img src={qrImage} alt="QR code to sign in to Steam" width="164" height="164" />
+                <div class="qrt">
+                  <p class="qh">Scan with the Steam mobile app</p>
+                  <p>In the Steam app on your phone, open Steam Guard, tap the QR code button and scan this code. Then approve the sign-in there.</p>
+                  <p>No phone with Steam? <button class="lnk" onclick={steamByWindow}>Sign in with a Steam window instead</button></p>
+                </div>
+              </div>
+            {/if}
+            {#if codeFor === a.platform}
+              <div class="paste" in:rise>
+                <p>{codeHelp(a.platform)}</p>
+                <div class="pr">
+                  <input
+                    bind:this={codeInput}
+                    bind:value={codeText}
+                    onpaste={pasted}
+                    onkeydown={(e) => e.key === "Enter" && sendCode()}
+                    placeholder={a.platform === "epic" ? "Paste the text from Epic Games" : "Paste the address from GOG"}
+                    aria-label={a.platform === "epic" ? "The text Epic Games shows after you sign in" : "The address GOG shows after you sign in"}
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <Btn variant="primary" size="md" disabled={!codeText.trim() || accBusy !== null} onclick={() => sendCode()}>{accBusy === a.platform ? "Signing in" : "Sign in"}</Btn>
+                  <Btn variant="ghost" size="md" disabled={accBusy !== null} title="Open the sign-in page in your browser again" onclick={() => signIn(a.platform)}>Open again</Btn>
+                  <Btn variant="ghost" size="md" onclick={() => cancelSignIn(a.platform)}>Cancel</Btn>
+                </div>
+                {#if codeError}<p class="perr">{codeError}</p>{/if}
+              </div>
+            {/if}
+          {/each}
+          <SRow label="Your sign-ins" desc="You sign in on each platform's own page: Epic Games and GOG in your browser, Steam with its mobile app or in a Steam window. The Updater 3D never sees your password. What the sign-in gives back is kept encrypted for your Windows account on this PC only." />
+          <SRow label="Install games to" desc={s.gamesDir ? `${s.gamesDir}${freeOf(s.gamesDir)}. Epic Games and GOG games get their own folder there. Steam installs in its own library folders.` : `A Games folder on C:${freeOf("C:\\")}. Epic Games and GOG games get their own folder there. Pick a folder on any drive.`}>
+            {#snippet control()}
+              {#if s.gamesDir}<Btn variant="ghost" size="md" title="Use the Games folder on C:" onclick={() => store.patchSettings({ gamesDir: "" })}>Use the default</Btn>{/if}
+              <Btn variant="raised" size="md" onclick={() => changeFolder("gamesDir")}>Change</Btn>
+            {/snippet}
+          </SRow>
+          <SRow label="Other launchers" desc="Ubisoft Connect, EA app, Battle.net, Amazon Games, itch and Rockstar have no sign-in here: their games on this PC show from the launchers' own lists and update in those launchers." />
         {:else if active === "cleanup"}
           <SRow label="Download cache" desc="Installers already used. Safe to remove. Cleared by itself after 14 days or above 5 GB, oldest first.">
             {#snippet control()}
@@ -623,6 +831,75 @@
     gap: 8px;
     font-size: 13px;
     font-weight: 500;
+  }
+  /* Steam's QR code under its row */
+  .qr {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding: 4px 0 20px;
+  }
+  .qr img {
+    flex: none;
+    border-radius: 8px;
+    background: #fff;
+    padding: 6px;
+    image-rendering: pixelated;
+  }
+  .qrt p {
+    max-width: 460px;
+    margin: 0 0 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-3);
+  }
+  .qrt .qh {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .qrt .lnk {
+    color: var(--text);
+    text-decoration: underline;
+  }
+  /* what Epic Games or GOG shows after the sign-in, pasted under its row */
+  .paste {
+    padding: 2px 0 18px;
+  }
+  .paste p {
+    max-width: 640px;
+    margin: 0 0 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-3);
+  }
+  .pr {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pr input {
+    flex: 1;
+    min-width: 0;
+    height: 34px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 6px;
+    outline: 0;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    transition: background-color var(--t-fast) ease;
+  }
+  .pr input:focus {
+    background: var(--surface-2);
+  }
+  .pr input::placeholder {
+    color: var(--text-3);
+  }
+  .paste .perr {
+    margin: 8px 0 0;
+    color: var(--err);
   }
   @media (max-width: 999px) {
     .set {

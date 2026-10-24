@@ -29,7 +29,8 @@
 
   type HState = "first" | "ccdown" | "signedout" | "offline" | "updating" | "failed" | "ready" | "repair" | "empty" | "current";
   /** Games whose launcher has an update waiting: updated there, so not in Update all. */
-  const gameUpdates = $derived(store.apps.filter((a) => a.source === "games" && a.status === "update"));
+  // Games whose launcher installs the update (a game installed here updates with the other apps).
+  const gameUpdates = $derived(store.apps.filter((a) => a.source === "games" && !a.gameHere && a.status === "update"));
   const gameLine = $derived(gameUpdatesLine(gameUpdates));
   function openGameUpdates() {
     if (gameUpdates.length === 1) updateOne(gameUpdates[0].id);
