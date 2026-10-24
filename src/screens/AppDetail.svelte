@@ -20,7 +20,7 @@
   import { router } from "../lib/router.svelte";
   import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, setIgnored, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
-  import { aboutLine, listedOnly } from "../lib/view";
+  import { aboutLine, launcherOf, listedOnly } from "../lib/view";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -34,6 +34,9 @@
   const isAdobe = $derived(app?.source === "adobe");
   /** a device driver, the chipset or the BIOS: installs only its newest version, never rolls back */
   const isDriver = $derived(app?.source === "drivers");
+  /** a game from a launcher (Steam, Epic Games...): updated and uninstalled there, its versions are its news */
+  const isGame = $derived(app?.source === "games");
+  const launcher = $derived(app ? launcherOf(app.id) : "");
   /** its updates are turned off ("Don't update") */
   const ignored = $derived(!!app && isIgnored(app.id));
   /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
@@ -121,7 +124,7 @@
     import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url)).catch(() => window.open(url, "_blank"));
   }
   function rowAction(v: VersionInfo): { label: string; title: string } | null {
-    if (!app || v.installed || app.readOnly || isDriver) return null;
+    if (!app || v.installed || app.readOnly || isDriver || isGame) return null;
     if (sideBySide) return { label: `Install ${v.version}`, title: `Install ${v.version} next to ${app.version}` };
     if (v.latest && cmpVersion(v.version, app.version) > 0) return null;
     if (cmpVersion(v.version, app.version) < 0) return app.canRollback ? { label: `Roll back to ${v.version}`, title: `Roll back to ${v.version}` } : null;
@@ -135,6 +138,7 @@
     if (!app) return "";
     if (listedOnly(app) && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
     if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
+    if (isGame && !job) return ignored ? "Updates off" : app.status === "update" ? `Update waiting in ${launcher}` : `Kept up to date by ${launcher}`;
     if (!job && ignored) return app.latest && cmpVersion(app.latest, app.version) > 0 ? `Updates off, ${app.latest} is out` : "Updates off";
     switch (app.status) {
       case "update":
@@ -193,7 +197,7 @@
               <Btn variant="secondary" title="Restart the PC in a minute to finish installing drivers" onclick={() => send("restart_pc", {})}>Restart PC</Btn>
             {/if}
             {#if app.manualUrl}
-              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : `Get ${app.latest}`) : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
+              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : isGame ? `Update in ${launcher}` : `Get ${app.latest}`) : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
             {:else if app.status === "update"}
               <Btn variant="primary" hint="U" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update to {app.latest}</Btn>
             {:else if app.status === "missing" && canRepair(app)}
@@ -228,10 +232,10 @@
         {/if}
       </section>
       {:else}
-      <section aria-label="Version history">
+      <section aria-label={isGame ? "News and patch notes" : "Version history"}>
         <div class="sec-h">
-          <span>Version history</span>
-          <span class="aside">{versions && !versionsError && !app.readOnly && !isDriver ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
+          <span>{isGame ? "News and patch notes" : "Version history"}</span>
+          <span class="aside">{versions && !versionsError && !app.readOnly && !isDriver && !isGame ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
         </div>
         {#if !versions}
           {#each [0, 1, 2, 3] as i (i)}
@@ -240,12 +244,18 @@
         {:else if versionsError}
           <p class="gone">Could not load the versions. Check the connection.</p>
           <div class="retry"><Btn variant="raised" size="md" onclick={() => app && loadVersions(app.id)}>Retry</Btn></div>
+        {:else if isGame && !versions.length}
+          <p class="gone">{launcher} publishes no patch notes this app can read. {launcher} shows what is new when it updates the game.</p>
         {:else}
           {#each versions as v, i (v.version)}
             {@const act = rowAction(v)}
             <article class="vrow" class:hasnotes={v.notes.length > 0} animate:flip={{ duration: reduced() ? 0 : 200 }} use:enter={i}>
               <div class="vtop">
-                <span class="vn">{preParts(v.version)[0]}{#if preParts(v.version)[1]}<span class="vs">{preParts(v.version)[1]}</span>{/if}</span>
+                {#if isGame}
+                  <span class="vt">{v.version}</span>
+                {:else}
+                  <span class="vn">{preParts(v.version)[0]}{#if preParts(v.version)[1]}<span class="vs">{preParts(v.version)[1]}</span>{/if}</span>
+                {/if}
                 <span class="vd">{dateLong(v.date)}</span>
                 {#if v.installed}
                   <span class="tag" style="color:var(--text)"><Paint kind="swatch" fill="#232323" /><span class="tx">Installed</span></span>
@@ -258,7 +268,7 @@
                 {/if}
                 <span class="grow"></span>
                 {#if v.notesUrl}
-                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full release notes</button>
+                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>{isGame ? `Read on ${launcher === "Steam" ? "Steam" : "its page"}` : "Full release notes"}</button>
                 {/if}
                 {#if act}
                   <Btn variant="ghost" size="sm" title={act.title} onclick={() => installVersion(app, v.version, v.size)}>{act.label}</Btn>
@@ -274,7 +284,7 @@
       {/if}
 
       <aside aria-label="Details">
-        {#if !app.readOnly && !listedOnly(app) && !isDriver}
+        {#if !app.readOnly && !listedOnly(app) && !isDriver && !isGame}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>
           <div class="pk">
@@ -314,7 +324,7 @@
           {/if}
         </dl>
 
-        {#if app.readOnly || app.source === "programs" || isDriver}
+        {#if app.readOnly || app.source === "programs" || isDriver || isGame}
           <!-- Steam or the Microsoft Store keeps this copy up to date; no catalog knows Other programs -->
         {:else if isBlender && app.channel === "beta"}
           <!-- a pre-release copy has no bug-fix releases to keep -->
@@ -471,6 +481,16 @@
     font-weight: 400;
     letter-spacing: 0;
     color: var(--text-3);
+  }
+  /* a game's news item: its title in place of a version number */
+  .vt {
+    min-width: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: var(--track-heading);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .vd {
     font-size: 12px;

@@ -9,6 +9,9 @@ use std::path::PathBuf;
 
 pub mod steam;
 
+mod app;
+pub use app::{can_uninstall, installed, latest, launch_uri, news, plan_uninstall, show_uri, steam_history, through};
+
 /// A game launcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]

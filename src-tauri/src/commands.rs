@@ -100,6 +100,10 @@ pub fn open_app(core: C<'_>, app_id: String) -> Res<()> {
     if let Some(t) = i.store.as_ref().and_then(|s| s.launch_target()) {
         return winutil::shell_open(&t).map_err(err);
     }
+    // A game starts through its launcher.
+    if let Some(u) = crate::sources::games::launch_uri(&i) {
+        return winutil::shell_open(&u).map_err(err);
+    }
     let exe = i.exe.ok_or("Could not find the program file")?;
     winutil::launch(&exe, &[]).map_err(err)
 }

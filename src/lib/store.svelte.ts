@@ -79,7 +79,7 @@ function syncList<T extends { id: string }>(cur: T[], next: T[]): T[] {
   return cur;
 }
 
-export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps", "Other apps", "Drivers", "Other programs"] as const;
+export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps", "Other apps", "Games", "Drivers", "Other programs"] as const;
 
 /** Shown wherever Other apps are listed. */
 

@@ -986,7 +986,7 @@ impl Core {
             let is_beta = i.channel.as_deref() == Some("beta");
             let has_update = !i.read_only
                 && !i.missing
-                && latest.is_some_and(|l| sources::update_offered(&l.version, &i.version, is_beta));
+                && latest.is_some_and(|l| i.source == Source::Games || sources::update_offered(&l.version, &i.version, is_beta));
             let status = if i.missing {
                 AppStatus::Missing
             } else if let Some(j) = job {
@@ -1045,13 +1045,13 @@ impl Core {
                 tagline: gh_feed.and_then(|f| f.about_of(&i.id)).map(String::from).or_else(|| i.tagline.clone()),
                 group: if gh_feed.is_some() { Source::Other.group().into() } else { i.source.group().into() },
                 running: is_running,
-                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
+                can_uninstall: !i.read_only && (i.uninstall.is_some() || sources::games::can_uninstall(i) || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
                 read_only: i.read_only,
                 // Only for copies the Store updates: a sideloaded app package is updated here.
                 store_url: i.store.as_ref().filter(|_| i.read_only).map(|s| s.page_url()),
                 channel: i.channel.clone(),
-                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)),
+                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)).or_else(|| if has_update { sources::games::show_uri(i) } else { None }),
                 github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
                 note,
                 job_id: job.map(|j| j.id.clone()),
@@ -1096,6 +1096,10 @@ impl Core {
             }
             if s.sources.tools {
                 v.extend(tools::scan(&un, &PathBuf::from(&s.godot_install_dir)));
+            }
+            // Games before the catalog: a launcher's game is not an Other app or program.
+            if s.sources.games {
+                v.extend(sources::games::scan().into_iter().map(sources::games::installed));
             }
             if s.sources.other {
                 let found = other::scan(&un, &v, of.as_deref());
@@ -1277,6 +1281,10 @@ impl Core {
     /// The maker's page for a driver that is updated from there (a BIOS), or the maker's own
     /// updater for a card whose maker was not reached.
     pub fn driver_page(&self, id: &str) -> Option<String> {
+        // A game: its page in its launcher, where the update is.
+        if id.starts_with("game:") {
+            return self.installed(id).and_then(|i| sources::games::show_uri(&i));
+        }
         // An Other program's newest release that only downloads from its GitHub page.
         if id.starts_with("prog:") {
             let inst = self.installed(id)?;
@@ -1370,6 +1378,8 @@ impl Core {
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
                 Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
+                // The launcher marks its own updates.
+                Source::Games => sources::games::latest(i),
                 // Listed to uninstall them; no catalog knows their versions, their GitHub project may.
                 Source::Programs => gf.as_ref().and_then(|f| ghapps::latest(i, f)),
                 // Not in the installed list: the driver check has their versions.
@@ -1833,8 +1843,9 @@ impl Core {
     fn auto_install(self: &Arc<Self>, apps: &[AppEntry]) {
         let s = self.settings.read().clone();
         let mut queued = 0;
-        // Drivers ask for admin rights and some restart the screen: never by themselves.
-        for a in apps.iter().filter(|a| a.status == AppStatus::Update && a.source != Source::Drivers) {
+        // Drivers ask for admin rights and some restart the screen; a game or a release that
+        // only downloads from its page is updated there.
+        for a in apps.iter().filter(|a| a.status == AppStatus::Update && a.source != Source::Drivers && a.manual_url.is_none()) {
             let mode = s.exceptions.get(&a.id).copied().unwrap_or(s.auto_mode);
             if mode != AutoMode::Install || !Self::in_window(&s.window_start, &s.window_end) || a.running {
                 continue;
@@ -2657,6 +2668,9 @@ impl Core {
             return Ok(self.driver_versions(app_id));
         }
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
+        if let SourceData::Game(g) = &inst.data {
+            return Ok(sources::games::news(g).await);
+        }
         if inst.source == Source::Programs {
             // No catalog knows its versions: its GitHub releases, when it names its project.
             return Ok(self.ghapps.read().as_deref().map(|f| ghapps::versions(&inst, f)).unwrap_or_default());
@@ -2742,6 +2756,7 @@ impl Core {
                 Ok(with_adobe_notes(list).await)
             }
             SourceData::Craft { key, .. } => craft::versions(key, Some(&inst.version), s.craft_prereleases).await,
+            SourceData::Game(g) => Ok(sources::games::news(g).await),
             SourceData::Blender { .. } => {
                 let feed = self.blender.read().clone().ok_or_else(|| anyhow!("Blender releases are not loaded yet"))?;
                 blender::versions(&inst, &feed).await
@@ -3087,6 +3102,7 @@ impl Core {
                 let inst = installed.iter().find(|i| &i.id == app_id).cloned().ok_or_else(|| anyhow!("That app is no longer installed"))?;
                 let latest = self.st.lock().latest.get(app_id).map(|l| l.version.clone());
                 match &inst.data {
+                    SourceData::Game(g) => Err(anyhow!("{} updates {}: open it there to update it.", inst.name, sources::games::through(g.launcher))),
                     SourceData::Adobe { sap, platform, .. } => {
                         let cat = self.adobe.read().clone().ok_or_else(|| anyhow!("The Adobe catalog could not be loaded. Check your connection."))?;
                         let target = if repair { inst.version.clone() } else { version.clone().or(latest).unwrap_or_else(|| inst.version.clone()) };
@@ -3226,6 +3242,7 @@ impl Core {
                     Source::Other => other::plan_uninstall(inst),
                     Source::Programs => crate::uninstall::run::plan(inst),
                     Source::Drivers => Err(anyhow!("Drivers are not uninstalled here")),
+                    Source::Games => sources::games::plan_uninstall(inst),
                 }?;
                 // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Other
                 // apps: nothing is known about what they keep there, so their folder only goes when
@@ -3658,6 +3675,12 @@ impl Core {
         self.save_queue();
         let me = self.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || me.emit_apps()).await;
+        // The program's own files before it is updated, to tell afterwards that they are still
+        // there (see `integrity`).
+        let programs_before = match (plan.kind, before.as_ref().and_then(|b| b.install_dir.clone())) {
+            (JobKind::Update | JobKind::Repair | JobKind::Rollback, Some(dir)) if other::own_dir(&dir) => tauri::async_runtime::spawn_blocking(move || crate::integrity::program_names(&dir)).await.ok(),
+            _ => None,
+        };
 
         // ---- install steps
         let silent = self.settings.read().silent_elevation;
@@ -3878,6 +3901,9 @@ impl Core {
             self.rescan().await;
             let state = self.check_result(plan, before.as_ref(), since).await;
             if state == Checked::Done {
+                if let Some(gone) = self.programs_gone(plan, before.as_ref(), programs_before.as_ref()).await {
+                    return Err(anyhow!("VERIFY|The installer finished, but most of {}'s programs are missing ({}). Restart the PC, then use Retry to install it again.", plan.name, gone.into_iter().take(4).collect::<Vec<_>>().join(", ")));
+                }
                 return Ok(Outcome::Done);
             }
             let waited = t0.elapsed();
@@ -3894,6 +3920,15 @@ impl Core {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+
+    /// The programs an update took away from the app's folder, when it took most of them: the
+    /// installer finished and Windows lists the new version, but the app is not whole.
+    async fn programs_gone(self: &Arc<Self>, plan: &Plan, before: Option<&Installed>, programs_before: Option<&std::collections::BTreeSet<String>>) -> Option<Vec<String>> {
+        let was = programs_before?.clone();
+        let dir = self.installed(&plan.app_id).and_then(|i| i.install_dir).or_else(|| before.and_then(|b| b.install_dir.clone()))?;
+        let now = tauri::async_runtime::spawn_blocking(move || crate::integrity::program_names(&dir)).await.ok()?;
+        crate::integrity::mostly_gone(&was, &now)
     }
 
     /// What the uninstall list shows after the steps, against what the plan expects.
