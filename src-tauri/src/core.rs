@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use crate::notice::{self, Target};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{watch, Notify};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -842,13 +842,14 @@ impl Core {
         self.emit("toast", Toast { kind: kind.into(), text: text.into(), app_id });
     }
 
-    /// A Windows notification with a sound (Windows toasts are silent unless a sound is named).
-    fn notify(&self, title: &str, body: &str) {
-        self.notify_with(title, body, NOTIFY_SOUND);
+    /// A Windows notification with a sound. A click on it opens the main window on `target`,
+    /// also when the app runs only in the tray.
+    fn notify(&self, title: &str, body: &str, target: Target) {
+        self.notify_with(title, body, NOTIFY_SOUND, target);
     }
 
-    fn notify_with(&self, title: &str, body: &str, sound: &str) {
-        let _ = self.app.notification().builder().title(title).body(body).sound(sound).show();
+    fn notify_with(&self, title: &str, body: &str, sound: &str, target: Target) {
+        notice::show(&self.app, title, body, sound, &target);
     }
 
     fn activity(&self, kind: ActivityKind, title: impl Into<String>, meta: Option<String>, app_id: Option<String>, error: Option<JobError>) {
@@ -1253,7 +1254,7 @@ impl Core {
             let first = !self.status().restart_needed;
             self.set_status(|s| s.restart_needed = true);
             if first {
-                self.notify("Restart to finish installing drivers", "Open The Updater 3D to restart now, or restart later yourself.");
+                self.notify("Restart to finish installing drivers", "Open The Updater 3D to restart now, or restart later yourself.", Target::Home);
             }
         }
         self.emit_apps();
@@ -1672,7 +1673,8 @@ impl Core {
         if !fresh.is_empty() && settings.notify_updates && !manual {
             let fresh_names: Vec<String> = fresh.iter().map(|a| a.name.clone()).collect();
             let (title, body) = update_notice(updates.len(), &fresh_names);
-            self.notify(&title, &body);
+            let ids: Vec<&str> = updates.iter().map(|a| a.id.as_str()).collect();
+            self.notify(&title, &body, notice::updates_target(&ids));
         }
         {
             let mut p = self.persisted.lock();
@@ -1707,7 +1709,7 @@ impl Core {
                 *self.self_release.lock() = Some(r);
                 self.set_status(|s| s.self_update = Some(v.clone()));
                 if first && notify {
-                    self.notify(&format!("The Updater 3D {v} is ready"), "Open the app to update it.");
+                    self.notify(&format!("The Updater 3D {v} is ready"), "Open the app to update it.", Target::About);
                 }
                 Ok(Some(v))
             }
@@ -2929,7 +2931,9 @@ impl Core {
         let err = JobError { code: code.into(), message, detail, log_path };
         let mut app_id = String::new();
         let mut title = String::new();
+        let mut kind = JobKind::Update;
         self.set_job(id, |j| {
+            kind = j.kind;
             j.state = JobState::Failed;
             j.step = err.message.clone();
             j.detail.clear();
@@ -2943,7 +2947,7 @@ impl Core {
         self.st.lock().failed.insert(app_id.clone(), err.clone());
         self.activity(ActivityKind::Failure, title.clone(), Some(err.code.clone()), Some(app_id.clone()), Some(err.clone()));
         if self.settings.read().notify_failed {
-            self.notify_with(&title, &err.message, FAILED_SOUND);
+            self.notify_with(&title, &err.message, FAILED_SOUND, notice::failed_target(kind, &app_id));
         }
         self.emit_apps();
     }
@@ -3025,7 +3029,7 @@ impl Core {
                 if self.window_open() {
                     self.toast("info", "Some updates need admin rights. Allow them in the Queue to continue.", None);
                 } else {
-                    self.notify("Updates need admin rights", "Open The Updater 3D and allow admin rights to install them.");
+                    self.notify("Updates need admin rights", "Open The Updater 3D and allow admin rights to install them.", Target::Queue);
                 }
             }
             let canceled = tokio::select! {
@@ -3115,7 +3119,7 @@ impl Core {
                         JobKind::Uninstall => "Removed from this PC.",
                         _ => "Ready to use.",
                     };
-                    self.notify(&title, body);
+                    self.notify(&title, body, notice::finished_target(kind, &app_id));
                 }
                 self.toast("ok", title, Some(app_id));
                 self.emit_apps();
@@ -3364,7 +3368,7 @@ impl Core {
                 j.detail = detail.clone();
             });
             if waiting {
-                self.notify("An installer is waiting for you", step.label().trim_start_matches(sources::WAITING_FOR_YOU).trim_start_matches(':').trim());
+                self.notify("An installer is waiting for you", step.label().trim_start_matches(sources::WAITING_FOR_YOU).trim_start_matches(':').trim(), Target::Queue);
             }
             let step_t0 = Instant::now();
             let step_est = (inst_est * weights[k] / weight_sum).max(2.0);
@@ -4208,7 +4212,7 @@ mod tests {
     fn every_notification_plays_a_known_windows_sound() {
         let known = ["Default", "IM", "Mail", "Reminder", "SMS"];
         assert!(known.contains(&super::NOTIFY_SOUND) && known.contains(&super::FAILED_SOUND));
-        for (name, src) in [("core.rs", include_str!("core.rs")), ("commands.rs", include_str!("commands.rs"))] {
+        for (name, src) in [("core.rs", include_str!("core.rs")), ("commands.rs", include_str!("commands.rs")), ("notice.rs", include_str!("notice.rs"))] {
             for (i, line) in src.lines().enumerate() {
                 if line.contains(concat!(".builder()", ".title(")) {
                     assert!(line.contains(".sound("), "{name}:{} sends a silent notification", i + 1);

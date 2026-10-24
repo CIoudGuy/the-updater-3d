@@ -33,8 +33,8 @@ Finds what you have, shows what changed, and updates everything in one click.
 - **A better uninstaller.** Every program on the PC, uninstalled cleanly: leftover files, registry
   keys, shortcuts, services and startup entries are shown before anything is deleted, with a
   30-day restore. Also finds broken entries and dead shortcuts.
-- **Light and quiet.** A small background checker sends a notification when updates are ready,
-  tuned to your PC so it stays fast on older machines.
+- **Light and quiet.** A small background checker sends a notification when updates are ready
+  (click it to open the app on that page), tuned to your PC so it stays fast on older machines.
 
 <table>
   <tr>

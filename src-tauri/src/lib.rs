@@ -7,6 +7,7 @@ pub mod install_detail;
 pub mod machine;
 pub mod model;
 pub mod notes;
+pub mod notice;
 pub mod paths;
 pub mod prefs;
 pub mod procs;
@@ -54,10 +55,14 @@ pub fn run() {
     log_crashes();
     log::info!("The Updater 3D {} starting", env!("CARGO_PKG_VERSION"));
     let minimized = std::env::args().any(|a| a == "--minimized");
+    // Started by a click on a notification while no copy was running: open on its page.
+    let launch_route = notice::route_in_args(&std::env::args().collect::<Vec<_>>());
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_main(app);
+        // A second start (the app again, or a click on a notification) hands its arguments over
+        // and ends: show the window, on the page a notification link asks for.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            tray::open_route(app, notice::route_in_args(&args));
         }))
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .plugin(tauri_plugin_notification::init())
@@ -106,8 +111,12 @@ pub fn run() {
                     let _ = m.enable();
                 }
             }
+            // Notifications open a link this exe handles.
+            notice::register_link_handler();
             // Started by Windows at sign-in: stay a tiny background checker, no window.
-            if !minimized {
+            if launch_route.is_some() {
+                tray::open_route(app.handle(), launch_route);
+            } else if !minimized {
                 tray::show_main(app.handle());
             }
             tauri::async_runtime::spawn(core.clone().jobs_ticker());
