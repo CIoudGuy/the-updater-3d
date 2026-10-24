@@ -1041,7 +1041,8 @@ impl Core {
                 size_on_disk: if i.missing { None } else { st.sizes.get(&i.id).copied().or(i.size_hint) },
                 install_dir: i.install_dir.as_ref().map(|d| d.display().to_string()),
                 updated_at: newest_update(recorded.get(&i.id).map(String::as_str), i.updated_at.as_deref()),
-                tagline: i.tagline.clone(),
+                // A GitHub program: its project's own description.
+                tagline: gh_feed.and_then(|f| f.about_of(&i.id)).map(String::from).or_else(|| i.tagline.clone()),
                 group: if gh_feed.is_some() { Source::Other.group().into() } else { i.source.group().into() },
                 running: is_running,
                 can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),

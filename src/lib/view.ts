@@ -13,6 +13,15 @@ export function listedOnly(app: { source: string; github?: string | null }): boo
   return app.source === "programs" && !app.github;
 }
 
+/** The short description an app's page shows under its version, like Get apps does. An Other
+ * program's line is its publisher and a driver's its kind (shown in Details), and a copy another
+ * app manages already says so in its note. */
+export function aboutLine(app: { source: string; tagline: string | null; note: string | null; readOnly?: boolean; github?: string | null }): string | null {
+  if (listedOnly(app) || app.source === "drivers" || app.readOnly) return null;
+  const t = app.tagline?.trim();
+  return t && t !== app.note ? t : null;
+}
+
 /** The version in the Installed list's Latest column. An app whose updates are turned off shows the
  * version it has: its newer version shows only on its own page. */
 export function latestColumn(app: { source: string; status: string; latest: string | null; version: string; github?: string | null }, updatesOff: boolean): string {

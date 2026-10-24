@@ -339,3 +339,13 @@ async fn live_tidalfast_releases() {
     eprintln!("{} {} {:?}", r.version, a.name, a.sha256);
     assert!(a.name.ends_with("-setup.exe"));
 }
+
+#[test]
+fn a_projects_description_becomes_a_short_line() {
+    assert_eq!(short_about("A client mod for the Tidal music client & successor to Neptune").as_deref(), Some("A client mod for the Tidal music client & successor to Neptune"));
+    assert_eq!(short_about(":rocket: Fast TIDAL player. See https://example.com.").as_deref(), Some("Fast TIDAL player. See"));
+    assert_eq!(short_about("  "), None);
+    let long = "word ".repeat(60);
+    let s = short_about(&long).unwrap();
+    assert!(s.ends_with("...") && s.chars().count() <= 143, "{s}");
+}

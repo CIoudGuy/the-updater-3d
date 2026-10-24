@@ -1,7 +1,7 @@
 // node --test src/lib/view.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, latestColumn, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, aboutLine, isEmptyLibrary, latestColumn, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
 
 test("a source filter whose last app is gone falls back to all", () => {
   assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");
@@ -14,6 +14,15 @@ test("an Other program that names its GitHub project is updated like Other apps"
   assert.equal(listedOnly({ source: "programs" }), true);
   assert.equal(listedOnly({ source: "programs", github: "CIoudGuy/tidalfast" }), false);
   assert.equal(listedOnly({ source: "other", github: null }), false);
+});
+
+test("an app's page shows its short description, not a publisher or a driver kind", () => {
+  assert.equal(aboutLine({ source: "programs", github: "o/chat-on-steroids", tagline: "ChatGPT desktop client with projects", note: null }), "ChatGPT desktop client with projects");
+  assert.equal(aboutLine({ source: "programs", github: null, tagline: "Mega Limited", note: null }), null);
+  assert.equal(aboutLine({ source: "drivers", tagline: "Chipset from AMD", note: null }), null);
+  assert.equal(aboutLine({ source: "blender", tagline: "Updated by Steam", note: "Updated by Steam", readOnly: true }), null);
+  assert.equal(aboutLine({ source: "other", tagline: "A free source code editor", note: null }), "A free source code editor");
+  assert.equal(aboutLine({ source: "other", tagline: "  ", note: null }), null);
 });
 
 test("an app whose updates are off shows the version it has, not the newer one", () => {
