@@ -1,7 +1,7 @@
 // node --test src/lib/view.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, aboutLine, isEmptyLibrary, latestColumn, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, aboutLine, gameUpdatesLine, isEmptyLibrary, latestColumn, launcherOf, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
 
 test("a source filter whose last app is gone falls back to all", () => {
   assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");
@@ -23,6 +23,19 @@ test("an app's page shows its short description, not a publisher or a driver kin
   assert.equal(aboutLine({ source: "blender", tagline: "Updated by Steam", note: "Updated by Steam", readOnly: true }), null);
   assert.equal(aboutLine({ source: "other", tagline: "A free source code editor", note: null }), "A free source code editor");
   assert.equal(aboutLine({ source: "other", tagline: "  ", note: null }), null);
+});
+
+test("Home says which games have an update waiting in their launcher", () => {
+  assert.equal(gameUpdatesLine([]), null);
+  assert.deepEqual(gameUpdatesLine([{ id: "game:steam:1091500", name: "Cyberpunk 2077" }]), { text: "Cyberpunk 2077 has an update waiting in Steam.", button: "Update in Steam" });
+  assert.equal(gameUpdatesLine([{ id: "game:steam:1", name: "A" }, { id: "game:epic:b", name: "B" }])?.button, "Show them");
+});
+
+test("a game names the launcher it came from", () => {
+  assert.equal(launcherOf("game:steam:1912410"), "Steam");
+  assert.equal(launcherOf("game:ubisoft:16732"), "Ubisoft Connect");
+  assert.equal(launcherOf("game:nobody:1"), "its launcher");
+  assert.equal(launcherOf("other:7zip.7zip"), "its launcher");
 });
 
 test("an app whose updates are off shows the version it has, not the newer one", () => {

@@ -207,6 +207,17 @@ function seedApps(): AppEntry[] {
       id: "prog:hklm64:megasync", source: "programs", group: "Other programs", name: "MEGAsync", code: "ME", fg: "#EDEDED", bg: "#36302B",
       version: "6.7.0.3", sizeOnDisk: 312 * MB, installDir: "C:\\Users\\Alex\\AppData\\Local\\MEGAsync", updatedAt: iso(70 * DAY), tagline: "Mega Limited",
     }),
+    // Games from launchers: listed with the apps, updated and uninstalled in their launcher.
+    app({
+      id: "game:steam:1091500", source: "games", group: "Games", name: "Cyberpunk 2077", code: "Cy", fg: "#EDEDED", bg: "#1B2838",
+      version: "19873022", latest: "20110457", status: "update", sizeOnDisk: 92 * GB, installDir: String.raw`D:\SteamLibrary\steamapps\common\Cyberpunk 2077`, updatedAt: iso(12 * DAY),
+      tagline: "Installed and updated through Steam", manualUrl: "steam://nav/games/details/1091500", canRollback: false,
+    }),
+    app({
+      id: "game:ubisoft:5059", source: "games", group: "Games", name: "Assassin's Creed Mirage", code: "As", fg: "#EDEDED", bg: "#0B2540",
+      version: "Installed", status: "current", sizeOnDisk: 41 * GB, installDir: String.raw`D:\Games\Assassin's Creed Mirage`, updatedAt: iso(30 * DAY),
+      tagline: "Installed and updated through Ubisoft Connect", canRollback: false,
+    }),
     // An Other program that names its GitHub project: updated from its releases.
     app({
       id: "prog:hkcu:{2bc3c20f-7cc4-4bd0-a51c-0a5415b0189b}_is1", source: "programs", group: "Other apps", name: "Lumen Player", code: "Lu", fg: "#EDEDED", bg: "#2B3630",
@@ -1004,6 +1015,14 @@ function versionsFor(a: AppEntry): VersionInfo[] {
     if (newer) list.push({ version: a.latest!, date: iso(3 * DAY), notes: DRIVER_NOTES[a.id] ?? [], notesUrl: a.id.startsWith("driver:nvidia") ? "https://www.nvidia.com/en-gb/drivers/details/282478/" : null, size: a.updateSize, installed: false, latest: true, prerelease: false });
     list.push({ version: a.version, date: null, notes: newer ? [] : DRIVER_NOTES[a.id] ?? [], notesUrl: null, size: null, installed: true, latest: !newer, prerelease: false });
     return list;
+  }
+  if (a.source === "games") {
+    // Steam's news; Ubisoft Connect publishes none.
+    if (!a.id.startsWith("game:steam:")) return [];
+    return [
+      { version: "Update 2.4", date: iso(2 * DAY), notes: ["## Fixes", "Fixed a crash when loading a save", "Better frame pacing on handhelds", "## Improvements", "Faster loading in the city"], notesUrl: "https://store.steampowered.com/news/app/1091500", size: null, installed: false, latest: true, prerelease: false },
+      { version: "Hotfix 2.31", date: iso(20 * DAY), notes: ["Fixed missing subtitles in some cutscenes"], notesUrl: "https://store.steampowered.com/news/app/1091500", size: null, installed: false, latest: false, prerelease: false },
+    ];
   }
   if (a.source === "other") return otherVersions(a.id);
   if (a.source === "tools") {

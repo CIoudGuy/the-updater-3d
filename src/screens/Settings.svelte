@@ -275,6 +275,9 @@
           <SRow label="Other apps" desc="Every other app on this PC from Microsoft's winget catalog, updated with its publisher's own installer.">
             {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}
           </SRow>
+          <SRow label="Games" desc="Games and apps from Steam, Epic Games, Ubisoft Connect, GOG Galaxy, EA app, Battle.net, Amazon Games, itch and Rockstar, with their patch notes. Each launcher installs its own updates: Update opens it there. Nothing is signed in to.">
+            {#snippet control()}<Toggle checked={s.sources.games !== false} label="Games" onchange={(v) => store.patchSettings({ sources: { ...s.sources, games: v } })} />{/snippet}
+          </SRow>
           <SRow label="Drivers" desc="Graphics, network, audio, Bluetooth and chipset drivers from NVIDIA, AMD, Intel and Windows Update, and the newest BIOS for your board or PC (Gigabyte, ASUS, MSI, ASRock, Dell, HP and Lenovo). A BIOS is never flashed by this app.">
             {#snippet control()}<Toggle checked={s.sources.drivers !== false} label="Drivers" onchange={(v) => store.patchSettings({ sources: { ...s.sources, drivers: v } })} />{/snippet}
           </SRow>

@@ -368,6 +368,15 @@ mod tests {
         assert!(game_of(&fresh, Path::new("C:\\S"), None).is_none());
     }
 
+    /// This PC's Steam libraries: `cargo test steam::tests::live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_this_pc() {
+        for g in scan() {
+            eprintln!("{} | build {} | update {:?} | {:?} | icon {}", g.name, g.version, g.update, g.install_dir, g.icon.is_some());
+        }
+    }
+
     #[test]
     fn the_owner_id_is_not_kept() {
         let app = parse_manifest(&manifest(4, 1, 1)).unwrap();

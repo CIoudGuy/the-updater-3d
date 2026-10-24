@@ -16,7 +16,7 @@
   import { router, appHref } from "../lib/router.svelte";
   import { checkNow, repairApp, togglePauseAll, updateAll, updateOne, isPaused, updateSelf } from "../lib/actions";
   import { bytes, checkedLine, clock, countOf, duration, inUnit, nameList, speedParts, splitVersion, unitFor } from "../lib/format";
-  import { allSourcesOff, failedCount, failedSentence, isEmptyLibrary } from "../lib/view";
+  import { allSourcesOff, failedCount, failedSentence, gameUpdatesLine, isEmptyLibrary } from "../lib/view";
   import { NO_STOP_TIP, canPause, groupQueue, jobDetail, jobStatus, pauseTip, pct, queueSections, readyLine } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
   import { batchCounts } from "../lib/batch";
@@ -28,6 +28,17 @@
   const qSections = $derived(queueSections(qGroups));
 
   type HState = "first" | "ccdown" | "signedout" | "offline" | "updating" | "failed" | "ready" | "repair" | "empty" | "current";
+  /** Games whose launcher has an update waiting: updated there, so not in Update all. */
+  const gameUpdates = $derived(store.apps.filter((a) => a.source === "games" && a.status === "update"));
+  const gameLine = $derived(gameUpdatesLine(gameUpdates));
+  function openGameUpdates() {
+    if (gameUpdates.length === 1) updateOne(gameUpdates[0].id);
+    else {
+      ui.group = "Games";
+      ui.filter = "updates";
+      router.go("#/installed");
+    }
+  }
   const hs = $derived.by((): HState => {
     const s = store.status;
     if (s.firstScan) return "first";
@@ -205,6 +216,13 @@
       <Dab color="#7C93D6" />
       <a class="selflink" href="#/updater" title="See what is new in {store.status.selfUpdate}">The Updater 3D {store.status.selfUpdate} is ready.</a>
       <button class="lnk" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading, restarts by itself" : "Update and restart"}</button>
+    </div>
+  {/if}
+  {#if gameLine && hs !== "first"}
+    <div class="selfup" in:rise>
+      <Dab color="var(--warn)" />
+      <span>{gameLine.text}</span>
+      <button class="lnk" onclick={openGameUpdates}>{gameLine.button}</button>
     </div>
   {/if}
   {#if store.leftovers.length && hs !== "first"}

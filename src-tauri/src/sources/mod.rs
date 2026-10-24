@@ -10,6 +10,7 @@ pub mod browse;
 pub mod chipset;
 pub mod craft;
 pub mod drivers;
+pub mod games;
 pub mod ghapps;
 pub mod nvidia;
 pub mod iconfetch;
@@ -86,6 +87,8 @@ pub enum SourceData {
     /// Matched from the winget catalog: the package, how it was matched and the uninstall list
     /// entry it was matched from.
     Other { pkg: String, how: other::How, entry: Box<crate::winutil::UninstallEntry>, upgrade_code: Option<String> },
+    /// Installed through a game launcher.
+    Game(Box<games::Game>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

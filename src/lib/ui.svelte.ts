@@ -54,8 +54,8 @@ export type DialogState =
       onRelocate: () => void;
     };
 
-export type InstalledFilter = "updates" | "all" | "drivers" | "recent";
-export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Drivers" | "Other programs";
+export type InstalledFilter = "updates" | "all" | "games" | "drivers" | "recent";
+export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Games" | "Drivers" | "Other programs";
 /** Installed: every program, or only the apps a catalog updates. */
 export type InstalledScope = "everything" | "catalog";
 export type SortKey = "name" | "size" | "updated" | "status";
@@ -187,6 +187,15 @@ export function isIgnored(id: string): boolean {
 export function menuItemsFor(app: AppEntry): PopItem[] {
   const items: PopItem[] = [];
   const skip: PopItem = isIgnored(app.id) ? { id: "unignore", label: "Show its updates again", icon: "play" } : { id: "ignore", label: "Don't update", icon: "pause" };
+  if (app.source === "games") {
+    // Updated and uninstalled in its launcher.
+    items.push({ id: "notes", label: "Patch notes", icon: "notes", key: "N" });
+    if (app.installDir) items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
+    items.push(skip);
+    items.push({ id: "sep", label: "", divider: true });
+    items.push({ id: "uninstall", label: "Uninstall", icon: "trash", key: "Del", danger: true, disabled: !app.canUninstall });
+    return items;
+  }
   if (app.source === "drivers") {
     items.push({ id: "notes", label: "Release notes", icon: "notes", key: "N" });
     if (app.manualUrl) items.push({ id: "maker", label: "Open the maker's page", icon: "external" });

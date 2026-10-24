@@ -2,7 +2,7 @@
 // Field names are camelCase on both sides (serde rename_all = "camelCase").
 
 /** "programs": any other program in Windows' list of installed programs (uninstall only). */
-export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs" | "drivers";
+export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs" | "drivers" | "games";
 
 export type AppStatus =
   | "current" // installed and up to date
@@ -293,7 +293,7 @@ export interface Settings {
   showInstalledInGetApps: boolean;
   /** Which sources are enabled */
   /** `other`: every other app, matched from the public winget catalog (off by default) */
-  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean; drivers?: boolean };
+  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean; drivers?: boolean; games?: boolean };
   /** Number of parallel downloads */
   parallelDownloads: number;
   /** One UAC prompt ever instead of one per batch (registers an elevated task) */

@@ -17,6 +17,8 @@ pub enum Source {
     Programs,
     /// Device drivers, the chipset and the BIOS.
     Drivers,
+    /// Games and apps installed through a game launcher (Steam, Epic Games, Ubisoft Connect...).
+    Games,
 }
 
 impl Source {
@@ -29,6 +31,7 @@ impl Source {
             Source::Other => "Other apps",
             Source::Programs => "Other programs",
             Source::Drivers => "Drivers",
+            Source::Games => "Games",
         }
     }
 }
@@ -327,6 +330,9 @@ pub struct Sources {
     /// Drivers, the chipset and the BIOS. On by default.
     #[serde(default = "yes")]
     pub drivers: bool,
+    /// Games from the game launchers on this PC. On by default.
+    #[serde(default = "yes")]
+    pub games: bool,
 }
 
 fn yes() -> bool {
@@ -397,7 +403,7 @@ impl Default for Settings {
             blender_keep_patch_versions: false,
             craft_prereleases: false,
             show_installed_in_get_apps: false,
-            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true },
+            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true, games: true },
             parallel_downloads: 2,
             silent_elevation: true,
             ui_zoom: 1.0,

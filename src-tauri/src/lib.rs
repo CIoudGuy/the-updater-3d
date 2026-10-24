@@ -4,6 +4,7 @@ pub mod download;
 pub mod elevate;
 pub mod http;
 pub mod install_detail;
+pub mod integrity;
 pub mod machine;
 pub mod model;
 pub mod noteimg;
