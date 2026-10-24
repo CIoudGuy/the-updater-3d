@@ -1066,6 +1066,42 @@ fn an_app_from_its_own_site_gets_the_betas_its_github_project_publishes() {
 }
 
 #[test]
+fn a_beta_named_so_in_windows_reads_as_a_pre_release_of_that_version() {
+    let none = |_: &str| false;
+    // WinRAR 7.30 beta 1, as Windows lists it on a clean PC.
+    assert_eq!(beta_from_name("WinRAR 7.30 beta 1 (x64)", "7.30.1", none).as_deref(), Some("7.30-beta1"));
+    // The final release is then an update for it; the catalog's older release is not.
+    assert!(is_newer("7.30.0", "7.30-beta1") && !is_newer("7.23.0", "7.30-beta1") && is_newer("7.30-beta2", "7.30-beta1"));
+    // A final release, a version the catalog lists, and names that do not match stay as they are.
+    assert_eq!(beta_from_name("WinRAR 7.23 (64-bit)", "7.23.0", none), None);
+    assert_eq!(beta_from_name("Foo 2.0 Beta", "2.0.5", |v: &str| v == "2.0.5"), None);
+    assert_eq!(beta_from_name("Foo 3.1 beta 2", "2.9.0", none), None);
+    assert_eq!(beta_from_name("Foo 3.1 beta 2", "3.1.0-beta.2", none), None);
+}
+
+#[test]
+fn winrars_betas_are_read_from_its_download_page_for_the_same_build_and_language() {
+    let page = r#"<a href="/rar/winrar-x64-730b1.exe">64-bit version</a> <a href="/rar/winrar-x32-730b1.exe">32-bit</a>
+        <a href="/rar/winrar-x64-730b1d.exe">64-bit version</a> <a href="/rar/winrar-x64-730b1.exe">again</a>
+        <a href="/rar/winrar-x64-723.exe">64-bit</a> <a href="/rar/winrar-x64-730b2.exe">64-bit</a>"#;
+    let names = |file: &str| winrar_betas(page, file).into_iter().map(|(v, label, f)| format!("{v}|{label}|{f}")).collect::<Vec<_>>();
+    assert_eq!(names("winrar-x64-723.exe"), vec!["7.30-beta2|7.30 beta 2|winrar-x64-730b2.exe", "7.30-beta1|7.30 beta 1|winrar-x64-730b1.exe"]);
+    // German: its own build only.
+    assert_eq!(names("winrar-x64-723d.exe"), vec!["7.30-beta1|7.30 beta 1|winrar-x64-730b1d.exe"]);
+    // Not a WinRAR installer name: nothing.
+    assert!(names("setup.exe").is_empty());
+}
+
+#[test]
+fn a_signed_beta_without_a_checksum_is_checked_by_its_signer() {
+    let idx = index();
+    let p = idx.by_id("Example.Zipper").unwrap();
+    let signed = Installer { sha256: String::new(), signer: Some("win.rar GmbH".into()), ..inst("x64", "exe", Some("machine")) };
+    let plan = build_plan(&p, &manifest(vec![signed.clone()]), &signed, JobKind::Install, None, None).unwrap();
+    assert_eq!((plan.downloads[0].sha256.as_deref(), plan.downloads[0].signer.as_deref()), (None, Some("win.rar GmbH")));
+}
+
+#[test]
 fn only_an_installer_from_the_projects_releases_gets_its_pre_releases() {
     let (_, stable) = sharex_21();
     assert_eq!(installer_repo(&stable).as_deref(), Some("ShareX/ShareX"));

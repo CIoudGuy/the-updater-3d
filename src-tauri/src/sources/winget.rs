@@ -576,6 +576,9 @@ pub struct Installer {
     /// MSIX and APPX installers: SHA-256 of the package's signature file (AppxSignature.p7x),
     /// lowercase hex
     pub signature_sha256: Option<String>,
+    /// The signer Windows must report for a download the publisher gives no checksum for (a beta
+    /// from its own site); None for the catalog's, which have checksums
+    pub signer: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -696,6 +699,7 @@ pub fn parse_manifest(yaml: &str) -> Result<Manifest> {
             install_location: switch("InstallLocation"),
             family: text(get("PackageFamilyName")),
             signature_sha256: text(&inst["SignatureSha256"]).map(|s| s.to_ascii_lowercase()),
+            signer: None,
         });
     }
     if m.release_date.is_none() {

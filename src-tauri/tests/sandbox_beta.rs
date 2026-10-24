@@ -205,3 +205,46 @@ async fn repair_brings_back_what_sharexs_own_cleanup_removes() {
     run(&other::plan_uninstall(&sharex().unwrap()).unwrap()).await;
     println!("REPAIR CHECK PASSED");
 }
+
+/// WinRAR's beta from its own site (rarlab.com, no checksum, signed): offered with its change
+/// list, installed as an update checked by its signature, read as a pre-release of 7.30 (its
+/// Windows entry says "7.30.1"), then rolled back to the catalog's version.
+#[tokio::test]
+#[ignore]
+async fn winrars_site_beta_installs_reads_as_a_beta_and_rolls_back() {
+    if !in_windows_sandbox() {
+        println!("not in Windows Sandbox: nothing installed");
+        return;
+    }
+    const W: &str = "other:RARLab.WinRAR";
+    let find = || other::scan(&winutil::uninstall_entries(), &[], None).into_iter().find(|i| i.id == W);
+    winget::refresh_index(Duration::from_secs(3600)).await.expect("catalog index");
+    run(&other::plan_install(W, None, JobKind::Install, None, None).await.unwrap()).await;
+    let here = find().expect("WinRAR installed");
+    println!("installed {}", here.version);
+
+    let base = other::read_package("RARLab.WinRAR").await.and_then(|p| p.latest).unwrap();
+    let pres = other::pre_releases(&base, &other::Want::for_installed(&here)).await;
+    let (offer, copy) = other::pre_offer(&pres, &here.version).expect("a WinRAR beta on rarlab.com");
+    let notes = updater_lib::notes::text_lines(&pres[0].0.body);
+    println!("offered {} from {}: {} note lines, first {:?}", offer.version, pres[0].1.url, notes.len(), notes.first());
+    assert!(!copy && notes.len() >= 3);
+    let plan = other::plan_install(W, Some(&offer.version), JobKind::Update, Some(&here), None).await.unwrap();
+    assert_eq!((plan.downloads[0].sha256.as_deref(), plan.downloads[0].signer.as_deref()), (None, Some("win.rar GmbH")));
+    run(&plan).await;
+    let beta = find().expect("WinRAR found after the beta");
+    println!("now {} ({})", beta.version, beta.name);
+    assert_eq!(beta.version, offer.version, "the beta reads as itself");
+    // It follows betas now; the catalog's release is no update for it, the final 7.30 will be.
+    assert!(other::pre_offer(&pres, &beta.version).is_some_and(|(_, c)| c));
+    assert!(!update_offered(&base.version, &beta.version, false));
+    let series: String = beta.version.split('-').next().unwrap().to_string();
+    assert!(update_offered(&format!("{series}.0"), &beta.version, false));
+
+    run(&other::plan_install(W, Some(&here.version), JobKind::Rollback, Some(&beta), None).await.unwrap()).await;
+    let back = find().unwrap();
+    println!("rolled back to {}", back.version);
+    assert_eq!(back.version, here.version);
+    // Not uninstalled here: WinRAR's uninstaller opens its own window, which needs a desktop.
+    println!("WINRAR CHECK PASSED");
+}
