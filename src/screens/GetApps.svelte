@@ -14,10 +14,10 @@
   import { ui } from "../lib/ui.svelte";
   import { bytes, countOf, driveOf } from "../lib/format";
   import { enter, reduced } from "../lib/motion";
-  import type { CatalogEntry } from "../lib/types";
+  import type { CatalogEntry, OtherIcon } from "../lib/types";
   import { tryLoad } from "../lib/load";
   import { allSourcesOff } from "../lib/view";
-  import { BROWSE_PAGE, LETTERS, datedNote, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, type BrowseKey, type OtherSort } from "../lib/browse";
+  import { BROWSE_PAGE, LETTERS, datedNote, iconsWanted, lookRange, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, type BrowseKey, type OtherSort } from "../lib/browse";
 
   const catalog = $derived(ui.catalog);
   /** the catalog could not be loaded and none is kept from an earlier visit */
@@ -44,12 +44,7 @@
     }).then((u) => (gone ? u() : (off = u)));
     // icons found in the background, a few at a time: only those cards change, nothing moves
     let offIcons: (() => void) | undefined;
-    on("other_icons", (p) => {
-      const b = ui.otherBrowse && patchIcons(ui.otherBrowse.entries, p);
-      if (b && ui.otherBrowse) ui.otherBrowse = { ...ui.otherBrowse, entries: b };
-      const c = ui.catalog && patchIcons(ui.catalog, p);
-      if (c) ui.catalog = c;
-    }).then((u) => (gone ? u() : (offIcons = u)));
+    on("other_icons", applyIcons).then((u) => (gone ? u() : (offIcons = u)));
     // descriptions and install verdicts of winget packages, read in the background
     let offDetails: (() => void) | undefined;
     on("other_details", (p) => {
@@ -65,10 +60,19 @@
       offIcons?.();
       clearTimeout(refreshTimer);
       clearTimeout(fillTimer);
+      clearTimeout(viewTimer);
       clearTimeout(queryTimer);
       if (ui.searchEl === searchInput) ui.searchEl = null;
     };
   });
+
+  /** icons found (or searched for without success) reach only their own cards; nothing moves */
+  function applyIcons(p: OtherIcon[]) {
+    const b = ui.otherBrowse && patchIcons(ui.otherBrowse.entries, p);
+    if (b && ui.otherBrowse) ui.otherBrowse = { ...ui.otherBrowse, entries: b };
+    const c = ui.catalog && patchIcons(ui.catalog, p);
+    if (c) ui.catalog = c;
+  }
 
   const q = $derived(ui.getQuery.trim().toLowerCase());
   const s = $derived(store.settings);
@@ -123,7 +127,9 @@
         ui.otherBrowse = { ...key, entries: placePage([], r.total, 0, r.entries), total: r.total, categories: r.categories, dated: r.dated };
         // a new search or filter shows its list from the start, not from where the old one was
         if (fresh && letterRow && letterRow.getBoundingClientRect().top < 0) letterRow.scrollIntoView({ block: "start" });
+        viewSent = "";
         fillSoon();
+        viewSoon();
       })
       .catch((e) => {
         if (n === browseSeq) browseError = String(e?.message ?? e);
@@ -132,7 +138,43 @@
         if (n === browseSeq) browseBusy = false;
       });
   }
-  /** Load the pages the places in view need, then the ones kept around them; a few at a time. */
+  /** Which way the list was moved last: the cards it is moving towards get their icons first. */
+  let dir = 1;
+  /** Cards per row of the grid, as the grid measured them */
+  const COLUMNS = $derived(ui.compact ? 3 : 4);
+  /** The icons the window wants: the cards on screen first, then the ones around them. Sent at
+   * most a few times a second while the list is flung, and again when pages arrive. */
+  const VIEW_EVERY_MS = 50;
+  let viewTimer: ReturnType<typeof setTimeout> | undefined;
+  let viewAt = 0;
+  let viewSent = "";
+  function viewSoon() {
+    if (viewTimer) return;
+    viewTimer = setTimeout(sendView, Math.max(0, viewAt + VIEW_EVERY_MS - Date.now()));
+  }
+  function sendView() {
+    viewTimer = undefined;
+    viewAt = Date.now();
+    const b = ui.otherBrowse;
+    if (!b || !browseCurrent || !otherOn) return;
+    const want = iconsWanted(b.entries, range, dir, COLUMNS);
+    const k = want.visible.join(",") + "|" + want.near.join(",");
+    if (k === viewSent) return;
+    viewSent = k;
+    const n = browseSeq;
+    call("icons_in_view", want)
+      .then((found) => {
+        // icons known at once (kept from an earlier run) show now, not with the next batch
+        if (n === browseSeq && found.length) applyIcons(found);
+      })
+      .catch(() => {
+        // asked for again with the next move
+        viewSent = "";
+      });
+  }
+
+  /** Load the pages the places in view need, then the ones kept around them and the ones the
+   * list is moving towards; a few at a time. */
   function fill() {
     const b = ui.otherBrowse;
     if (!b || !browseCurrent || browseBusy) return;
@@ -140,6 +182,8 @@
     const key: BrowseKey = { query: b.query, category: b.category, letter: b.letter, sort: b.sort };
     const want = pagesToLoad(b.entries, range.from, range.to, BROWSE_PAGE, pending);
     for (const p of pagesToLoad(b.entries, range.keepFrom, range.keepTo, BROWSE_PAGE, pending)) if (!want.includes(p)) want.push(p);
+    const look = lookRange(range, dir, b.entries.length);
+    for (const p of pagesToLoad(b.entries, look.from, look.to, BROWSE_PAGE, pending)) if (!want.includes(p)) want.push(p);
     for (const offset of want.slice(0, Math.max(0, 3 - pending.size))) {
       pending.add(offset);
       req(key, offset, BROWSE_PAGE)
@@ -148,6 +192,7 @@
           if (n !== browseSeq || !cur || !sameKey(cur, key)) return;
           ui.otherBrowse = { ...cur, entries: placePage(cur.entries, r.total, offset, r.entries), total: r.total };
           browseError = null;
+          viewSoon();
         })
         .catch((e) => {
           if (n === browseSeq) browseError = String(e?.message ?? e);
@@ -166,8 +211,10 @@
     fillTimer = setTimeout(fill, ms);
   }
   function onRange(r: typeof range) {
+    if (r.from !== range.from && range.to > range.from) dir = r.from > range.from ? 1 : -1;
     range = r;
     fillSoon();
+    viewSoon();
   }
   // a new search, category, letter or order starts the list again; the old one stays on screen
   // until the new first page is there

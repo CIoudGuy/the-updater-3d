@@ -322,6 +322,12 @@ pub fn wait_process(handle: isize) -> u32 {
 
 /// Save the exe's 256 px (or largest available) icon as PNG. Returns false when it has none.
 pub fn extract_icon_png(exe: &Path, out: &Path) -> bool {
+    extract_icon_png_at(exe, 0, out)
+}
+
+/// The same for the icon `index` of a program, library or icon file (a negative index is a
+/// resource id), as an entry's "DisplayIcon" names it.
+pub fn extract_icon_png_at(exe: &Path, index: i32, out: &Path) -> bool {
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::UI::Shell::SHDefExtractIconW;
     use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
@@ -329,7 +335,7 @@ pub fn extract_icon_png(exe: &Path, out: &Path) -> bool {
         let wide = HSTRING::from(exe.as_os_str());
         let mut large = HICON::default();
         // nIconSize: low word = large icon size.
-        if SHDefExtractIconW(PCWSTR(wide.as_ptr()), 0, 0, Some(&mut large), None, 256).is_err() || large.is_invalid() {
+        if SHDefExtractIconW(PCWSTR(wide.as_ptr()), index, 0, Some(&mut large), None, 256).is_err() || large.is_invalid() {
             return false;
         }
         let mut ii = ICONINFO::default();

@@ -1077,6 +1077,7 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed]) -> Vec<CatalogEntry
             fg: d.fg.into(),
             bg: d.bg.into(),
             icon_url: None,
+            icon_miss: false,
             version: r.version.clone(),
             size: r.size,
             tagline: Some(d.tagline.into()),

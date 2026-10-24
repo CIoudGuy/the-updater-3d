@@ -1,10 +1,19 @@
+<script lang="ts" module>
+  // Pictures that were in the page once come back without a fade or a shimmer when a card scrolls
+  // away and returns, and a dark logo is looked at once.
+  const seen = new Set<string>();
+  const darkOf = new Map<string, boolean>();
+</script>
+
 <script lang="ts">
   import { MARK, MARK_LINES, MARK_LINES_BIG } from "../lib/paths";
   import { mostlyDark } from "../lib/iconlook";
+  import { isPainted, markShow, type Load } from "../lib/markstate";
 
-  // Apps from the catalog and other programs show a soft shimmer until their real icon has loaded
-  // (it is looked up in the background). Apps with a painted brand mark (Adobe, Blender, drivers)
-  // show that mark, with the real icon fading in over it when there is one.
+  // An app shows its icon when it has one. Until then, and when it has none or the picture cannot
+  // be loaded, it shows a default "no image" tile drawn here (never an <img> that could show the
+  // browser's broken-image glyph); a soft shimmer runs over the tile while an icon is on its way.
+  // Apps with a painted brand mark (Adobe, Blender, ...) keep that mark instead of the tile.
   let {
     app,
     size = 32,
@@ -12,7 +21,7 @@
     dim = false,
     eager = true,
   }: {
-    app: { id?: string; code: string; fg: string; bg: string; iconUrl: string | null };
+    app: { id?: string; code: string; fg: string; bg: string; iconUrl: string | null; iconMiss?: boolean };
     size?: number;
     fs?: number;
     dim?: boolean;
@@ -23,11 +32,13 @@
   let loadedUrl = $state<string | null>(null);
   let failedUrl = $state<string | null>(null);
   const url = $derived(app.iconUrl);
-  const showImg = $derived(!!url && failedUrl !== url);
-  const loaded = $derived(!!url && loadedUrl === url);
+  const load = $derived<Load>(!url ? "none" : failedUrl === url ? "failed" : loadedUrl === url ? "loaded" : "loading");
+  const show = $derived(markShow(app, load));
+  const painted = $derived(isPainted(app.id));
+  const loaded = $derived(load === "loaded");
   const font = $derived(fs || Math.max(9, Math.round(size * 0.4)));
-  /** No painted mark for these: their icon comes from the app's own files or site. */
-  const shimmer = $derived(!loaded && /^(other:|prog:|msstore:)/.test(app.id ?? ""));
+  /** a picture met before: no fade, so a card that scrolls back does not flicker */
+  const known = $derived(!!url && seen.has(url));
 
   /** Cached images can finish before Svelte attaches onload, so check `complete` when the node mounts. */
   function watch(img: HTMLImageElement) {
@@ -41,7 +52,15 @@
   const plate = $derived(loaded && (/\.dark\.png($|[?#])/i.test(url ?? "") || darkUrl === url));
   function done(img: HTMLImageElement) {
     loadedUrl = url;
-    if (url && !/\.(dark|icon)\.png($|[?#])/i.test(url) && looksDark(img)) darkUrl = url;
+    if (!url) return;
+    seen.add(url);
+    if (/\.(dark|icon)\.png($|[?#])/i.test(url)) return;
+    let dark = darkOf.get(url);
+    if (dark === undefined) {
+      dark = looksDark(img);
+      darkOf.set(url, dark);
+    }
+    if (dark) darkUrl = url;
   }
   function looksDark(img: HTMLImageElement): boolean {
     try {
@@ -60,19 +79,29 @@
 </script>
 
 <span class="mark" class:dim class:plate style="width:{size}px;height:{size}px" aria-hidden="true">
-  {#if shimmer}
-    <span class="shim"></span>
-  {:else}
+  {#if painted}
     <svg class:gone={loaded} viewBox="0 0 48 48" width={size} height={size}>
       <path d={MARK} fill={app.bg} />
       <path d={size >= 64 ? MARK_LINES_BIG : MARK_LINES} fill="none" stroke={app.fg} stroke-opacity="0.3" stroke-width="1.6" stroke-linecap="round" />
     </svg>
     <span class="code" class:gone={loaded} style="font-size:{font}px;color:{app.fg}">{app.code}</span>
+  {:else}
+    <!-- the default "no image" tile: a soft rounded tile with a plain picture glyph -->
+    <svg class="ph" class:gone={loaded} viewBox="0 0 48 48" width={size} height={size}>
+      <rect width="48" height="48" rx="11" fill="var(--ph-tile)" />
+      <g fill="none" stroke="var(--ph-glyph)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="12.5" y="13.5" width="23" height="21" rx="4.5" />
+        <circle cx="19.5" cy="21" r="2.2" />
+        <path d="M13.5 31.5l7-6.5 5 4.5 3.5-3 6 5" />
+      </g>
+    </svg>
+    {#if show.shimmer}<span class="shim"></span>{/if}
   {/if}
-  {#if showImg}
+  {#if show.image}
     {#key url}
       <img
         class:on={loaded}
+        class:known
         src={url}
         alt=""
         width={size}
@@ -89,6 +118,8 @@
 
 <style>
   .mark {
+    --ph-tile: var(--raised, #262626);
+    --ph-glyph: var(--text-4, #6e6e6e);
     position: relative;
     flex: none;
     display: inline-flex;
@@ -102,7 +133,7 @@
     position: absolute;
     inset: 0;
   }
-  /* once the real icon is fully in, drop the mark underneath so transparent corners stay clean */
+  /* once the real icon is fully in, drop the mark or tile underneath so transparent corners stay clean */
   svg.gone {
     opacity: 0;
     transition: opacity 0.01s linear 0.13s;
@@ -118,19 +149,21 @@
   img.on {
     opacity: 1;
   }
+  img.known {
+    transition: none;
+  }
   /* a light plate behind dark logos; normal icons are left as they are */
   .plate img {
     box-sizing: border-box;
     padding: 9%;
     background: #ececf0;
   }
-  /* one moving highlight per icon, moved by the compositor only (no layout or paint work) */
+  /* one moving highlight per icon on its way, moved by the compositor only (no layout or paint work) */
   .shim {
     position: absolute;
     inset: 0;
     border-radius: 22%;
     overflow: hidden;
-    background: #232323;
   }
   .shim::after {
     content: "";

@@ -38,15 +38,9 @@ fn app_icon(i: &Installed, icons: &HashMap<String, String>, catalog: &HashMap<St
     icons.get(&i.id).or_else(|| (i.source == Source::Other).then(|| catalog.get(&format!("other:{}", other::pkg_of(i)))).flatten()).cloned()
 }
 
-/// The icon of a package kept in the icon cache from an earlier run: a small one first, else one
-/// saved at full size by an earlier version.
+/// The icon of a package kept in the icon cache from an earlier run.
 fn other_icon_on_disk(id: &str) -> Option<std::path::PathBuf> {
-    let stem = crate::sources::icons::file_stem(id);
-    ["dark.png", "icon.png", "svg"]
-        .iter()
-        .chain(crate::sources::icons::OLD_EXTS)
-        .map(|e| paths::icons().join(format!("{stem}.{e}")))
-        .find(|p| p.metadata().is_ok_and(|m| m.len() > 0))
+    crate::sources::icons::on_disk(&crate::sources::icons::file_stem(id))
 }
 
 /// The apps the catalog sources look at: Other programs are what no source matched, so they
@@ -55,10 +49,8 @@ fn catalog_apps(v: &[Installed]) -> Vec<Installed> {
     v.iter().filter(|i| i.source != Source::Programs).cloned().collect()
 }
 
-/// Made small already (or a vector, which needs no making small).
 fn icon_is_small(p: &std::path::Path) -> bool {
-    let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-    n.ends_with(".icon.png") || n.ends_with(".dark.png") || n.ends_with(".svg")
+    crate::sources::icons::is_small(p)
 }
 
 /// Rules a remembered icon miss was made under. Misses saved by earlier versions, which also
@@ -77,9 +69,10 @@ fn icon_miss_day(v: &str) -> Option<chrono::NaiveDate> {
 /// A found Other apps icon, for the window.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct IconFound {
+pub struct IconFound {
     id: String,
-    icon_url: String,
+    /// None: the search is over and found no icon (the card shows its painted mark)
+    icon_url: Option<String>,
 }
 
 /// Results of the icon search not handed on yet.
@@ -95,36 +88,63 @@ impl IconOut {
     }
 }
 
+/// What is known of some packages' icons.
+#[derive(Default)]
+struct IconsNow {
+    /// Kept in memory already: the window may not have them.
+    known: Vec<IconFound>,
+    /// Small files from an earlier run, read just now.
+    disk: Vec<IconFound>,
+    /// Files of an earlier version at full size: made small before they are shown.
+    convert: Vec<String>,
+    /// No icon yet and worth searching for.
+    search: Vec<String>,
+    /// Searched not long ago and found none.
+    none: Vec<String>,
+}
+
 static ICON_QUEUE: once_cell::sync::Lazy<Mutex<crate::sources::icons::Queue>> = once_cell::sync::Lazy::new(Default::default);
 static ICON_BUSY: once_cell::sync::Lazy<Mutex<HashSet<String>>> = once_cell::sync::Lazy::new(Default::default);
 static ICON_OUT: once_cell::sync::Lazy<Mutex<IconOut>> = once_cell::sync::Lazy::new(Default::default);
+static ICON_CONVERTING: once_cell::sync::Lazy<Mutex<HashSet<String>>> = once_cell::sync::Lazy::new(Default::default);
 static ICON_WORKERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static ICON_FLUSHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How often found icons are sent to the window while the search runs.
+const ICON_FLUSH_MS: u64 = 80;
+
+/// Makers whose icon was asked for in this run (a maker is read once, not once per driver).
+static MAKERS_ASKED: once_cell::sync::Lazy<Mutex<HashSet<&'static str>>> = once_cell::sync::Lazy::new(Default::default);
+
+/// An icon saved by an earlier version at full size, made small and saved again (the old file is
+/// removed). None when there is no such file. A picture Windows cannot read is kept as it is.
+async fn convert_old_icon(id: &str) -> Option<PathBuf> {
+    use crate::sources::icons;
+    let old = other_icon_on_disk(id).filter(|p| !icon_is_small(p))?;
+    let key = id.to_string();
+    tauri::async_runtime::spawn_blocking(move || -> Option<PathBuf> {
+        let bytes = std::fs::read(&old).ok()?;
+        let ext = icons::sniff(&bytes)?;
+        let got = icons::normalize(icons::Got { bytes, ext, via: "cache", dark: false });
+        if got.ext != "png" {
+            return Some(old);
+        }
+        let p = paths::icons().join(icons::saved_name(&key, &got));
+        std::fs::write(&p, &got.bytes).ok()?;
+        let _ = std::fs::remove_file(&old);
+        icons::wrote();
+        Some(p)
+    })
+    .await
+    .ok()
+    .flatten()
+}
 
 /// An app's icon as a small file in the icon cache: an icon saved at full size by an earlier
 /// version made small, or one searched for on the web.
 async fn find_other_icon(feed: Option<Arc<other::Feed>>, id: String) -> std::result::Result<PathBuf, crate::sources::icons::Miss> {
     use crate::sources::icons::{self, Miss};
-    if let Some(old) = other_icon_on_disk(&id).filter(|p| !icon_is_small(p)) {
-        let key = id.clone();
-        let made = tauri::async_runtime::spawn_blocking(move || -> Option<PathBuf> {
-            let bytes = std::fs::read(&old).ok()?;
-            let ext = icons::sniff(&bytes)?;
-            let got = icons::normalize(icons::Got { bytes, ext, via: "cache", dark: false });
-            if got.ext != "png" {
-                return Some(old);
-            }
-            let p = paths::icons().join(icons::saved_name(&key, &got));
-            std::fs::write(&p, &got.bytes).ok()?;
-            let _ = std::fs::remove_file(&old);
-            Some(p)
-        })
-        .await
-        .ok()
-        .flatten();
-        if let Some(p) = made {
-            return Ok(p);
-        }
+    if let Some(p) = convert_old_icon(&id).await {
+        return Ok(p);
     }
     let src = other::icon_source_of(feed.as_deref(), &id).await.ok_or(Miss { passing: true })?;
     let got = icons::find(&id, src.icon.as_deref(), &src.pages).await?;
@@ -132,6 +152,7 @@ async fn find_other_icon(feed: Option<Arc<other::Feed>>, id: String) -> std::res
         let got = icons::normalize(got);
         let p = paths::icons().join(icons::saved_name(&id, &got));
         std::fs::write(&p, &got.bytes).ok()?;
+        icons::wrote();
         Some(p)
     })
     .await
@@ -578,6 +599,11 @@ struct St {
     dl_sizes: HashMap<String, u64>,
     /// Catalog id -> local icon URL (Adobe CDN and getartcraft.com icons, cached on disk)
     catalog_icons: HashMap<String, String>,
+    /// Ids (installed apps, "other:<package>" of the catalog) whose icon search is over and found
+    /// none: their cards show the painted mark instead of waiting for an icon.
+    icon_none: HashSet<String>,
+    /// Maker key -> local icon URL of the maker of drivers (see `sources::makers`)
+    maker_icons: HashMap<String, String>,
     status: Option<Status>,
     /// Sources whose latest-version lookup failed on the last check.
     unknown_sources: HashSet<&'static str>,
@@ -991,6 +1017,7 @@ impl Core {
                 None
             };
             let can_rollback = !i.read_only && (i.source != Source::Programs || gh_feed.is_some_and(|f| ghapps::can_roll_back(i, f))) && !matches!(i.data, SourceData::Blender { kind: sources::BlenderKind::Beta, .. });
+            let icon = app_icon(i, &st.icons, &st.catalog_icons);
             out.push(AppEntry {
                 id: i.id.clone(),
                 source: i.source,
@@ -998,7 +1025,8 @@ impl Core {
                 code: i.code.clone(),
                 fg: i.fg.clone(),
                 bg: i.bg.clone(),
-                icon_url: app_icon(i, &st.icons, &st.catalog_icons),
+                icon_url: icon.clone(),
+                icon_miss: icon.is_none() && st.icon_none.contains(&i.id) && (i.source != Source::Other || st.icon_none.contains(&format!("other:{}", other::pkg_of(i)))),
                 version: i.version.clone(),
                 latest: latest.map(|l| l.version.clone()),
                 status,
@@ -1038,7 +1066,9 @@ impl Core {
                 None if st.failed.contains_key(&e.id) => AppStatus::Failed,
                 None => e.status,
             };
-            out.push(driver_app(e, status, f.how.is_some(), recorded.get(&e.id).cloned(), job.map(|j| j.id.clone())));
+            let mut d = driver_app(e, status, f.how.is_some(), recorded.get(&e.id).cloned(), job.map(|j| j.id.clone()));
+            d.icon_url = sources::makers::site_of(&e.maker).and_then(|m| st.maker_icons.get(m.key)).cloned();
+            out.push(d);
         }
         skip_ignored(&mut out, &ignored);
         out
@@ -1190,6 +1220,7 @@ impl Core {
         log::info!("timing: drivers from the makers in {} ms", t0.elapsed().as_millis());
         self.drivers.lock().found = first;
         self.emit_apps();
+        self.spawn_maker_icons();
         let wu = match wu_task.await {
             Ok(Ok(f)) => Some(f),
             Ok(Err(e)) => {
@@ -1215,6 +1246,7 @@ impl Core {
         };
         let _ = tauri::async_runtime::spawn_blocking(move || drivers::save(&drivers::saved_file(), &saved)).await;
         self.emit_apps();
+        self.spawn_maker_icons();
     }
 
     /// The versions a driver's page shows: the installed one and the newest, with what is new.
@@ -1381,6 +1413,8 @@ impl Core {
     async fn refresh_icons_and_sizes(self: Arc<Self>) {
         let installed = self.st.lock().installed.clone();
         let mut changed = false;
+        // apps whose own files gave no icon: looked up on the web afterwards
+        let mut later: Vec<Installed> = Vec::new();
         for i in &installed {
             if self.st.lock().icons.contains_key(&i.id) {
                 continue;
@@ -1413,12 +1447,54 @@ impl Core {
                     }
                 }
             }
-            if let Some(u) = url {
-                self.st.lock().icons.insert(i.id.clone(), u);
-                changed = true;
+            if url.is_none() {
+                if let SourceData::Other { entry, .. } = &i.data {
+                    url = sources::iconfetch::program_here((**entry).clone()).await.map(|(p, _)| paths::asset_url(&p));
+                }
+            }
+            match url {
+                Some(u) => {
+                    let mut st = self.st.lock();
+                    st.icon_none.remove(&i.id);
+                    st.icons.insert(i.id.clone(), u);
+                    changed = true;
+                }
+                None => later.push(i.clone()),
             }
         }
         if changed {
+            self.emit_apps();
+        }
+        // What the PC has nothing for: Steam's store, the publisher's site. A few at a time; each
+        // answer is kept (or remembered as none), so a site or the store is asked once.
+        if !later.is_empty() {
+            let gate = Arc::new(tokio::sync::Semaphore::new(4));
+            let mut set = tokio::task::JoinSet::new();
+            for i in later {
+                let (me, gate) = (self.clone(), gate.clone());
+                set.spawn(async move {
+                    let _turn = gate.acquire().await;
+                    let found = match &i.data {
+                        SourceData::Other { entry, .. } => me.program_icon_web(&i.id, (**entry).clone()).await,
+                        _ => None,
+                    };
+                    (i.id, found)
+                });
+            }
+            while let Some(r) = set.join_next().await {
+                let Ok((id, found)) = r else { continue };
+                let mut st = self.st.lock();
+                match found {
+                    Some(p) => {
+                        st.icon_none.remove(&id);
+                        st.icons.insert(id, paths::asset_url(&p));
+                    }
+                    // the search is over: the card shows its painted mark, not a shimmer
+                    None => {
+                        st.icon_none.insert(id);
+                    }
+                }
+            }
             self.emit_apps();
         }
         // Sizes on disk: remembered per version, measured once (can take a moment for big apps).
@@ -1915,6 +1991,7 @@ impl Core {
         let me = self.clone();
         tauri::async_runtime::spawn(async move { me.cache_catalog_icons().await });
         self.spawn_other_followups();
+        self.spawn_maker_icons();
     }
 
     /// After the Other apps feed was read: look for the real icons, and finish reading the starter
@@ -1943,12 +2020,117 @@ impl Core {
         }
     }
 
+    /// Sort package ids by what is known of their icons: in memory, a small file saved by an
+    /// earlier run (read here, off the lock), a file of an earlier version to make small first,
+    /// none found a short while ago, or not looked for yet.
+    async fn sort_icons(self: &Arc<Self>, ids: Vec<String>) -> IconsNow {
+        let mut now = IconsNow::default();
+        let mut rest: Vec<String> = Vec::new();
+        {
+            let st = self.st.lock();
+            for id in ids {
+                let key = format!("other:{id}");
+                match st.catalog_icons.get(&key).or_else(|| st.icons.get(&key)) {
+                    Some(u) => now.known.push(IconFound { id: key, icon_url: Some(u.clone()) }),
+                    None => rest.push(id),
+                }
+            }
+        }
+        if rest.is_empty() {
+            return now;
+        }
+        let probed = tauri::async_runtime::spawn_blocking(move || rest.into_iter().map(|id| (other_icon_on_disk(&id), id)).collect::<Vec<_>>()).await.unwrap_or_default();
+        let today = chrono::Local::now().date_naive();
+        let recent_miss: HashSet<String> = {
+            let p = self.persisted.lock();
+            probed
+                .iter()
+                .filter(|(file, id)| file.is_none() && p.icon_misses.get(id).and_then(|d| icon_miss_day(d)).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS))
+                .map(|(_, id)| id.clone())
+                .collect()
+        };
+        let mut st = self.st.lock();
+        for (file, id) in probed {
+            let key = format!("other:{id}");
+            match file {
+                Some(p) if icon_is_small(&p) => {
+                    let url = paths::asset_url(&p);
+                    st.catalog_icons.insert(key.clone(), url.clone());
+                    now.disk.push(IconFound { id: key, icon_url: Some(url) });
+                }
+                // shown once it is small, so the window never gets the address of a file that is replaced
+                Some(_) => now.convert.push(id),
+                None if recent_miss.contains(&id) => {
+                    st.icon_none.insert(key);
+                    now.none.push(id);
+                }
+                None if sources::icons::may_search(&id) => now.search.push(id),
+                // searched a moment ago without an answer: its tile shows until the search is tried again
+                None => {
+                    st.icon_none.insert(key);
+                    now.none.push(id);
+                }
+            }
+        }
+        now
+    }
+
+    /// Make icons saved by an earlier version at full size small, a few at a time and apart from
+    /// the web search; each one reaches the window when it is done.
+    fn convert_icons(self: &Arc<Self>, ids: Vec<String>) {
+        let ids: Vec<String> = {
+            let mut busy = ICON_CONVERTING.lock();
+            ids.into_iter().filter(|i| busy.insert(i.to_ascii_lowercase())).collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move {
+            futures_util::StreamExt::for_each_concurrent(futures_util::stream::iter(ids), 4, |id| {
+                let me = me.clone();
+                async move {
+                    let made = convert_old_icon(&id).await;
+                    ICON_CONVERTING.lock().remove(&id.to_ascii_lowercase());
+                    if let Some(p) = made {
+                        let (key, url) = (format!("other:{id}"), paths::asset_url(&p));
+                        me.st.lock().catalog_icons.insert(key.clone(), url.clone());
+                        ICON_OUT.lock().found.push(IconFound { id: key, icon_url: Some(url) });
+                        me.start_icon_flusher();
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
+    /// The window shows these Other apps cards and keeps those around them: the icons of the cards
+    /// on screen are searched for first, then the ones around them, and searches that waited for
+    /// places that scrolled away are dropped. Returns the icons known right now (and the apps
+    /// that were searched for without success), so they show at once.
+    pub async fn icons_in_view(self: &Arc<Self>, visible: Vec<String>, near: Vec<String>) -> Vec<IconFound> {
+        let pkgs = |v: Vec<String>| -> Vec<String> { v.into_iter().take(240).filter_map(|i| i.strip_prefix("other:").map(String::from)).collect() };
+        let (visible, near) = (pkgs(visible), pkgs(near));
+        let all: Vec<String> = visible.iter().chain(&near).cloned().collect();
+        let now = self.sort_icons(all).await;
+        let searching: HashSet<String> = now.search.iter().map(|i| i.to_ascii_lowercase()).collect();
+        let of = |v: &[String]| -> Vec<String> { v.iter().filter(|i| searching.contains(&i.to_ascii_lowercase())).cloned().collect() };
+        ICON_QUEUE.lock().view(&of(&visible), &of(&near));
+        self.convert_icons(now.convert);
+        self.start_icon_workers();
+        let mut out = now.known;
+        out.extend(now.disk);
+        out.extend(now.none.into_iter().map(|id| IconFound { id: format!("other:{id}"), icon_url: None }));
+        out
+    }
+
     /// Real icons for Other apps entries: the ones in the starter list and the installed ones the
     /// computer has no icon for (`wanted` None, searched after everything else), or the given
-    /// package ids (a page of Get apps that is on screen: searched first). Found icons are made
-    /// small and kept in the icon cache; apps that have none are remembered for a week, apps whose
-    /// search failed for a passing reason are searched again a few minutes later. Found icons
-    /// reach the window in `other_icons` batches.
+    /// package ids (the page of one app: searched first). Found icons are made small and kept in
+    /// the icon cache; apps that have none are remembered for a week, apps whose search failed for
+    /// a passing reason are searched again a few minutes later. Found icons reach the window in
+    /// `other_icons` batches. The cards of the Get apps list are searched for as the window says
+    /// what is on screen (`icons_in_view`).
     async fn cache_other_icons(self: Arc<Self>, wanted: Option<Vec<String>>) {
         let front = wanted.is_some();
         let ids: Vec<String> = match wanted {
@@ -1958,40 +2140,26 @@ impl Core {
                 None => return,
             },
         };
-        let today = chrono::Local::now().date_naive();
-        let misses = self.persisted.lock().icon_misses.clone();
-        let recent_miss = |id: &str| misses.get(id).and_then(|d| icon_miss_day(d)).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS);
-        let mut todo: Vec<String> = Vec::new();
-        {
-            let mut st = self.st.lock();
-            for id in ids {
-                let key = format!("other:{id}");
-                if st.catalog_icons.contains_key(&key) || st.icons.contains_key(&key) {
-                    continue;
-                }
-                if let Some(p) = other_icon_on_disk(&id) {
-                    let url = paths::asset_url(&p);
-                    st.catalog_icons.insert(key.clone(), url.clone());
-                    ICON_OUT.lock().found.push(IconFound { id: key, icon_url: url });
-                    // saved by an earlier version at full size: made small in the background
-                    if !icon_is_small(&p) {
-                        todo.push(id);
-                    }
-                } else if !recent_miss(&id) && sources::icons::may_search(&id) {
-                    todo.push(id);
-                }
-            }
+        let now = self.sort_icons(ids).await;
+        if !now.disk.is_empty() {
+            ICON_OUT.lock().found.extend(now.disk);
         }
+        self.convert_icons(now.convert);
         {
             let mut q = ICON_QUEUE.lock();
             if front {
-                q.front(&todo);
+                q.front(sources::icons::Tier::Pinned, &now.search);
             } else {
-                q.back(&todo);
+                q.back(&now.search);
             }
         }
+        self.start_icon_workers();
+    }
+
+    /// Start the workers that take the next app from the queue until it is empty, and the sender
+    /// of what they find.
+    fn start_icon_workers(self: &Arc<Self>) {
         self.clone().start_icon_flusher();
-        // workers take the next app from the queue until it is empty
         let want = ICON_QUEUE.lock().len().min(sources::icons::parallel());
         loop {
             let running = ICON_WORKERS.load(Ordering::SeqCst);
@@ -2011,6 +2179,10 @@ impl Core {
                 let next = ICON_QUEUE.lock().pop();
                 let Some(id) = next else { break };
                 let key = format!("other:{id}");
+                // found by another search while this one waited
+                if self.st.lock().catalog_icons.contains_key(&key) {
+                    continue;
+                }
                 if !ICON_BUSY.lock().insert(key.clone()) {
                     continue;
                 }
@@ -2020,13 +2192,27 @@ impl Core {
                 match r {
                     Ok(p) => {
                         let url = paths::asset_url(&p);
-                        let old = self.st.lock().catalog_icons.insert(key.clone(), url.clone());
+                        let old = {
+                            let mut st = self.st.lock();
+                            st.icon_none.remove(&key);
+                            st.catalog_icons.insert(key.clone(), url.clone())
+                        };
                         if old.as_deref() != Some(url.as_str()) {
-                            ICON_OUT.lock().found.push(IconFound { id: key, icon_url: url });
+                            ICON_OUT.lock().found.push(IconFound { id: key, icon_url: Some(url) });
                         }
                     }
-                    Err(m) if m.passing => sources::icons::retry_later(&id),
-                    Err(_) => ICON_OUT.lock().missed.push(id),
+                    // no answer in time: the card shows its tile now, the search is tried again later
+                    Err(m) if m.passing => {
+                        sources::icons::retry_later(&id);
+                        self.st.lock().icon_none.insert(key.clone());
+                        ICON_OUT.lock().found.push(IconFound { id: key, icon_url: None });
+                    }
+                    Err(_) => {
+                        self.st.lock().icon_none.insert(key.clone());
+                        let mut o = ICON_OUT.lock();
+                        o.found.push(IconFound { id: key, icon_url: None });
+                        o.missed.push(id);
+                    }
                 }
             }
             ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
@@ -2038,8 +2224,9 @@ impl Core {
         }
     }
 
-    /// Sends found icons to the window every 150 ms while the search runs, so a screenful of icons
-    /// arrives in a few small updates instead of one per icon, and saves the apps that have none.
+    /// Sends found icons to the window every few tens of milliseconds while the search runs, so a
+    /// screenful of icons arrives in a few small updates instead of one per icon, and saves the
+    /// apps that have none.
     fn start_icon_flusher(self: Arc<Self>) {
         if ICON_FLUSHING.swap(true, Ordering::SeqCst) {
             return;
@@ -2048,15 +2235,16 @@ impl Core {
             let mut apps_at = Instant::now();
             let mut apps_dirty = false;
             loop {
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                tokio::time::sleep(Duration::from_millis(ICON_FLUSH_MS)).await;
                 let (found, missed) = {
                     let mut o = ICON_OUT.lock();
                     (std::mem::take(&mut o.found), std::mem::take(&mut o.missed))
                 };
-                let idle = ICON_WORKERS.load(Ordering::SeqCst) == 0 && ICON_QUEUE.lock().is_empty();
+                let idle = ICON_WORKERS.load(Ordering::SeqCst) == 0 && ICON_QUEUE.lock().is_empty() && ICON_CONVERTING.lock().is_empty();
                 if !found.is_empty() {
+                    // installed apps show only the icons that were found
+                    apps_dirty |= found.iter().any(|f| f.icon_url.is_some());
                     self.emit("other_icons", found);
-                    apps_dirty = true;
                 }
                 if !missed.is_empty() {
                     let day = format!("{}/{ICON_MISS_RULES}", chrono::Local::now().date_naive().format("%Y-%m-%d"));
@@ -2075,7 +2263,7 @@ impl Core {
                 if idle && ICON_OUT.lock().is_empty() {
                     ICON_FLUSHING.store(false, Ordering::SeqCst);
                     // a search queued between the check and here still gets its flusher
-                    let more = !ICON_OUT.lock().is_empty() || !ICON_QUEUE.lock().is_empty() || ICON_WORKERS.load(Ordering::SeqCst) > 0;
+                    let more = !ICON_OUT.lock().is_empty() || !ICON_QUEUE.lock().is_empty() || ICON_WORKERS.load(Ordering::SeqCst) > 0 || !ICON_CONVERTING.lock().is_empty();
                     if more && !ICON_FLUSHING.swap(true, Ordering::SeqCst) {
                         continue;
                     }
@@ -2083,6 +2271,98 @@ impl Core {
                 }
             }
         });
+    }
+
+    /// The icons of the makers of the listed drivers, one for each maker (not one per driver):
+    /// from the icon cache, else read once from the maker's home page, in the background. A
+    /// maker whose site gave none is asked again after a week.
+    pub fn spawn_maker_icons(self: &Arc<Self>) {
+        if !self.settings.read().sources.drivers {
+            return;
+        }
+        let makers: Vec<String> = self.drivers.lock().found.iter().map(|f| f.entry.maker.clone()).collect();
+        let sites: Vec<&'static sources::makers::Site> = {
+            let st = self.st.lock();
+            let mut asked = MAKERS_ASKED.lock();
+            let mut v = Vec::new();
+            for m in makers {
+                if let Some(site) = sources::makers::site_of(&m) {
+                    if !st.maker_icons.contains_key(site.key) && asked.insert(site.key) {
+                        v.push(site);
+                    }
+                }
+            }
+            v
+        };
+        if sites.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move { me.cache_maker_icons(sites).await });
+    }
+
+    async fn cache_maker_icons(self: Arc<Self>, sites: Vec<&'static sources::makers::Site>) {
+        let today = chrono::Local::now().date_naive();
+        let recent: HashSet<&'static str> = {
+            let p = self.persisted.lock();
+            sites.iter().filter(|s| p.icon_misses.get(&format!("maker:{}", s.key)).and_then(|d| icon_miss_day(d)).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS)).map(|s| s.key).collect()
+        };
+        // a few makers at a time; every maker has its own server
+        let gate = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut set = tokio::task::JoinSet::new();
+        for site in sites {
+            let (skip, gate) = (recent.contains(site.key), gate.clone());
+            set.spawn(async move {
+                let _turn = gate.acquire().await;
+                (site.key, sources::iconfetch::maker(site, skip).await)
+            });
+        }
+        let mut got: Vec<(&'static str, Option<std::result::Result<PathBuf, ()>>)> = Vec::new();
+        while let Some(r) = set.join_next().await {
+            got.extend(r.ok());
+        }
+        let mut changed = false;
+        let mut missed = Vec::new();
+        {
+            let mut st = self.st.lock();
+            for (key, r) in &got {
+                if let Some(Ok(p)) = r {
+                    st.maker_icons.insert(key.to_string(), paths::asset_url(p));
+                    changed = true;
+                }
+            }
+        }
+        for (key, r) in &got {
+            if let Some(Err(())) = r {
+                missed.push(format!("maker:{key}"));
+            }
+        }
+        if !missed.is_empty() {
+            let day = format!("{}/{ICON_MISS_RULES}", today.format("%Y-%m-%d"));
+            let mut p = self.persisted.lock();
+            for id in missed {
+                p.icon_misses.insert(id, day.clone());
+            }
+            store::save_state(&p);
+        }
+        if changed {
+            self.emit_apps();
+        }
+    }
+
+    /// The icon of a program or game from the web, when its own files gave none (see
+    /// `iconfetch::program_web`). A search that found nothing is remembered for a week.
+    async fn program_icon_web(self: &Arc<Self>, id: &str, e: crate::winutil::UninstallEntry) -> Option<PathBuf> {
+        let today = chrono::Local::now().date_naive();
+        let recent = |key: &str| self.persisted.lock().icon_misses.get(key).and_then(|d| icon_miss_day(d)).is_some_and(|d| (today - d).num_days() < ICON_RETRY_DAYS);
+        let miss = |key: String| {
+            let mut p = self.persisted.lock();
+            p.icon_misses.insert(key, format!("{}/{ICON_MISS_RULES}", today.format("%Y-%m-%d")));
+            store::save_state(&p);
+        };
+        let (path, from) = sources::iconfetch::program_web(id, e, &sources::iconfetch::Memory { recent: &recent, miss: &miss }).await?;
+        log::debug!("icon of {id}: {from}");
+        Some(path)
     }
 
     /// Exact download sizes for Adobe updates and the Get apps list, from product manifests.
@@ -2256,6 +2536,7 @@ impl Core {
             if let Some(u) = st.catalog_icons.get(&e.id) {
                 e.icon_url = Some(u.clone());
             }
+            e.icon_miss = e.icon_url.is_none() && st.icon_none.contains(&e.id);
         }
         if s.sources.blender {
             if let Some(f) = self.blender.read().as_ref() {
@@ -2295,17 +2576,18 @@ impl Core {
         .await
         .map_err(|e| anyhow!("{e}"))??;
         let mut page = page;
-        let missing: Vec<String> = {
-            let st = self.st.lock();
-            for e in &mut page.entries {
-                e.icon_url = st.catalog_icons.get(&e.id).or_else(|| st.icons.get(&e.id)).cloned();
+        // What is known of the icons goes with the page, so they show at once. The ones still to
+        // search for are asked for when their cards are on screen (`icons_in_view`).
+        let ids: Vec<String> = page.entries.iter().filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect();
+        let now = self.sort_icons(ids).await;
+        let by: HashMap<String, Option<String>> = now.known.into_iter().chain(now.disk).map(|f| (f.id, f.icon_url)).chain(now.none.into_iter().map(|id| (format!("other:{id}"), None))).collect();
+        for e in &mut page.entries {
+            if let Some(u) = by.get(&e.id) {
+                e.icon_url = u.clone();
+                e.icon_miss = u.is_none();
             }
-            page.entries.iter().filter(|e| e.icon_url.is_none()).filter_map(|e| e.id.strip_prefix("other:").map(String::from)).collect()
-        };
-        if !missing.is_empty() {
-            let me = self.clone();
-            tauri::async_runtime::spawn(async move { me.cache_other_icons(Some(missing)).await });
         }
+        self.convert_icons(now.convert);
         let stale = browse::stale(&pkgs);
         if !stale.is_empty() {
             let me = self.clone();
@@ -2328,6 +2610,7 @@ impl Core {
         {
             let st = self.st.lock();
             e.icon_url = st.catalog_icons.get(&e.id).or_else(|| st.icons.get(&e.id)).cloned();
+            e.icon_miss = e.icon_url.is_none() && st.icon_none.contains(&e.id);
         }
         self.fetch_other_details(vec![pkg.id.clone()]);
         if e.icon_url.is_none() {
@@ -4182,6 +4465,7 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         fg: fg.into(),
         bg: bg.into(),
         icon_url: None,
+        icon_miss: false,
         version: e.version.clone(),
         latest: e.latest.clone(),
         status,

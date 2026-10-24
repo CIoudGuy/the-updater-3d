@@ -56,6 +56,9 @@ pub struct AppEntry {
     pub fg: String,
     pub bg: String,
     pub icon_url: Option<String>,
+    /// The icon search is over and found none: the card shows its painted mark, not a shimmer.
+    #[serde(default)]
+    pub icon_miss: bool,
     pub version: String,
     pub latest: Option<String>,
     pub status: AppStatus,
@@ -126,6 +129,9 @@ pub struct CatalogEntry {
     pub fg: String,
     pub bg: String,
     pub icon_url: Option<String>,
+    /// The icon search is over and found none: the card shows its painted mark, not a shimmer.
+    #[serde(default)]
+    pub icon_miss: bool,
     pub version: String,
     pub size: Option<u64>,
     pub tagline: Option<String>,

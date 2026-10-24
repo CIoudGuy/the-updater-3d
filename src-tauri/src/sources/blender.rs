@@ -620,6 +620,7 @@ pub fn catalog_entries(feed: &Feed, installed: &[Installed], _beta_channel: bool
             fg: FG.into(),
             bg: BG.into(),
             icon_url: None,
+            icon_miss: false,
             version,
             size,
             tagline: Some(tagline.into()),

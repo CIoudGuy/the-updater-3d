@@ -27,6 +27,8 @@ export interface AppEntry {
   bg: string;
   /** URL the webview can load (asset protocol or https), or null. */
   iconUrl: string | null;
+  /** The icon search is over and found none: the card shows its painted mark, not a shimmer. */
+  iconMiss?: boolean;
   version: string;
   latest: string | null;
   status: AppStatus;
@@ -70,6 +72,8 @@ export interface CatalogEntry {
   fg: string;
   bg: string;
   iconUrl: string | null;
+  /** The icon search is over and found none: the card shows its painted mark, not a shimmer. */
+  iconMiss?: boolean;
   version: string;
   size: number | null;
   tagline: string | null;
@@ -355,7 +359,8 @@ export interface EventMap {
 /** A found icon for a Get apps entry. */
 export interface OtherIcon {
   id: string;
-  iconUrl: string;
+  /** null: the search is over and found no icon */
+  iconUrl: string | null;
 }
 
 /** What a winget package's manifest told about it, for a card already shown. */

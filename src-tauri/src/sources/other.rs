@@ -2004,6 +2004,7 @@ pub(crate) fn entry(p: &Pkg, version: String, tagline: Option<String>, installed
         fg,
         bg,
         icon_url: None,
+        icon_miss: false,
         version,
         size: None,
         tagline,
