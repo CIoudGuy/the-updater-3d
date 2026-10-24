@@ -16,6 +16,7 @@ pub mod gog;
 pub mod itch;
 pub mod rockstar;
 pub mod steam;
+pub mod sync;
 pub mod ubisoft;
 
 mod app;
