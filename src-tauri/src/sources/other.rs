@@ -1544,7 +1544,7 @@ pub async fn icon_source_of(feed: Option<&Feed>, id: &str) -> Option<IconSource>
 const MARKS: &[(&str, &str)] = &[("#E4E4EC", "#24242C"), ("#E38BC4", "#2A1222"), ("#E8736A", "#2C1311"), ("#6FB1E3", "#0F2131"), ("#9FD69B", "#14261A"), ("#E3C26F", "#2B2311"), ("#B49BE8", "#1E1530"), ("#7FD1C7", "#10262A")];
 
 /// Two letters and colors for the app's mark until its icon is known.
-fn mark_for(name: &str, id: &str) -> (String, String, String) {
+pub(crate) fn mark_for(name: &str, id: &str) -> (String, String, String) {
     let letters: Vec<char> = name.chars().filter(|c| c.is_alphanumeric()).collect();
     let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
     let code = if words.len() >= 2 {

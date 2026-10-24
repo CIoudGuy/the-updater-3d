@@ -467,8 +467,6 @@ pub fn execute_with(step: &Step, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> Ste
             Ok((None, String::new()))
         }
         Step::OpenUri { uri, .. } => winutil::shell_open(uri).map(|_| (None, String::new())),
-        // Runs in the app itself, with the sign-in (see `Core::run_game_sync`).
-        Step::GameSync { .. } => Err(anyhow!("A game is synced by the app itself")),
         Step::RemoveIfOnlyUninstaller { path, .. } => {
             if path.is_dir() && winutil::only_uninstaller_left(path) {
                 remove_dir(path)?;

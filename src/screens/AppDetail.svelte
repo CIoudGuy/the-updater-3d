@@ -20,7 +20,7 @@
   import { router } from "../lib/router.svelte";
   import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, setIgnored, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
-  import { aboutLine, launcherOf, listedOnly } from "../lib/view";
+  import { aboutLine, listedOnly } from "../lib/view";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -38,34 +38,6 @@
   const isAdobe = $derived(app?.source === "adobe");
   /** a device driver, the chipset or the BIOS: installs only its newest version, never rolls back */
   const isDriver = $derived(app?.source === "drivers");
-  /** a game from a launcher (Steam, Epic Games...): updated and uninstalled there, its versions are its news */
-  const isGame = $derived(app?.source === "games");
-  const launcher = $derived(app ? launcherOf(app.id) : "");
-  /** a game this app installed from Epic Games or GOG: updates, repairs and undoes here */
-  const gameHere = $derived(!!app?.gameHere);
-  /** Undo asks for a second click before it puts the last update back */
-  let undoArmed = $state(false);
-  let undoing = $state(false);
-  let undoTimer: ReturnType<typeof setTimeout> | undefined;
-  async function undoGame() {
-    if (!app || undoing) return;
-    if (!undoArmed) {
-      undoArmed = true;
-      clearTimeout(undoTimer);
-      undoTimer = setTimeout(() => (undoArmed = false), 4000);
-      return;
-    }
-    undoArmed = false;
-    undoing = true;
-    try {
-      const v = await call("game_undo", { appId: app.id });
-      store.toast("ok", v ? `${app.name} is back at ${v}` : `${app.name}'s last update was put back`);
-    } catch (e) {
-      store.toast("err", `Could not undo the update: ${e}`);
-    } finally {
-      undoing = false;
-    }
-  }
   /** its updates are turned off ("Don't update") */
   const ignored = $derived(!!app && isIgnored(app.id));
   /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
@@ -153,7 +125,7 @@
     import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url)).catch(() => window.open(url, "_blank"));
   }
   function rowAction(v: VersionInfo): { label: string; title: string } | null {
-    if (!app || v.installed || app.readOnly || isDriver || isGame) return null;
+    if (!app || v.installed || app.readOnly || isDriver) return null;
     if (sideBySide) return { label: `Install ${v.version}`, title: `Install ${v.version} next to ${app.version}` };
     if (v.latest && cmpVersion(v.version, app.version) > 0) return null;
     if (cmpVersion(v.version, app.version) < 0) return app.canRollback ? { label: `Roll back to ${v.version}`, title: `Roll back to ${v.version}` } : null;
@@ -167,7 +139,6 @@
     if (!app) return "";
     if (listedOnly(app) && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
     if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
-    if (isGame && !gameHere && !job) return ignored ? "Updates off" : app.status === "update" ? `Update waiting in ${launcher}` : `Kept up to date by ${launcher}`;
     if (!job && ignored) return app.latest && cmpVersion(app.latest, app.version) > 0 ? `Updates off, ${app.latest} is out` : "Updates off";
     switch (app.status) {
       case "update":
@@ -226,7 +197,7 @@
               <Btn variant="secondary" title="Restart the PC in a minute to finish installing drivers" onclick={() => send("restart_pc", {})}>Restart PC</Btn>
             {/if}
             {#if app.manualUrl}
-              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : isGame ? `Update in ${launcher}` : `Get ${app.latest}`) : isGame ? `Open in ${launcher}` : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
+              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : `Get ${app.latest}`) : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
             {:else if app.status === "update"}
               <Btn variant="primary" hint="U" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update to {app.latest}</Btn>
             {:else if app.status === "missing" && canRepair(app)}
@@ -236,16 +207,6 @@
             {/if}
             {#if app.storeUrl}
               <Btn variant="secondary" title="Updates and removal happen in the Microsoft Store" onclick={() => openStorePage(app.id)}>Open in Microsoft Store <Icon d={I.external} size={14} width={2.5} /></Btn>
-            {/if}
-            {#if gameHere && app.status !== "failed"}
-              <Btn variant="secondary" title="Check every file of {app.name} and download the missing or broken ones" onclick={() => repairApp(app.id)}>Repair</Btn>
-            {/if}
-            {#if gameHere && app.canUndo}
-              <Btn variant="secondary" disabled={undoing} title="Put back the files the last update or repair changed" onclick={undoGame}>{undoing ? "Undoing" : undoArmed ? "Click again to undo" : "Undo last update"}</Btn>
-            {/if}
-            {#if isGame && !app.canUninstall && app.manualUrl}
-              <!-- its launcher keeps no uninstall address or entry: it is uninstalled there -->
-              <Btn variant="secondary" title="{launcher} uninstalls {app.name}" onclick={() => send("open_driver_page", { id: app.id })}>Uninstall in {launcher}</Btn>
             {/if}
             {#if app.canUninstall}
               <Btn variant="danger" title="Uninstall {app.name}" onclick={() => askUninstall(app.id)}>{app.source === "programs" && app.status === "missing" ? "Remove from list" : "Uninstall"}</Btn>
@@ -271,10 +232,10 @@
         {/if}
       </section>
       {:else}
-      <section aria-label={isGame ? "News and patch notes" : "Version history"}>
+      <section aria-label="Version history">
         <div class="sec-h">
-          <span>{isGame ? "News and patch notes" : "Version history"}</span>
-          <span class="aside">{versions && !versionsError && !app.readOnly && !isDriver && !isGame ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
+          <span>Version history</span>
+          <span class="aside">{versions && !versionsError && !app.readOnly && !isDriver ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
         </div>
         {#if !versions}
           {#each [0, 1, 2, 3] as i (i)}
@@ -283,18 +244,12 @@
         {:else if versionsError}
           <p class="gone">Could not load the versions. Check the connection.</p>
           <div class="retry"><Btn variant="raised" size="md" onclick={() => app && loadVersions(app.id)}>Retry</Btn></div>
-        {:else if isGame && !versions.length}
-          <p class="gone">{launcher} publishes no patch notes this app can read. {launcher} shows what is new when it updates the game.</p>
         {:else}
           {#each versions as v, i (v.version)}
             {@const act = rowAction(v)}
             <article class="vrow" class:hasnotes={v.notes.length > 0} animate:flip={{ duration: reduced() ? 0 : 200 }} use:enter={i}>
               <div class="vtop">
-                {#if isGame}
-                  <span class="vt">{v.version}</span>
-                {:else}
-                  <span class="vn">{preParts(v.version)[0]}{#if preParts(v.version)[1]}<span class="vs">{preParts(v.version)[1]}</span>{/if}</span>
-                {/if}
+                <span class="vn">{preParts(v.version)[0]}{#if preParts(v.version)[1]}<span class="vs">{preParts(v.version)[1]}</span>{/if}</span>
                 <span class="vd">{dateLong(v.date)}</span>
                 {#if v.installed}
                   <span class="tag" style="color:var(--text)"><Paint kind="swatch" fill="#232323" /><span class="tx">Installed</span></span>
@@ -307,7 +262,7 @@
                 {/if}
                 <span class="grow"></span>
                 {#if v.notesUrl}
-                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>{isGame ? `Read on ${v.notesUrl.includes("steampowered.com") ? "Steam" : "its page"}` : "Full release notes"}</button>
+                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>Full release notes</button>
                 {/if}
                 {#if act}
                   <Btn variant="ghost" size="sm" title={act.title} onclick={() => installVersion(app, v.version, v.size)}>{act.label}</Btn>
@@ -323,7 +278,7 @@
       {/if}
 
       <aside aria-label="Details">
-        {#if !app.readOnly && !listedOnly(app) && !isDriver && !isGame}
+        {#if !app.readOnly && !listedOnly(app) && !isDriver}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>
           <div class="pk">
@@ -363,7 +318,7 @@
           {/if}
         </dl>
 
-        {#if app.readOnly || app.source === "programs" || isDriver || isGame}
+        {#if app.readOnly || app.source === "programs" || isDriver}
           <!-- Steam or the Microsoft Store keeps this copy up to date; no catalog knows Other programs -->
         {:else if isBlender && app.channel === "beta"}
           <!-- a pre-release copy has no bug-fix releases to keep -->
@@ -520,16 +475,6 @@
     font-weight: 400;
     letter-spacing: 0;
     color: var(--text-3);
-  }
-  /* a game's news item: its title in place of a version number */
-  .vt {
-    min-width: 0;
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: var(--track-heading);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .vd {
     font-size: 12px;

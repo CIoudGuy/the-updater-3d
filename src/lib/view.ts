@@ -22,22 +22,6 @@ export function aboutLine(app: { source: string; tagline: string | null; note: s
   return t && t !== app.note ? t : null;
 }
 
-/** The Home line about games whose launcher has an update waiting: what it says and its button. */
-export function gameUpdatesLine(games: readonly { id: string; name: string }[]): { text: string; button: string } | null {
-  if (!games.length) return null;
-  if (games.length === 1) {
-    const l = launcherOf(games[0].id);
-    return { text: `${games[0].name} has an update waiting in ${l}.`, button: `Update in ${l}` };
-  }
-  return { text: `${games.length} games have updates waiting in their launchers.`, button: "Show them" };
-}
-
-/** The launcher a game came from, by name, from its id ("game:steam:1912410"). */
-export function launcherOf(id: string): string {
-  const k = id.startsWith("game:") ? id.split(":")[1] : "";
-  return ({ steam: "Steam", epic: "Epic Games", ubisoft: "Ubisoft Connect", gog: "GOG Galaxy", ea: "EA app", battlenet: "Battle.net", amazon: "Amazon Games", itch: "itch", rockstar: "Rockstar" } as Record<string, string>)[k] ?? "its launcher";
-}
-
 /** The version in the Installed list's Latest column. An app whose updates are turned off shows the
  * version it has: its newer version shows only on its own page. */
 export function latestColumn(app: { source: string; status: string; latest: string | null; version: string; github?: string | null }, updatesOff: boolean): string {
@@ -52,11 +36,11 @@ export function groupOrAll<T extends string>(group: T | "all", present: readonly
 }
 
 /** The Updates and Recently updated filters hide apps; say so when a search matches only hidden ones. */
-export function installedNone(o: { query: string; filter: "updates" | "all" | "games" | "drivers" | "recent"; matchesIgnoringFilter: number }): { text: string; showAll: boolean } {
+export function installedNone(o: { query: string; filter: "updates" | "all" | "drivers" | "recent"; matchesIgnoringFilter: number }): { text: string; showAll: boolean } {
   const q = o.query.trim();
   if (q) {
     if (o.filter !== "all" && o.matchesIgnoringFilter > 0) {
-      const f = o.filter === "updates" ? "Updates available" : o.filter === "drivers" ? "Drivers" : o.filter === "games" ? "Games" : "Recently updated";
+      const f = o.filter === "updates" ? "Updates available" : o.filter === "drivers" ? "Drivers" : "Recently updated";
       const n = o.matchesIgnoringFilter;
       return { text: `${n === 1 ? "1 app matches" : `${n} apps match`} "${q}", hidden by the ${f} filter.`, showAll: true };
     }
@@ -64,7 +48,6 @@ export function installedNone(o: { query: string; filter: "updates" | "all" | "g
   }
   if (o.filter === "updates") return { text: "No updates available. Everything here is current.", showAll: true };
   if (o.filter === "drivers") return { text: "No drivers listed yet. They show once the next check is done.", showAll: true };
-  if (o.filter === "games") return { text: "No games found. Games from Ubisoft Connect, EA app and the other launchers show here, and your Steam, Epic Games and GOG games once you sign in.", showAll: true };
   return { text: "Nothing here yet.", showAll: false };
 }
 

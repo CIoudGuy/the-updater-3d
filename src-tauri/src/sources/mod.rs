@@ -10,7 +10,6 @@ pub mod browse;
 pub mod chipset;
 pub mod craft;
 pub mod drivers;
-pub mod games;
 pub mod ghapps;
 pub mod nvidia;
 pub mod iconfetch;
@@ -87,8 +86,6 @@ pub enum SourceData {
     /// Matched from the winget catalog: the package, how it was matched and the uninstall list
     /// entry it was matched from.
     Other { pkg: String, how: other::How, entry: Box<crate::winutil::UninstallEntry>, upgrade_code: Option<String> },
-    /// Installed through a game launcher.
-    Game(Box<games::Game>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,10 +179,6 @@ pub enum Step {
     /// Delete one thing an uninstalled program left behind (`uninstall::remove::apply`, which
     /// checks again that it is safe to delete).
     Leftover { target: crate::uninstall::Target, elevated: bool, label: String },
-    /// Bring the game folder `dest` to a build of the game from its platform ("epic", "gog"),
-    /// signed in, in this app (`sources::games::sync`): what is missing or different is
-    /// downloaded and checked, and what it replaces is kept for an undo. Never in the admin helper.
-    GameSync { platform: String, game: String, name: String, dest: PathBuf, mode: crate::sources::games::sync::Mode, label: String },
 }
 
 impl Step {
@@ -201,8 +194,7 @@ impl Step {
             | Step::CheckSigner { label, .. }
             | Step::AddPackage { label, .. }
             | Step::RemovePackage { label, .. }
-            | Step::Leftover { label, .. }
-            | Step::GameSync { label, .. } => label,
+            | Step::Leftover { label, .. } => label,
             Step::WriteFile { .. } => "Writing settings",
             Step::RemoveFile { .. } => "Cleaning up",
         }

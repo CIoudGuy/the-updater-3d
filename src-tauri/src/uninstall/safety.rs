@@ -20,6 +20,10 @@ pub struct Guard {
 /// Vendor folders many programs share: never deleted whole.
 const SHARED_NAMES: &[&str] = &["common files", "windowsapps", "microsoft", "windows", "windows nt", "windows defender", "windows mail", "windows media player", "windows photo viewer", "windows sidebar", "windowspowershell", "internet explorer", "microsoft shared", "reference assemblies", "msbuild", "dotnet", "package cache", "installer", "packages", "programs", "temp", "users", "public", "nvidia corporation", "intel", "amd", "realtek", "steam", "steamapps", "epic games", "google", "mozilla", "jetbrains", "adobe", "autodesk"];
 
+/// Folders right under a drive that hold many programs or games, on any drive (a Steam library
+/// on D:, the Xbox app's games, a "Games" folder): never deleted whole.
+const TOP_SHARED: &[&str] = &["games", "steamlibrary", "xboxgames", "gog games", "gog galaxy", "ea games", "origin games", "ubisoft", "rockstar games", "amazon games", "itch"];
+
 /// Folders under the profile that hold the user's own files or browser profiles.
 const USER_CONTENT: &[&str] = &["Documents", "Desktop", "Pictures", "Videos", "Music", "Downloads", "Saved Games", "Favorites", "Contacts", "Links", "Searches", "3D Objects"];
 
@@ -53,8 +57,13 @@ impl Guard {
         if let Some(h) = home.parent() {
             roots.push(h.to_path_buf());
         }
+        // Every drive's root, and the folders that hold programs on any drive (programs are
+        // installed to "D:\Program Files" too).
         for d in b'A'..=b'Z' {
-            roots.push(PathBuf::from(format!("{}:\\", d as char)));
+            let drive = format!("{}:\\", d as char);
+            for top in ["", "Program Files", "Program Files (x86)", "ProgramData"] {
+                roots.push(PathBuf::from(format!("{drive}{top}")));
+            }
         }
         roots.extend(crate::sources::locate::start_menu_dirs());
         let mut trees: Vec<PathBuf> = env("SystemRoot").into_iter().collect();
@@ -91,7 +100,7 @@ impl Guard {
             return Some("another installed program's folder");
         }
         let name = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
-        if SHARED_NAMES.contains(&name.as_str()) {
+        if SHARED_NAMES.contains(&name.as_str()) || (p.components().count() == 3 && TOP_SHARED.contains(&name.as_str())) {
             return Some("a folder many programs share");
         }
         if p.join("User Data").is_dir() || p.join("profiles.ini").is_file() {

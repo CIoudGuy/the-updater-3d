@@ -335,6 +335,20 @@ fn the_real_system_folders_are_refused() {
     assert!(g.dir_refused(&env("ProgramFiles").join("Zapster")).is_none());
 }
 
+/// Programs and games live on every drive: the folders that hold many of them are refused on
+/// each drive, not only on the Windows one, while one program's or game's own folder there can
+/// still be removed.
+#[test]
+fn the_folders_that_hold_programs_are_refused_on_every_drive() {
+    let g = Guard::system(vec![]);
+    for p in [r"D:\Program Files", r"E:\Program Files (x86)", r"D:\ProgramData", r"D:\SteamLibrary", r"F:\XboxGames", r"D:\Games", r"D:\GOG Games", r"d:\program files\"] {
+        assert!(g.dir_refused(Path::new(p)).is_some(), "{p} must be refused");
+    }
+    for p in [r"D:\Program Files\Zapster", r"E:\Program Files (x86)\ZapCorp\Zapster", r"D:\Games\Hades", r"D:\Zapster", r"D:\SteamLibrary\steamapps\common\Some Game"] {
+        assert!(g.dir_refused(Path::new(p)).is_none(), "{p} must stay removable");
+    }
+}
+
 #[test]
 fn only_one_programs_own_keys_and_startup_values_can_be_deleted() {
     for k in ["Software", "Software\\Microsoft", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall", "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "Software\\Classes", "Software\\Classes\\.txt", "Software\\Classes\\CLSID", "Software\\Classes\\Applications", "SOFTWARE\\WOW6432Node", "SOFTWARE\\Policies\\Zap", "SYSTEM\\CurrentControlSet", "Software\\Clients\\StartMenuInternet"] {

@@ -94,23 +94,11 @@ pub fn repair_app(core: C<'_>, app_id: String) -> Res<()> {
 }
 
 #[tauri::command]
-pub async fn open_app(core: C<'_>, app_id: String) -> Res<()> {
+pub fn open_app(core: C<'_>, app_id: String) -> Res<()> {
     let i = core.installed(&app_id).ok_or("That app is no longer installed")?;
-    // A game installed here starts itself (an Epic game signed in).
-    if let crate::sources::SourceData::Game(g) = &i.data {
-        if crate::sources::games::here::is_here(g) {
-            let (exe, args) = crate::accounts::games::launch_of(g).await.ok_or("Could not find the game's program. Use Repair on its page.")?;
-            let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            return winutil::launch(&exe, &args).map_err(err);
-        }
-    }
     // A Store app starts through the shell, which gives it its package identity.
     if let Some(t) = i.store.as_ref().and_then(|s| s.launch_target()) {
         return winutil::shell_open(&t).map_err(err);
-    }
-    // A game starts through its launcher.
-    if let Some(u) = crate::sources::games::launch_uri(&i) {
-        return winutil::shell_open(&u).map_err(err);
     }
     let exe = i.exe.ok_or("Could not find the program file")?;
     winutil::launch(&exe, &[]).map_err(err)
@@ -460,120 +448,6 @@ pub async fn self_versions(core: C<'_>) -> Res<Vec<VersionInfo>> {
 #[tauri::command]
 pub async fn note_image(url: String) -> Res<Option<String>> {
     Ok(crate::noteimg::get(&url).await.map(|p| paths::asset_url(&p)))
-}
-
-fn platform(key: &str) -> Res<crate::accounts::Platform> {
-    crate::accounts::Platform::from_key(key).ok_or_else(|| format!("Unknown platform {key}"))
-}
-
-/// The game platforms the user can sign in to, and how each stands.
-#[tauri::command]
-pub async fn accounts() -> Res<Vec<crate::accounts::AccountInfo>> {
-    tauri::async_runtime::spawn_blocking(crate::accounts::list).await.map_err(err)
-}
-
-/// Start signing in to a platform: Steam shows a QR code for its mobile app (`account_wait`
-/// finishes it), or with `window` signs in in a Steam window; Epic Games and GOG open their page
-/// in the user's browser, which then shows a code for `account_code`. "CANCELED" when the user
-/// stopped it.
-#[tauri::command]
-pub async fn account_sign_in(app: AppHandle, core: C<'_>, platform: String, window: Option<bool>) -> Res<crate::accounts::SignInStep> {
-    let p = self::platform(&platform)?;
-    match crate::accounts::sign_in(&app, p, window.unwrap_or(false)).await {
-        Ok(step) => {
-            if matches!(step, crate::accounts::SignInStep::Done { .. }) {
-                core.inner().accounts_changed();
-            }
-            Ok(step)
-        }
-        Err(e) => Err(sign_in_error(p, &e)),
-    }
-}
-
-fn sign_in_error(p: crate::accounts::Platform, e: &anyhow::Error) -> String {
-    if format!("{e}").starts_with("CANCELED|") {
-        return "CANCELED".into();
-    }
-    log::warn!("{} sign-in: {}", p.name(), crate::accounts::problem_text(e));
-    crate::accounts::problem_text(e)
-}
-
-/// Wait until Steam's QR code is approved in its mobile app. A new code (Steam changes it now and
-/// then) comes as the "account_qr" event with the picture to show.
-#[tauri::command]
-pub async fn account_wait(app: AppHandle, core: C<'_>, platform: String) -> Res<crate::accounts::AccountInfo> {
-    use tauri::Emitter;
-    let p = self::platform(&platform)?;
-    let a = app.clone();
-    match crate::accounts::wait(&app, p, move |img| {
-        let _ = a.emit("account_qr", img);
-    })
-    .await
-    {
-        Ok(info) => {
-            core.inner().accounts_changed();
-            Ok(info)
-        }
-        Err(e) => Err(sign_in_error(p, &e)),
-    }
-}
-
-/// Finish an Epic Games or GOG sign-in with what the user pasted from the browser.
-#[tauri::command]
-pub async fn account_code(app: AppHandle, core: C<'_>, platform: String, text: String) -> Res<crate::accounts::AccountInfo> {
-    let p = self::platform(&platform)?;
-    match crate::accounts::finish(&app, p, &text).await {
-        Ok(info) => {
-            core.inner().accounts_changed();
-            Ok(info)
-        }
-        Err(e) => Err(sign_in_error(p, &e)),
-    }
-}
-
-/// Stop a sign-in that waits (Steam's QR code or window).
-#[tauri::command]
-pub fn account_cancel(platform: String) -> Res<()> {
-    crate::accounts::cancel(self::platform(&platform)?);
-    Ok(())
-}
-
-/// Forget a platform's sign-in here; its games stop showing.
-#[tauri::command]
-pub async fn account_sign_out(core: C<'_>, platform: String) -> Res<()> {
-    let p = self::platform(&platform)?;
-    tauri::async_runtime::spawn_blocking(move || crate::accounts::sign_out(p)).await.map_err(err)?;
-    core.inner().accounts_changed();
-    Ok(())
-}
-
-/// Read a platform's library again now.
-#[tauri::command]
-pub async fn account_sync(app: AppHandle, core: C<'_>, platform: String) -> Res<crate::accounts::AccountInfo> {
-    let p = self::platform(&platform)?;
-    let r = crate::accounts::sync(&app, p).await;
-    core.inner().accounts_changed();
-    r.map_err(|e| crate::accounts::problem_text(&e))?;
-    crate::accounts::list().into_iter().find(|a| a.platform == p).ok_or_else(|| "Unknown platform".into())
-}
-
-/// Put back the files the last update or repair of a game installed here changed. The version
-/// it is at again.
-#[tauri::command]
-pub async fn game_undo(core: C<'_>, app_id: String) -> Res<String> {
-    let c = core.inner().clone();
-    if c.busy(&app_id) {
-        return Err("Wait for its update to finish first".into());
-    }
-    let inst = c.installed(&app_id).ok_or("That game is no longer installed")?;
-    let dir = match &inst.data {
-        crate::sources::SourceData::Game(g) if crate::sources::games::here::is_here(g) => g.install_dir.clone(),
-        _ => None,
-    }
-    .ok_or("Only a game installed here can be put back")?;
-    let back = tauri::async_runtime::spawn_blocking(move || crate::sources::games::sync::undo(&dir)).await.map_err(err)?.map_err(err)?;
-    c.rescan().await;
-    Ok(back.map(|s| if s.version.is_empty() { s.build } else { s.version }).unwrap_or_default())
 }
 
 #[tauri::command]

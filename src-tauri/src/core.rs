@@ -53,7 +53,7 @@ fn norm_dir(d: &std::path::Path) -> String {
 fn mark_self(a: &mut AppEntry, ready: Option<&str>) {
     a.is_self = true;
     a.group = Source::Other.group().into();
-    a.tagline = Some("Keeps your apps, games and drivers up to date".into());
+    a.tagline = Some("Keeps your apps and drivers up to date".into());
     a.note = None;
     a.can_rollback = false;
     if a.status == AppStatus::Missing {
@@ -75,12 +75,18 @@ fn mark_self(a: &mut AppEntry, ready: Option<&str>) {
     }
 }
 
-/// The launchers' games among the installed apps.
-fn games_of(v: &[Installed]) -> Vec<sources::games::Game> {
-    v.iter().filter_map(|i| match &i.data {
-        SourceData::Game(g) => Some((**g).clone()),
-        _ => None,
-    }).collect()
+/// What the game sign-ins of 1.2.2 kept on this PC: the encrypted sign-ins, the game libraries,
+/// the Steam window's cookies and the game icons. The games feature is gone, so they go too.
+fn forget_game_data(data: &std::path::Path, icons: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(data.join("accounts"));
+    if let Ok(rd) = std::fs::read_dir(icons) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if n.starts_with("owned-") || n.starts_with("game-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 /// The apps the catalog sources look at: Other programs are what no source matched, so they
@@ -570,8 +576,6 @@ fn step_detail(step: &sources::Step, files: Option<usize>) -> String {
         Step::AddPackage { .. } => "Windows is installing the app package".into(),
         Step::RemovePackage { .. } => "Windows is removing the app package".into(),
         Step::Leftover { label, .. } => label.clone(),
-        Step::GameSync { mode: crate::sources::games::sync::Mode::Repair, .. } => "Checking every file of the game".into(),
-        Step::GameSync { platform, .. } => format!("Downloading from {}", crate::accounts::Platform::from_key(platform).map(|p| p.name()).unwrap_or("the store")),
     }
 }
 
@@ -662,8 +666,6 @@ pub struct Core {
     pub other: RwLock<Option<Arc<other::Feed>>>,
     /// Releases of the GitHub projects that Other programs name (see `ghapps`)
     pub ghapps: RwLock<Option<Arc<ghapps::Feed>>>,
-    /// What the launchers' public lists say about the games (see `games::check`)
-    pub games_feed: RwLock<Option<Arc<sources::games::check::Feed>>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
     /// Bumped by "Allow admin rights": the jobs waiting for admin rights try again.
@@ -737,7 +739,6 @@ impl Core {
             tools: RwLock::new(None),
             other: RwLock::new(None),
             ghapps: RwLock::new(None),
-            games_feed: RwLock::new(None),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
             admin_gen: watch::channel(0).0,
@@ -1034,7 +1035,7 @@ impl Core {
             let is_beta = i.channel.as_deref() == Some("beta");
             let has_update = !i.read_only
                 && !i.missing
-                && latest.is_some_and(|l| i.source == Source::Games || sources::update_offered(&l.version, &i.version, is_beta));
+                && latest.is_some_and(|l| sources::update_offered(&l.version, &i.version, is_beta));
             let status = if i.missing {
                 AppStatus::Missing
             } else if let Some(j) = job {
@@ -1093,17 +1094,15 @@ impl Core {
                 tagline: gh_feed.and_then(|f| f.about_of(&i.id)).map(String::from).or_else(|| i.tagline.clone()),
                 group: if gh_feed.is_some() { Source::Other.group().into() } else { i.source.group().into() },
                 running: is_running,
-                can_uninstall: !i.read_only && (i.uninstall.is_some() || sources::games::can_uninstall(i) || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot") || matches!(&i.data, SourceData::Game(g) if sources::games::here::is_here(g))),
+                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
                 read_only: i.read_only,
                 // Only for copies the Store updates: a sideloaded app package is updated here.
                 store_url: i.store.as_ref().filter(|_| i.read_only).map(|s| s.page_url()),
                 channel: i.channel.clone(),
-                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)).or_else(|| if i.source == Source::Games { sources::games::show_uri(i) } else { None }),
+                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)),
                 github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
                 is_self: false,
-                game_here: matches!(&i.data, SourceData::Game(g) if sources::games::here::is_here(g)),
-                can_undo: matches!(&i.data, SourceData::Game(g) if g.install_dir.as_deref().is_some_and(|d| sources::games::here::is_here(g) && sources::games::sync::can_undo(d).is_some())),
                 note,
                 job_id: job.map(|j| j.id.clone()),
             });
@@ -1153,10 +1152,6 @@ impl Core {
             }
             if s.sources.tools {
                 v.extend(tools::scan(&un, &PathBuf::from(&s.godot_install_dir)));
-            }
-            // Games before the catalog: a launcher's game is not an Other app or program.
-            if s.sources.games {
-                v.extend(sources::games::scan().into_iter().map(|g| sources::games::installed_with(g, &un)));
             }
             if s.sources.other {
                 let found = other::scan(&un, &v, of.as_deref());
@@ -1338,10 +1333,6 @@ impl Core {
     /// The maker's page for a driver that is updated from there (a BIOS), or the maker's own
     /// updater for a card whose maker was not reached.
     pub fn driver_page(&self, id: &str) -> Option<String> {
-        // A game: its page in its launcher, where the update is.
-        if id.starts_with("game:") {
-            return self.installed(id).and_then(|i| sources::games::show_uri(&i));
-        }
         // An Other program's newest release that only downloads from its GitHub page.
         if id.starts_with("prog:") {
             let inst = self.installed(id)?;
@@ -1425,7 +1416,6 @@ impl Core {
         let tf = self.tools.read().clone();
         let of = self.other.read().clone();
         let gf = self.ghapps.read().clone();
-        let gmf = self.games_feed.read().clone();
         let keep_patch = self.settings.read().blender_keep_patch_versions;
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
@@ -1436,11 +1426,6 @@ impl Core {
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
                 Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
-                // The launcher marks its own updates; GOG's public list has the rest.
-                // Epic keeps no word of updates on disk: the signed-in library has the newest build.
-                Source::Games => sources::games::latest(i)
-                    .or_else(|| gmf.as_ref().and_then(|f| f.updates.get(&i.id)).map(|u| Latest { version: u.clone(), size: None, note: None }))
-                    .or_else(|| crate::accounts::games::epic_update(i).map(|v| Latest { version: v, size: None, note: None })),
                 // Listed to uninstall them; no catalog knows their versions, their GitHub project may.
                 Source::Programs => gf.as_ref().and_then(|f| ghapps::latest(i, f)),
                 // Not in the installed list: the driver check has their versions.
@@ -1583,7 +1568,7 @@ impl Core {
                 continue;
             }
             // Other apps report their size in the uninstall list; their folders can be huge
-            // (a game launcher with its games), so they are not walked.
+            // (a launcher with all it downloaded), so they are not walked.
             if i.source == Source::Other && i.size_hint.is_some() {
                 continue;
             }
@@ -1768,18 +1753,8 @@ impl Core {
             }
             Some(Arc::new(ghapps::fetch(&installed).await))
         };
-        // Games: GOG's newest builds, and the Steam pages of games from other launchers.
-        let games_f = async {
-            if !settings.sources.games {
-                return None;
-            }
-            // The libraries of the platforms signed in to: Epic's newest builds, and new games.
-            crate::accounts::refresh_due(&self.app).await;
-            Some(Arc::new(sources::games::check::check(&games_of(&installed)).await))
-        };
-        let (a, c, b, t, o, g, gm) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f, gh_f, games_f);
+        let (a, c, b, t, o, g) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f, gh_f);
         *self.ghapps.write() = g;
-        *self.games_feed.write() = gm;
         if a.is_some() {
             *self.adobe.write() = a;
         } else if settings.sources.adobe {
@@ -2026,31 +2001,6 @@ impl Core {
                 have_now.push((id, paths::asset_url(&p)));
             }
         }
-        // The pictures of the user's games (a library can hold hundreds: a few at a time).
-        let games: Vec<(String, String, String)> = {
-            let st = self.st.lock();
-            crate::accounts::Platform::ALL
-                .into_iter()
-                .filter(|p| crate::accounts::signed_in(*p))
-                .flat_map(|p| crate::accounts::library(p).games)
-                .filter_map(|o| {
-                    let id = crate::accounts::games::game_id(o.platform, &o.id);
-                    let url = o.image.clone()?;
-                    let ext = if url.to_ascii_lowercase().contains(".png") { "png" } else { "jpg" };
-                    let file: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-                    (!st.catalog_icons.contains_key(&id)).then(|| (id, url, format!("{file}.{ext}")))
-                })
-                .collect()
-        };
-        {
-            use futures_util::StreamExt;
-            let fetches: Vec<_> = games
-                .into_iter()
-                .map(|(id, url, name)| async move { tokio::time::timeout(Duration::from_secs(8), crate::http::cache_icon(&url, &name)).await.ok().flatten().map(|p| (id, paths::asset_url(&p))) })
-                .collect();
-            let got: Vec<Option<(String, String)>> = futures_util::stream::iter(fetches).buffer_unordered(6).collect().await;
-            have_now.extend(got.into_iter().flatten());
-        }
         if !have_now.is_empty() {
             let mut st = self.st.lock();
             for (id, u) in have_now {
@@ -2065,6 +2015,7 @@ impl Core {
     /// Show the last known state right away from disk caches, before any network request.
     pub async fn preload(self: &Arc<Self>) {
         crate::http::PREFER_CACHE.store(true, Ordering::Relaxed);
+        drop(tauri::async_runtime::spawn_blocking(|| forget_game_data(&paths::data_dir(), &paths::icons())));
         let settings = self.settings.read().clone();
         self.rescan().await;
         let installed = self.st.lock().installed.clone();
@@ -2076,8 +2027,6 @@ impl Core {
             async { if settings.sources.other { other::fetch(&catalog_apps(&installed), None).await.ok() } else { None } },
         );
         let g = if settings.sources.other { Some(Arc::new(ghapps::fetch(&installed).await)) } else { None };
-        let gm = if settings.sources.games { Some(Arc::new(sources::games::check::check(&games_of(&installed)).await)) } else { None };
-        *self.games_feed.write() = gm;
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
         *self.ghapps.write() = g;
         if settings.sources.other && crate::machine::tuned().prebuild_browse && self.window_open() {
@@ -2609,21 +2558,6 @@ impl Core {
         self.admin_gen.send_modify(|g| *g += 1);
     }
 
-    /// After a sign-in, a sign-out or a library read: the games shown and offered change.
-    pub fn accounts_changed(self: &Arc<Self>) {
-        let me = self.clone();
-        tauri::async_runtime::spawn(async move {
-            me.rescan().await;
-            me.emit("catalog_changed", ());
-            me.clone().cache_catalog_icons().await;
-        });
-    }
-
-    /// Is a job of this app queued or running?
-    pub fn busy(&self, app_id: &str) -> bool {
-        self.jobs.lock().iter().any(|j| j.job.app_id == app_id && !j.job.state.is_finished())
-    }
-
     /// One Get apps entry, installed or not (its page stays open after the install finishes).
     pub fn catalog_entry(&self, id: &str) -> Option<CatalogEntry> {
         self.catalog().into_iter().find(|e| e.id == id)
@@ -2662,10 +2596,6 @@ impl Core {
                     e
                 }));
             }
-        }
-        // The games of the platforms the user signed in to.
-        if s.sources.games {
-            out.extend(crate::accounts::games::catalog_entries(&st.installed));
         }
         for e in &mut out {
             if let Some(u) = st.catalog_icons.get(&e.id) {
@@ -2791,10 +2721,6 @@ impl Core {
             return Ok(self.driver_versions(app_id));
         }
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
-        if let SourceData::Game(g) = &inst.data {
-            let twin = self.games_feed.read().as_ref().and_then(|f| f.steam.get(&inst.id).copied());
-            return Ok(sources::games::news(g, twin).await);
-        }
         if inst.source == Source::Programs {
             // No catalog knows its versions: its GitHub releases, when it names its project.
             return Ok(self.ghapps.read().as_deref().map(|f| ghapps::versions(&inst, f)).unwrap_or_default());
@@ -2866,10 +2792,6 @@ impl Core {
                 let installed = self.st.lock().installed.clone();
                 other::catalog_versions(id, feed.as_deref(), &installed).await
             }
-            "game" => {
-                let o = crate::accounts::games::owned(id).ok_or_else(|| anyhow!("That game is not in your libraries"))?;
-                Ok(sources::games::news(&crate::accounts::games::as_game(&o), None).await)
-            }
             _ => Err(anyhow!("Unknown app {id}")),
         }
     }
@@ -2884,10 +2806,6 @@ impl Core {
                 Ok(with_adobe_notes(list).await)
             }
             SourceData::Craft { key, .. } => craft::versions(key, Some(&inst.version), s.craft_prereleases).await,
-            SourceData::Game(g) => {
-                let twin = self.games_feed.read().as_ref().and_then(|f| f.steam.get(&inst.id).copied());
-                Ok(sources::games::news(g, twin).await)
-            }
             SourceData::Blender { .. } => {
                 let feed = self.blender.read().clone().ok_or_else(|| anyhow!("Blender releases are not loaded yet"))?;
                 blender::versions(&inst, &feed).await
@@ -3218,109 +3136,6 @@ impl Core {
         self.with_job(id, |j| f(&mut j.job));
     }
 
-    /// A `GameSync` step: the game's platform engine (`sources::games::{epic_dl, gog_dl}`) brings
-    /// its folder to a build, signed in. Its progress moves the job's bar, speed and time left;
-    /// Cancel in the queue stops it between files. false: canceled.
-    async fn run_game_sync(self: &Arc<Self>, id: &str, step: &sources::Step, ctl: watch::Receiver<Control>) -> Result<bool> {
-        use crate::accounts::{self, Platform};
-        use sources::games::{epic_dl, gog_dl, here, sync::Progress};
-        let sources::Step::GameSync { platform, game, name, dest, mode, label } = step else { return Ok(true) };
-        let p = Platform::from_key(platform).ok_or_else(|| anyhow!("Unknown platform {platform}"))?;
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let watcher = {
-            let cancel = cancel.clone();
-            let mut c = ctl.clone();
-            tauri::async_runtime::spawn(async move {
-                until_canceled(&mut c).await;
-                cancel.store(true, Ordering::Relaxed);
-            })
-        };
-        // The folder exists and is listed before the first file lands, so a rescan meanwhile keeps
-        // it, and an install that stops halfway is found again and continued by Retry.
-        let new_install = *mode == sources::games::sync::Mode::Install;
-        if new_install {
-            here::begin_install(dest, platform, game).map_err(|e| anyhow!("Could not create {}: {e}", dest.display()))?;
-        }
-        here::remember(dest);
-        self.set_job(id, |j| {
-            j.state = JobState::Downloading;
-            j.step = label.clone();
-            j.detail = format!("Asking {} for the game's files", p.name());
-            j.cancelable = true;
-        });
-        let me = self.clone();
-        let jid = id.to_string();
-        // (when, bytes) of the last report, and the smoothed speed
-        let pace = Mutex::new((Instant::now(), 0u64, 0.0f64));
-        let progress = move |pr: Progress| {
-            let speed = {
-                let mut pc = pace.lock();
-                let dt = pc.0.elapsed().as_secs_f64();
-                if dt >= 0.5 {
-                    let inst = pr.done_bytes.saturating_sub(pc.1) as f64 / dt;
-                    pc.2 = if pc.2 == 0.0 { inst } else { pc.2 * 0.8 + inst * 0.2 };
-                    *pc = (Instant::now(), pr.done_bytes, pc.2);
-                }
-                pc.2
-            };
-            let frac = if pr.total_bytes > 0 { (pr.done_bytes as f64 / pr.total_bytes as f64).min(1.0) } else { 0.0 };
-            me.set_job(&jid, |j| {
-                j.downloaded = pr.done_bytes;
-                j.total = pr.total_bytes;
-                j.speed = speed;
-                j.eta = (speed > 1.0 && pr.total_bytes > pr.done_bytes).then(|| (pr.total_bytes - pr.done_bytes) as f64 / speed);
-                j.progress = 0.02 + 0.95 * frac;
-                if !pr.step.is_empty() {
-                    j.step = pr.step.clone();
-                }
-                j.detail = if pr.files_total > 0 { format!("{} of {} files", thousands(pr.files_done as u64), thousands(pr.files_total as u64)) } else { String::new() };
-            });
-        };
-        let r = match p {
-            Platform::Epic => {
-                let s = accounts::epic::access().await?;
-                let o = accounts::games::owned(&accounts::games::game_id(p, game)).ok_or_else(|| anyhow!("{name} is not in your Epic Games library. Sign in to Epic Games again in Settings."))?;
-                let g = epic_dl::EpicRef { namespace: o.namespace, catalog_item: o.catalog_item, app_name: o.id };
-                epic_dl::sync(&s.access_token, &g, name, dest, *mode, &progress, &cancel).await
-            }
-            Platform::Gog => {
-                let s = accounts::gog::access().await?;
-                let pid: u64 = game.parse().map_err(|_| anyhow!("{name} has no GOG product id"))?;
-                let lang = self.settings.read().language.replace('_', "-");
-                // A download can outlast the session: GOG's engine asks for a new one when told
-                // it ran out.
-                let renew: Arc<dyn Fn() -> Option<String> + Send + Sync> = Arc::new(|| tokio::task::block_in_place(|| tauri::async_runtime::handle().block_on(accounts::gog::renewed())).ok().map(|s| s.access_token));
-                let opts = gog_dl::Options { fresh_token: Some(renew), ..Default::default() };
-                gog_dl::sync_with(&s.access_token, pid, name, dest, *mode, &lang, &opts, &progress, &cancel).await
-            }
-            Platform::Steam => Err(anyhow!("Steam installs its own games")),
-        };
-        watcher.abort();
-        // A new install canceled leaves nothing behind: its folder was new (or empty) when the
-        // install was planned, so all in it is this install's. One that failed keeps what it
-        // checked, for Retry to go on from.
-        let canceled = cancel.load(Ordering::Relaxed) || r.as_ref().err().is_some_and(|e| format!("{e}").starts_with("CANCELED|"));
-        if new_install && canceled {
-            let d = dest.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                let _ = std::fs::remove_dir_all(&d);
-                here::forget(&d);
-            })
-            .await;
-        } else if new_install && r.is_ok() {
-            here::end_install(dest);
-        }
-        match r {
-            Ok(rep) => {
-                log::info!("{name}: {:?} to {} ({} downloaded, {} files written, {} repaired)", mode, rep.version, rep.bytes_downloaded, rep.files_written, rep.files_repaired);
-                Ok(true)
-            }
-            Err(_) if cancel.load(Ordering::Relaxed) => Ok(false),
-            Err(e) if format!("{e}").starts_with("CANCELED|") => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
     async fn make_plan(&self, req: &JobRequest) -> Result<Plan> {
         let s = self.settings.read().clone();
         let installed = self.st.lock().installed.clone();
@@ -3336,9 +3151,6 @@ impl Core {
                 let inst = installed.iter().find(|i| &i.id == app_id).cloned().ok_or_else(|| anyhow!("That app is no longer installed"))?;
                 let latest = self.st.lock().latest.get(app_id).map(|l| l.version.clone());
                 match &inst.data {
-                    // A game this app installed updates and repairs here; a launcher's in its launcher.
-                    SourceData::Game(g) if sources::games::here::is_here(g) => crate::accounts::games::plan_sync(&inst, if repair { sources::games::sync::Mode::Repair } else { sources::games::sync::Mode::Update }),
-                    SourceData::Game(g) => Err(anyhow!("{} updates {}: open it there to update it.", inst.name, sources::games::through(g.launcher))),
                     SourceData::Adobe { sap, platform, .. } => {
                         let cat = self.adobe.read().clone().ok_or_else(|| anyhow!("The Adobe catalog could not be loaded. Check your connection."))?;
                         let target = if repair { inst.version.clone() } else { version.clone().or(latest).unwrap_or_else(|| inst.version.clone()) };
@@ -3463,11 +3275,6 @@ impl Core {
                         let root = Some(s.install_root.trim()).filter(|r| !r.is_empty()).map(PathBuf::from);
                         other::plan_install_in(id, version.as_deref(), feed.as_deref(), root.as_deref()).await
                     }
-                    // A game the user owns on a platform they signed in to.
-                    "game" => {
-                        let o = crate::accounts::games::owned(id).ok_or_else(|| anyhow!("That game is not in your libraries. Sign in to its platform in Settings."))?;
-                        crate::accounts::games::plan_install(&o, &crate::accounts::games::games_root(&s.games_dir))
-                    }
                     _ => Err(anyhow!("Unknown app {id}")),
                 }
             }
@@ -3485,10 +3292,6 @@ impl Core {
                     Source::Other => other::plan_uninstall(inst),
                     Source::Programs => crate::uninstall::run::plan(inst),
                     Source::Drivers => Err(anyhow!("Drivers are not uninstalled here")),
-                    Source::Games => match crate::accounts::games::plan_uninstall_here(inst) {
-                        Some(p) => Ok(p),
-                        None => sources::games::plan_uninstall_with(inst, &winutil::uninstall_entries()),
-                    },
                 }?;
                 // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Other
                 // apps: nothing is known about what they keep there, so their folder only goes when
@@ -3945,14 +3748,6 @@ impl Core {
         let runs_key = runs_key(plan);
         let hint = self.persisted.lock().install_runs.get(&runs_key).and_then(|r| install_detail::usual_time(r.secs, r.runs));
         for (k, step) in plan.steps.iter().enumerate() {
-            // A game from its platform: downloaded and checked by the app itself, with real
-            // progress (no installer runs).
-            if let sources::Step::GameSync { .. } = step {
-                if !self.run_game_sync(id, step, ctl.clone()).await? {
-                    return Ok(Outcome::Canceled);
-                }
-                continue;
-            }
             let label = if n > 1 { format!("{}, step {} of {}", step.label(), k + 1, n) } else { step.label().to_string() };
             let files = match step {
                 sources::Step::ExtractZip { zip, .. } => {
@@ -4517,7 +4312,7 @@ fn set_control(tx: &watch::Sender<Control>, c: Control) {
 /// the long part, unpacking is shorter, and removing leftovers or writing a file is quick.
 fn step_weight(step: &sources::Step) -> f64 {
     match step {
-        sources::Step::Run { .. } | sources::Step::OpenUri { .. } | sources::Step::AddPackage { .. } | sources::Step::RemovePackage { .. } | sources::Step::GameSync { .. } => 1.0,
+        sources::Step::Run { .. } | sources::Step::OpenUri { .. } | sources::Step::AddPackage { .. } | sources::Step::RemovePackage { .. } => 1.0,
         sources::Step::ExtractZip { .. } => 0.5,
         sources::Step::RemoveDir { .. } => 0.1,
         _ => 0.02,
@@ -4778,8 +4573,6 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         manual_url: if manual || !installable { drivers::safe_link(e.vendor_url.clone()) } else { None },
         github: None,
         is_self: false,
-        game_here: false,
-        can_undo: false,
         channel: None,
         note: e.note.clone(),
         job_id,
@@ -4825,6 +4618,26 @@ fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u6
 #[cfg(test)]
 mod tests {
     use super::{update_notice, with_download_size};
+
+    #[test]
+    fn the_game_sign_ins_and_icons_left_on_this_pc_go() {
+        let root = std::env::temp_dir().join(format!("u3d-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (data, icons) = (root.join("data"), root.join("icons"));
+        std::fs::create_dir_all(data.join("accounts").join("web").join("steam")).unwrap();
+        std::fs::write(data.join("accounts").join("epic.bin"), b"sealed").unwrap();
+        std::fs::write(data.join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir_all(&icons).unwrap();
+        for f in ["owned-1a2b.png", "game-steam-440.jpg", "obs.png"] {
+            std::fs::write(icons.join(f), b"x").unwrap();
+        }
+        super::forget_game_data(&data, &icons);
+        assert!(!data.join("accounts").exists());
+        assert!(data.join("settings.json").is_file());
+        let left: Vec<String> = std::fs::read_dir(&icons).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, vec!["obs.png".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use super::{folder_bytes, install_curve, leftover_dir, rum_watch, set_control, status_refresh_due, under_program_files, with_version, TICK_SECS};
     use crate::download::Control;
 
