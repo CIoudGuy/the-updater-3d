@@ -17,8 +17,6 @@ pub enum Source {
     Programs,
     /// Device drivers, the chipset and the BIOS.
     Drivers,
-    /// Games and apps installed through a game launcher (Steam, Epic Games, Ubisoft Connect...).
-    Games,
 }
 
 impl Source {
@@ -31,7 +29,6 @@ impl Source {
             Source::Other => "Other apps",
             Source::Programs => "Other programs",
             Source::Drivers => "Drivers",
-            Source::Games => "Games",
         }
     }
 }
@@ -90,13 +87,6 @@ pub struct AppEntry {
     /// it updates itself its own way.
     #[serde(default)]
     pub is_self: bool,
-    /// A game this app installed from Epic Games or GOG: it updates, repairs and undoes here, not
-    /// in a launcher.
-    #[serde(default)]
-    pub game_here: bool,
-    /// A game here whose last update or repair can be put back ("Undo last update")
-    #[serde(default)]
-    pub can_undo: bool,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,
@@ -341,9 +331,6 @@ pub struct Sources {
     /// Drivers, the chipset and the BIOS. On by default.
     #[serde(default = "yes")]
     pub drivers: bool,
-    /// Games from the game launchers on this PC. On by default.
-    #[serde(default = "yes")]
-    pub games: bool,
 }
 
 fn yes() -> bool {
@@ -382,9 +369,6 @@ pub struct Settings {
     /// Where new apps from the catalog are installed when their installer can be told (each in
     /// its own folder); empty: where each installer puts it. Updates keep an app where it is.
     pub install_root: String,
-    /// Where games from Epic Games and GOG are installed (each in its own folder); empty: a
-    /// "Games" folder on the Windows drive.
-    pub games_dir: String,
     pub blender_channel: String,
     pub blender_keep_patch_versions: bool,
     pub craft_prereleases: bool,
@@ -421,12 +405,11 @@ impl Default for Settings {
             godot_install_dir: format!("{}\\Programs\\Godot", std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\Users\\Public\\AppData\\Local".into())),
             download_dir: String::new(),
             install_root: String::new(),
-            games_dir: String::new(),
             blender_channel: "beta".into(),
             blender_keep_patch_versions: false,
             craft_prereleases: false,
             show_installed_in_get_apps: false,
-            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true, games: true },
+            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true },
             parallel_downloads: 2,
             silent_elevation: true,
             ui_zoom: 1.0,

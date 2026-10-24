@@ -26,7 +26,7 @@ async fn detects_installed_apps_and_finds_latest_versions() {
             updater_lib::model::Source::Craft => craft::latest(i, &feed),
             updater_lib::model::Source::Blender => blender::latest(i, &all, &bfeed),
             updater_lib::model::Source::Tools => tools::latest(i, &all, &tfeed),
-            updater_lib::model::Source::Other | updater_lib::model::Source::Programs | updater_lib::model::Source::Drivers | updater_lib::model::Source::Games => None,
+            updater_lib::model::Source::Other | updater_lib::model::Source::Programs | updater_lib::model::Source::Drivers => None,
         };
         let l = latest.as_ref().map(|l| l.version.clone()).unwrap_or_else(|| "?".into());
         let mark = if latest.as_ref().is_some_and(|l| version::newer(&l.version, &i.version)) { "UPDATE" } else { "" };
@@ -101,7 +101,7 @@ async fn version_history_works_for_every_installed_app() {
             updater_lib::sources::SourceData::Craft { key, .. } => craft::versions(key, Some(&i.version), false).await.unwrap_or_default(),
             updater_lib::sources::SourceData::Blender { .. } => blender::versions(i, &bfeed).await.unwrap_or_default(),
             updater_lib::sources::SourceData::Tools { .. } => tools::versions(i, &tfeed).await.unwrap_or_default(),
-            updater_lib::sources::SourceData::Other { .. } | updater_lib::sources::SourceData::Game(_) => vec![],
+            updater_lib::sources::SourceData::Other { .. } => vec![],
         };
         let installed = list.iter().any(|v| v.installed);
         println!("{:<26} {} versions, installed marked: {installed}", i.name, list.len());

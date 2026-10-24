@@ -699,41 +699,6 @@ fn bbcode_text(s: &str) -> String {
     TAG.replace_all(&t, "").into_owned()
 }
 
-/// One of a game's official Steam announcements.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NewsItem {
-    pub gid: String,
-    pub title: String,
-    pub date: Option<String>,
-    pub lines: Vec<String>,
-}
-
-/// A game's official announcements in Steam's news answer (its own posts, not press feeds),
-/// newest first, each with its text as lines.
-pub fn steam_news_items(json: &str) -> Vec<NewsItem> {
-    let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
-    let mut out: Vec<NewsItem> = v["appnews"]["newsitems"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|n| n["feedname"].as_str() == Some("steam_community_announcements") || n["feed_type"].as_i64() == Some(1))
-        .filter_map(|n| {
-            let title = n["title"].as_str()?.trim().to_string();
-            if title.is_empty() {
-                return None;
-            }
-            Some(NewsItem {
-                gid: n["gid"].as_str().unwrap_or("").to_string(),
-                title,
-                date: n["date"].as_i64().and_then(|d| chrono::DateTime::from_timestamp(d, 0)).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-                lines: text_lines(&bbcode_text(n["contents"].as_str().unwrap_or(""))),
-            })
-        })
-        .collect();
-    out.sort_by(|a, b| b.date.cmp(&a.date));
-    out
-}
-
 /// The Steam news item for release `ver` (a title such as "Modeler 1.22.7" or "1.18 Release"),
 /// the longest when several name it.
 pub fn steam_news(json: &str, ver: &str) -> Option<Notes> {

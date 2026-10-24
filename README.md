@@ -57,7 +57,6 @@ Finds what you have, shows what changed, and updates everything in one click.
 | **Blender** | Every release series side by side, LTS, betas | download.blender.org, builder.blender.org |
 | **Craft apps** | ArtCraft and the Craft apps (PhotoCraft, VectorCraft, FilmCraft and more) | ArtCraft's releases |
 | **More apps** | OBS Studio, Krita, FreeCAD, Godot, Unity Editor, Unity Hub, Epic Games Launcher (Preview) | Each project's own releases |
-| **Games** | Your Steam, Epic Games and GOG libraries once you sign in (Epic Games and GOG games install, update, repair and undo their last update here), and the games of Ubisoft Connect, EA app, Battle.net, Amazon Games, itch and Rockstar on the PC | The platforms' own sign-in and libraries, the launchers' files on the PC, Steam news, GOG changelogs |
 | **Other apps** | 15,000+ Windows apps: browsers, chat, dev tools, media, utilities, including app packages (MSIX) like Affinity | Microsoft's public winget catalog |
 | **Everything else** | Any other program on the PC, for uninstalling and cleanup | Windows' list of installed programs |
 
@@ -115,6 +114,6 @@ Built with [Tauri 2](https://tauri.app): a Rust backend and a Svelte 5 interface
 
 [MIT](LICENSE). Adobe, Creative Cloud, Photoshop and Substance are trademarks of Adobe. Blender is
 a trademark of the Blender Foundation. This project is not affiliated with Adobe, the Blender
-Foundation, ArtCraft, Epic Games, Valve, GOG or Microsoft.
+Foundation, ArtCraft, Epic Games or Microsoft.
 
 Made with AI.

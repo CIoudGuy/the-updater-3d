@@ -78,7 +78,7 @@
     <div class="ttl">
       <span class="nm">The Updater 3D</span>
       <span class="ver" title={version}>{verSplit[0]}{#if verSplit[1]}<span class="vb">{verSplit[1]}</span>{/if}</span>
-      <span class="note">Keeps your apps, games and drivers up to date. It updates itself the same way.</span>
+      <span class="note">Keeps your apps and drivers up to date. It updates itself the same way.</span>
     </div>
     <div class="side">
       <span class="stl" style:color={statusTint}><Dab color={statusTint} pulse={ui.selfUpdating} />{statusLine}</span>

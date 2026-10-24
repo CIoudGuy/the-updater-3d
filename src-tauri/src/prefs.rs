@@ -94,7 +94,6 @@ pub fn steps(inst: &Installed, others: &[Installed], r: &Roots) -> Vec<Step> {
     let same_tool = |key: &str| others.iter().any(|o| matches!(&o.data, SourceData::Tools { key: k, .. } if k == key));
     match &inst.data {
         // A launcher keeps a game's saves and settings: never touched here.
-        SourceData::Game(_) => {}
         SourceData::Adobe { sap, .. } => {
             // Creative Cloud is never uninstalled here; its data is shared by every Adobe app.
             if sap != "KCCC" {

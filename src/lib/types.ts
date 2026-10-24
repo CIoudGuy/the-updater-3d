@@ -2,7 +2,7 @@
 // Field names are camelCase on both sides (serde rename_all = "camelCase").
 
 /** "programs": any other program in Windows' list of installed programs (uninstall only). */
-export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs" | "drivers" | "games";
+export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs" | "drivers";
 
 export type AppStatus =
   | "current" // installed and up to date
@@ -57,10 +57,6 @@ export interface AppEntry {
   github?: string | null;
   /** The Updater 3D itself: its page is the app's own page, and it updates itself its own way. */
   isSelf?: boolean;
-  /** A game this app installed from Epic Games or GOG: it updates, repairs and undoes here, not in a launcher. */
-  gameHere?: boolean;
-  /** A game here whose last update or repair can be put back. */
-  canUndo?: boolean;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */
@@ -96,29 +92,6 @@ export interface CatalogEntry {
 }
 
 /** The Updater 3D itself, for its own page. */
-/** A game platform the user can sign in to. */
-export type Platform = "steam" | "epic" | "gog";
-
-/** The first step of a sign-in: signed in already (the Steam window), a code to paste from the browser (Epic Games, GOG), or a QR code for the Steam mobile app (an image address). */
-export type SignInStep = { kind: "done"; account: AccountInfo } | { kind: "paste" } | { kind: "qr"; image: string };
-
-export interface AccountInfo {
-  platform: Platform;
-  /** "Steam", "Epic Games", "GOG" */
-  title: string;
-  signedIn: boolean;
-  /** The account's name on the platform, when signed in */
-  name: string | null;
-  /** Games in the library */
-  games: number;
-  /** When the library was last read (ISO) */
-  syncedAt: string | null;
-  /** Installs and updates its games here (not only in its launcher) */
-  installsHere: boolean;
-  /** Why the library could not be read the last time ("Sign in to Steam again") */
-  problem: string | null;
-}
-
 export interface SelfInfo {
   version: string;
   installDir: string | null;
@@ -316,8 +289,6 @@ export interface Settings {
   downloadDir?: string;
   /** Where new apps from the catalog are installed when their installer can be told; empty: where each installer puts it */
   installRoot?: string;
-  /** Where Epic Games and GOG games are installed (each in its own folder); empty: "Games" on the Windows drive */
-  gamesDir?: string;
   /** "beta" (default) also lists Blender alpha, beta and release candidate builds; "stable" hides them */
   blenderChannel: "stable" | "beta";
   /** Bug-fix releases (5.2.2 -> 5.2.3) keep the old copy instead of replacing it */
@@ -328,7 +299,7 @@ export interface Settings {
   showInstalledInGetApps: boolean;
   /** Which sources are enabled */
   /** `other`: every other app, matched from the public winget catalog (off by default) */
-  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean; drivers?: boolean; games?: boolean };
+  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean; drivers?: boolean };
   /** Number of parallel downloads */
   parallelDownloads: number;
   /** One UAC prompt ever instead of one per batch (registers an elevated task) */
@@ -400,8 +371,6 @@ export interface EventMap {
   other_details: OtherDetail[];
   /** Other apps icons found in the background, a few at a time */
   other_icons: OtherIcon[];
-  /** Steam changed its sign-in QR code: the new picture to show */
-  account_qr: string;
 }
 
 /** A found icon for a Get apps entry. */

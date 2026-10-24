@@ -3054,12 +3054,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "qrcode"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
-
-[[package]]
 name = "quick-xml"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3760,17 +3754,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
-]
-
-[[package]]
-name = "sha1"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.1",
- "digest 0.11.3",
 ]
 
 [[package]]
@@ -4494,7 +4477,7 @@ dependencies = [
 
 [[package]]
 name = "the-updater-3d"
-version = "1.2.2"
+version = "1.2.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4509,14 +4492,12 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "png",
- "qrcode",
  "regex",
  "reqwest 0.12.28",
  "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",
- "sha1",
  "sha2 0.11.1",
  "sysinfo",
  "tauri",

@@ -1,4 +1,3 @@
-pub mod accounts;
 pub mod commands;
 pub mod core;
 pub mod download;
@@ -205,14 +204,6 @@ pub fn run() {
             commands::icons_in_view,
             commands::note_image,
             commands::self_info,
-            commands::accounts,
-            commands::account_sign_in,
-            commands::account_code,
-            commands::account_wait,
-            commands::account_cancel,
-            commands::account_sign_out,
-            commands::account_sync,
-            commands::game_undo,
             commands::self_versions,
             commands::quit_app,
             commands::leftover_scan,

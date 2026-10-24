@@ -14,14 +14,9 @@
   import { enter, reduced, rise } from "../lib/motion";
   import type { AppEntry, AppStatus } from "../lib/types";
   import { groupOrAll, installedNone } from "../lib/view";
-  import { call } from "../lib/api";
-  import { router } from "../lib/router.svelte";
 
   let searchInput = $state<HTMLInputElement>();
-  /** Not signed in to Steam, Epic Games or GOG: their games show once signed in (Settings, Games). */
-  let signedNone = $state(false);
   onMount(() => {
-    if (store.settings.sources.games) call("accounts", {}).then((a) => (signedNone = a.every((x) => !x.signedIn))).catch(() => {});
     ui.searchEl = searchInput ?? null;
     return () => {
       if (ui.searchEl === searchInput) ui.searchEl = null;
@@ -36,7 +31,6 @@
   const inScope = $derived(store.apps);
   const programCount = $derived(store.apps.filter((a) => a.source === "programs").length);
   const driverCount = $derived(store.apps.filter((a) => a.source === "drivers").length);
-  const gameCount = $derived(store.apps.filter((a) => a.source === "games").length);
   // a source filter whose last app was uninstalled falls back to All, like in Get apps
   const presentGroups = $derived(GROUPS.filter((g) => inScope.some((a) => a.group === g)));
   const group = $derived(groupOrAll(ui.group, presentGroups));
@@ -51,7 +45,6 @@
     scoped.filter((a) => {
       if (ui.filter === "updates") return a.status === "update";
       if (ui.filter === "drivers") return a.source === "drivers";
-      if (ui.filter === "games") return a.source === "games";
       if (ui.filter === "recent") return !!a.updatedAt && Date.now() - +new Date(a.updatedAt) < RECENT_MS;
       return true;
     }),
@@ -84,7 +77,6 @@
   const filterOpts = $derived([
     { value: "updates" as InstalledFilter, label: ui.compact ? "Updates" : "Updates available", badge: updatesCount || "", badgeColor: "var(--warn)" },
     { value: "all" as InstalledFilter, label: "All", badge: inScope.length },
-    ...(gameCount ? [{ value: "games" as InstalledFilter, label: "Games", badge: gameCount }] : []),
     ...(driverCount ? [{ value: "drivers" as InstalledFilter, label: "Drivers", badge: driverCount }] : []),
     { value: "recent" as InstalledFilter, label: ui.compact ? "Recent" : "Recently updated" },
   ]);
@@ -177,10 +169,6 @@
         </div>
       {/each}
     </div>
-  {/if}
-
-  {#if signedNone && !q && (ui.filter === "all" || ui.filter === "games")}
-    <p class="none signin">Your Steam, Epic Games and GOG games show here once you sign in to them.<button class="lnk" onclick={() => router.go("#/settings/games")}>Sign in</button></p>
   {/if}
 
   {#if ui.selecting}
