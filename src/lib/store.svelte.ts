@@ -4,6 +4,7 @@ import type { ActivityEntry, AppEntry, AppStatus, Job, Settings, Status } from "
 import { driveOf } from "./format";
 import { currentBatch } from "./batch";
 import { tryLoad } from "./load";
+import { splitMissing } from "./view";
 
 const defaultSettings: Settings = {
   checkInterval: 4,
@@ -106,7 +107,10 @@ class Store {
   /** Updates that install here (a BIOS is updated from its maker's page) */
   updates = $derived(this.apps.filter((a) => a.status === "update" && !a.manualUrl));
   updatesBytes = $derived(this.updates.reduce((n, a) => n + (a.updateSize ?? 0), 0));
-  missing = $derived(this.apps.filter((a) => a.status === "missing"));
+  /** Apps whose files are gone that a reinstall brings back. A removed program whose entry was left behind is a leftover, not a repair. */
+  missing = $derived(splitMissing(this.apps).repair);
+  /** Programs that were removed but left their entry in Windows' list (their files and uninstaller are gone) */
+  leftovers = $derived(splitMissing(this.apps).leftovers);
   openJobs = $derived(this.jobs.filter((j) => isOpenState(j.state)));
   runningJobs = $derived(this.jobs.filter((j) => isRunningState(j.state)));
   finishedJobs = $derived(this.jobs.filter((j) => j.state === "done" || j.state === "failed" || j.state === "canceled"));

@@ -82,7 +82,7 @@ pub async fn publisher_notes(home: &str, ver: &str) -> Option<(String, Vec<Strin
     }
     for link in changelog_links(home, &html, 2) {
         if let Some(body) = notes::page(&link).await {
-            let lines = notes::page_notes_at(&link, &body, ver);
+            let lines = crate::render::page_notes(&link, &body, ver).await;
             if !lines.is_empty() {
                 return Some((link, lines));
             }
