@@ -51,6 +51,8 @@ export interface AppEntry {
   storeUrl: string | null;
   /** Updated from its maker's own page, not here (a BIOS, or a card whose maker was not reached): the page to open */
   manualUrl?: string | null;
+  /** An Other program updated from its GitHub releases: "owner/repo" */
+  github?: string | null;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */

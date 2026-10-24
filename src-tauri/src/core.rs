@@ -3,7 +3,7 @@
 use crate::download::{self, Control, Outcome, Progress, Throttle};
 use crate::elevate::Elevator;
 use crate::model::*;
-use crate::sources::{self, adobe, blender, board, chipset, craft, drivers, other, tools, Installed, Latest, Plan, SourceData, Verify};
+use crate::sources::{self, adobe, blender, board, chipset, craft, drivers, ghapps, other, tools, Installed, Latest, Plan, SourceData, Verify};
 use crate::store::{self, Persisted};
 use crate::{install_detail, paths, procs, version, winutil};
 use anyhow::{anyhow, Result};
@@ -592,6 +592,8 @@ pub struct Core {
     pub blender: RwLock<Option<Arc<blender::Feed>>>,
     pub tools: RwLock<Option<Arc<tools::Feed>>>,
     pub other: RwLock<Option<Arc<other::Feed>>>,
+    /// Releases of the GitHub projects that Other programs name (see `ghapps`)
+    pub ghapps: RwLock<Option<Arc<ghapps::Feed>>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
     /// Bumped by "Allow admin rights": the jobs waiting for admin rights try again.
@@ -663,6 +665,7 @@ impl Core {
             blender: RwLock::new(None),
             tools: RwLock::new(None),
             other: RwLock::new(None),
+            ghapps: RwLock::new(None),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
             admin_gen: watch::channel(0).0,
@@ -852,6 +855,13 @@ impl Core {
         notice::show(&self.app, title, body, sound, &target);
     }
 
+    /// The window was closed and the app keeps running in the background. Clicking the notice
+    /// opens the window again.
+    pub fn tell_still_running(&self, busy: bool) {
+        let (title, body) = still_running_notice(busy);
+        self.notify(title, body, Target::Home);
+    }
+
     fn activity(&self, kind: ActivityKind, title: impl Into<String>, meta: Option<String>, app_id: Option<String>, error: Option<JobError>) {
         let e = store::activity(kind, title, meta, app_id, error);
         self.emit("activity", e);
@@ -938,10 +948,13 @@ impl Core {
         let recorded = self.persisted.lock().updated_at.clone();
         let driver_list: Vec<drivers::Found> = if self.settings.read().sources.drivers { self.drivers.lock().found.clone() } else { vec![] };
         let ignored = self.settings.read().ignored.clone();
+        let gh = self.ghapps.read().clone();
         let st = self.st.lock();
         let jobs = self.jobs.lock();
         let mut out = Vec::new();
         for i in &st.installed {
+            // An Other program whose GitHub releases were read: updated like Other apps.
+            let gh_feed = gh.as_deref().filter(|f| i.source == Source::Programs && f.get(&i.id).is_some());
             let job = jobs.iter().rev().find(|j| j.job.app_id == i.id && !j.job.state.is_finished()).map(|j| &j.job);
             let latest = st.latest.get(&i.id);
             let is_beta = i.channel.as_deref() == Some("beta");
@@ -977,7 +990,7 @@ impl Core {
             } else {
                 None
             };
-            let can_rollback = !i.read_only && i.source != Source::Programs && !matches!(i.data, SourceData::Blender { kind: sources::BlenderKind::Beta, .. });
+            let can_rollback = !i.read_only && (i.source != Source::Programs || gh_feed.is_some_and(|f| ghapps::can_roll_back(i, f))) && !matches!(i.data, SourceData::Blender { kind: sources::BlenderKind::Beta, .. });
             out.push(AppEntry {
                 id: i.id.clone(),
                 source: i.source,
@@ -1001,7 +1014,7 @@ impl Core {
                 install_dir: i.install_dir.as_ref().map(|d| d.display().to_string()),
                 updated_at: newest_update(recorded.get(&i.id).map(String::as_str), i.updated_at.as_deref()),
                 tagline: i.tagline.clone(),
-                group: i.source.group().into(),
+                group: if gh_feed.is_some() { Source::Other.group().into() } else { i.source.group().into() },
                 running: is_running,
                 can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
@@ -1009,7 +1022,8 @@ impl Core {
                 // Only for copies the Store updates: a sideloaded app package is updated here.
                 store_url: i.store.as_ref().filter(|_| i.read_only).map(|s| s.page_url()),
                 channel: i.channel.clone(),
-                manual_url: None,
+                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)),
+                github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
                 note,
                 job_id: job.map(|j| j.id.clone()),
             });
@@ -1230,6 +1244,12 @@ impl Core {
     /// The maker's page for a driver that is updated from there (a BIOS), or the maker's own
     /// updater for a card whose maker was not reached.
     pub fn driver_page(&self, id: &str) -> Option<String> {
+        // An Other program's newest release that only downloads from its GitHub page.
+        if id.starts_with("prog:") {
+            let inst = self.installed(id)?;
+            let feed = self.ghapps.read().clone()?;
+            return ghapps::manual_page(&inst, &feed).filter(|u| drivers::host_is(u, &["github.com"]));
+        }
         self.drivers.lock().found.iter().find(|f| f.entry.id == id).and_then(|f| drivers::safe_link(f.entry.vendor_url.clone()))
     }
 
@@ -1306,6 +1326,7 @@ impl Core {
         let bf = self.blender.read().clone();
         let tf = self.tools.read().clone();
         let of = self.other.read().clone();
+        let gf = self.ghapps.read().clone();
         let keep_patch = self.settings.read().blender_keep_patch_versions;
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
@@ -1316,8 +1337,8 @@ impl Core {
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
                 Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
-                // Listed to uninstall them; no catalog knows their versions.
-                Source::Programs => None,
+                // Listed to uninstall them; no catalog knows their versions, their GitHub project may.
+                Source::Programs => gf.as_ref().and_then(|f| ghapps::latest(i, f)),
                 // Not in the installed list: the driver check has their versions.
                 Source::Drivers => None,
             };
@@ -1587,7 +1608,15 @@ impl Core {
                 }
             }
         };
-        let (a, c, b, t, o) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f);
+        // Other programs that name their GitHub project (the list from the scan above).
+        let gh_f = async {
+            if !settings.sources.other {
+                return None;
+            }
+            Some(Arc::new(ghapps::fetch(&installed).await))
+        };
+        let (a, c, b, t, o, g) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f, gh_f);
+        *self.ghapps.write() = g;
         if a.is_some() {
             *self.adobe.write() = a;
         } else if settings.sources.adobe {
@@ -1856,7 +1885,9 @@ impl Core {
             async { if settings.sources.tools { tools::fetch(&installed).await.ok() } else { None } },
             async { if settings.sources.other { other::fetch(&catalog_apps(&installed), None).await.ok() } else { None } },
         );
+        let g = if settings.sources.other { Some(Arc::new(ghapps::fetch(&installed).await)) } else { None };
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
+        *self.ghapps.write() = g;
         if settings.sources.other && crate::machine::tuned().prebuild_browse && self.window_open() {
             // The whole catalog list for Other apps, built now so the first page in Get apps is
             // quick. Not while only the tray runs (it would only be dropped again), nor on a low
@@ -2343,8 +2374,8 @@ impl Core {
         }
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
         if inst.source == Source::Programs {
-            // No catalog knows its versions: only the one installed.
-            return Ok(vec![]);
+            // No catalog knows its versions: its GitHub releases, when it names its project.
+            return Ok(self.ghapps.read().as_deref().map(|f| ghapps::versions(&inst, f)).unwrap_or_default());
         }
         let key = format!("app-{app_id}");
         // A copy saved before an update marks the old version as installed: not usable.
@@ -2806,6 +2837,14 @@ impl Core {
                         let kind = if repair { JobKind::Repair } else if version.as_ref().is_some_and(|v| tools::cmp_ver(&inst.version, v).is_gt()) { JobKind::Rollback } else { JobKind::Update };
                         let target = if repair { Some(inst.version.clone()) } else { version.clone().or(latest) };
                         tools::plan_install(&inst.id, target.as_deref(), kind, Some(&inst), &installed, &feed, tools::Ctx { godot_root: std::path::Path::new(&s.godot_install_dir) }).await
+                    }
+                    SourceData::Other { .. } if inst.source == Source::Programs => {
+                        if repair {
+                            return Err(anyhow!("Repair is not available for {}. Install the same version again from its page.", inst.name));
+                        }
+                        let feed = self.ghapps.read().clone();
+                        let kind = if version.as_ref().is_some_and(|v| tools::cmp_ver(&inst.version, v).is_gt()) { JobKind::Rollback } else { JobKind::Update };
+                        ghapps::plan_install(&inst, version.as_deref(), kind, feed.as_deref())
                     }
                     SourceData::Other { .. } => {
                         let feed = self.other.read().clone();
@@ -4079,6 +4118,17 @@ fn rescan_waits_for(j: &JobRec) -> bool {
 const NOTIFY_SOUND: &str = "Default";
 const FAILED_SOUND: &str = "Reminder";
 
+/// The notification shown when the window closes and the app keeps running ("Keep checking after
+/// you close the window" is on, or jobs are still in the queue).
+fn still_running_notice(busy: bool) -> (&'static str, &'static str) {
+    let body = if busy {
+        "It is finishing the queue. Click here to open it, or quit from its icon next to the clock."
+    } else {
+        "It keeps checking for updates. Click here to open it, or quit from its icon next to the clock."
+    };
+    ("The Updater 3D is still running", body)
+}
+
 /// The "updates ready" notification: the title counts every update waiting, the text names the
 /// ones the user has not heard about yet.
 fn update_notice(total: usize, fresh: &[String]) -> (String, String) {
@@ -4147,6 +4197,7 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         read_only: false,
         store_url: None,
         manual_url: if manual || !installable { drivers::safe_link(e.vendor_url.clone()) } else { None },
+        github: None,
         channel: None,
         note: e.note.clone(),
         job_id,
@@ -4205,6 +4256,23 @@ mod tests {
                 assert!(!src.contains(r), "{name} uses {r}");
             }
         }
+    }
+
+    #[test]
+    fn closing_the_window_says_the_app_still_runs_and_how_to_quit() {
+        for busy in [false, true] {
+            let (title, body) = super::still_running_notice(busy);
+            assert!(title.contains("still running"));
+            assert!(body.contains("quit from its icon"));
+            assert!(!body.contains('\u{2014}') && !body.contains('\u{2013}'));
+        }
+        assert!(super::still_running_notice(true).1.contains("queue"));
+        // The window's close handler sends it whenever the app stays open.
+        let lib = include_str!("lib.rs");
+        let close = lib.find("WindowEvent::CloseRequested").unwrap();
+        let keep = lib[close..].find("close_to_tray || busy").unwrap() + close;
+        let exit = lib[keep..].find("app.exit(0)").unwrap() + keep;
+        assert!(lib[keep..exit].contains("tell_still_running(busy)"));
     }
 
     /// Windows plays no sound for a toast without a sound name, and only knows a few names.

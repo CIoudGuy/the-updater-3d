@@ -77,6 +77,9 @@ pub struct AppEntry {
     /// Updated from its maker's own page, not here (a BIOS): the page to open
     #[serde(default)]
     pub manual_url: Option<String>,
+    /// An Other program updated from its GitHub releases: "owner/repo"
+    #[serde(default)]
+    pub github: Option<String>,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,

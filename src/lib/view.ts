@@ -8,6 +8,11 @@ export function splitMissing<T extends { status: string; source: string }>(apps:
   return { repair: gone.filter((a) => a.source !== "programs"), leftovers: gone.filter((a) => a.source === "programs") };
 }
 
+/** An Other program nothing gives updates for (no catalog lists it, it names no GitHub project): listed to uninstall it. */
+export function listedOnly(app: { source: string; github?: string | null }): boolean {
+  return app.source === "programs" && !app.github;
+}
+
 /** A source filter that points at a source with no apps left falls back to "all". */
 export function groupOrAll<T extends string>(group: T | "all", present: readonly T[]): T | "all" {
   return group !== "all" && present.includes(group as T) ? group : "all";

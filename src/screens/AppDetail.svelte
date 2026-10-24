@@ -20,6 +20,7 @@
   import { router } from "../lib/router.svelte";
   import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, setIgnored, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
+  import { listedOnly } from "../lib/view";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -132,7 +133,7 @@
   const lang = $derived(({ en_US: "English (US)", en_GB: "English (UK)", de_DE: "German", fr_FR: "French", es_ES: "Spanish", ja_JP: "Japanese" } as Record<string, string>)[store.settings.language] ?? store.settings.language);
   const statusLine = $derived.by(() => {
     if (!app) return "";
-    if (app.source === "programs" && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
+    if (listedOnly(app) && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
     if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
     if (!job && ignored) return app.latest && cmpVersion(app.latest, app.version) > 0 ? `Updates off, ${app.latest} is out` : "Updates off";
     switch (app.status) {
@@ -215,7 +216,7 @@
     {/if}
 
     <div class="cols">
-      {#if app.source === "programs" || (isDriver && versions?.length === 1 && !versions[0].notes.length && !versions[0].notesUrl)}
+      {#if listedOnly(app) || (isDriver && versions?.length === 1 && !versions[0].notes.length && !versions[0].notesUrl)}
       <section aria-label="About this program">
         {#if isDriver}
         <div class="sec-h"><span>About this driver</span></div>
@@ -272,7 +273,7 @@
       {/if}
 
       <aside aria-label="Details">
-        {#if !app.readOnly && app.source !== "programs" && !isDriver}
+        {#if !app.readOnly && !listedOnly(app) && !isDriver}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>
           <div class="pk">
@@ -287,6 +288,7 @@
 
         <dl>
           {#if app.source === "programs" && app.status !== "missing" && app.tagline}<dt>Publisher</dt><dd>{app.tagline}</dd>{/if}
+          {#if app.github}<dt>Updates from</dt><dd>GitHub releases of <span class="mono selectable">{app.github}</span></dd>{/if}
           {#if isDriver}
           <dt>Kind</dt>
           <dd>{app.tagline ?? "Driver"}</dd>
