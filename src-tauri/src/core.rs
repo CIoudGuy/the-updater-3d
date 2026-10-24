@@ -1099,7 +1099,7 @@ impl Core {
             }
             // Games before the catalog: a launcher's game is not an Other app or program.
             if s.sources.games {
-                v.extend(sources::games::scan().into_iter().map(sources::games::installed));
+                v.extend(sources::games::scan().into_iter().map(|g| sources::games::installed_with(g, &un)));
             }
             if s.sources.other {
                 let found = other::scan(&un, &v, of.as_deref());
@@ -3242,7 +3242,7 @@ impl Core {
                     Source::Other => other::plan_uninstall(inst),
                     Source::Programs => crate::uninstall::run::plan(inst),
                     Source::Drivers => Err(anyhow!("Drivers are not uninstalled here")),
-                    Source::Games => sources::games::plan_uninstall(inst),
+                    Source::Games => sources::games::plan_uninstall_with(inst, &winutil::uninstall_entries()),
                 }?;
                 // Whatever the vendor's uninstaller leaves in the app's own folder goes too. Other
                 // apps: nothing is known about what they keep there, so their folder only goes when
