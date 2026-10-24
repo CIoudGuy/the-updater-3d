@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherIcon, PrefsItem, SelfInfo, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { AccountInfo, ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherIcon, Platform, PrefsItem, SelfInfo, ServiceInfo, Settings, SignInStep, Snapshot, VersionInfo } from "./types";
 import type { OtherSort } from "./browse";
 
 export interface Commands {
@@ -45,6 +45,22 @@ export interface Commands {
   self_info: { args: {}; ret: SelfInfo };
   /** The Updater 3D's releases, newest first, with their notes. */
   self_versions: { args: {}; ret: VersionInfo[] };
+  /** The game platforms the user can sign in to (Steam, Epic Games, GOG), and how each stands. */
+  accounts: { args: {}; ret: AccountInfo[] };
+  /** Start a sign-in: Steam shows a QR code for its mobile app (account_wait finishes it), or with window signs in in a Steam window; Epic Games and GOG open their page in the browser, which then shows a code for account_code. Rejects with "CANCELED" when stopped. */
+  account_sign_in: { args: { platform: Platform; window?: boolean }; ret: SignInStep };
+  /** Wait until Steam's QR code is approved in the Steam mobile app. New codes come as the account_qr event. */
+  account_wait: { args: { platform: Platform }; ret: AccountInfo };
+  /** Finish an Epic Games or GOG sign-in with what the user pasted from the browser (the page's text, its address or the code). */
+  account_code: { args: { platform: Platform; text: string }; ret: AccountInfo };
+  /** Stop a sign-in that waits (Steam's QR code or window). */
+  account_cancel: { args: { platform: Platform }; ret: void };
+  /** Forget a platform's sign-in here; its games stop showing. */
+  account_sign_out: { args: { platform: Platform }; ret: void };
+  /** Read a platform's library again now. */
+  account_sync: { args: { platform: Platform }; ret: AccountInfo };
+  /** Put back the files a game's last update or repair changed; the version it is at again. */
+  game_undo: { args: { appId: string }; ret: string };
   /** Restart the PC in a minute to finish installing drivers. */
   restart_pc: { args: {}; ret: void };
   show_in_folder: { args: { appId: string }; ret: void };

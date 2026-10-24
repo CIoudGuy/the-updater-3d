@@ -1,6 +1,6 @@
 // Tiny hash router: #/home, #/installed, #/installed/<appId>, #/get, #/get/<catalogId>, #/queue, #/activity, #/services, #/settings/<section>, #/updater (this app's own page)
 export type RouteName = "home" | "installed" | "detail" | "get" | "getdetail" | "queue" | "activity" | "services" | "settings" | "self";
-export const SETTINGS_SECTIONS = ["general", "apps", "downloads", "startup", "cleanup", "adobe", "about"] as const;
+export const SETTINGS_SECTIONS = ["general", "apps", "games", "downloads", "startup", "cleanup", "adobe", "about"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 export interface Route {

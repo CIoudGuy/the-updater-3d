@@ -77,12 +77,13 @@
   const q = $derived(ui.getQuery.trim().toLowerCase());
   const s = $derived(store.settings);
 
-  type Group = "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps";
+  type Group = "Adobe" | "Craft apps" | "Blender" | "More apps" | "Games" | "Other apps";
   const SECTIONS: { group: Group; title: string; from: string; color: string; enabled: () => boolean }[] = [
     { group: "Adobe", title: "Adobe apps", from: "from Creative Cloud", color: "#D9706A", enabled: () => s.sources.adobe },
     { group: "Craft apps", title: "Craft apps", from: "from ArtCraft", color: "#D9B26A", enabled: () => s.sources.craft },
     { group: "Blender", title: "Blender", from: "from blender.org", color: "#E08A3C", enabled: () => s.sources.blender },
     { group: "More apps", title: "More apps", from: "OBS Studio, Krita, FreeCAD, Godot, Unity", color: "#6FB1E3", enabled: () => s.sources.tools },
+    { group: "Games", title: "Your games", from: "from Steam, Epic Games and GOG", color: "#9FC27A", enabled: () => !!s.sources.games },
     { group: "Other apps", title: "Other apps", from: "from Microsoft's winget catalog", color: "#8FA3B8", enabled: () => s.sources.other },
   ];
 

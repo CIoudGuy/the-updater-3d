@@ -14,9 +14,14 @@
   import { enter, reduced, rise } from "../lib/motion";
   import type { AppEntry, AppStatus } from "../lib/types";
   import { groupOrAll, installedNone } from "../lib/view";
+  import { call } from "../lib/api";
+  import { router } from "../lib/router.svelte";
 
   let searchInput = $state<HTMLInputElement>();
+  /** Not signed in to Steam, Epic Games or GOG: their games show once signed in (Settings, Games). */
+  let signedNone = $state(false);
   onMount(() => {
+    if (store.settings.sources.games) call("accounts", {}).then((a) => (signedNone = a.every((x) => !x.signedIn))).catch(() => {});
     ui.searchEl = searchInput ?? null;
     return () => {
       if (ui.searchEl === searchInput) ui.searchEl = null;
@@ -172,6 +177,10 @@
         </div>
       {/each}
     </div>
+  {/if}
+
+  {#if signedNone && !q && (ui.filter === "all" || ui.filter === "games")}
+    <p class="none signin">Your Steam, Epic Games and GOG games show here once you sign in to them.<button class="lnk" onclick={() => router.go("#/settings/games")}>Sign in</button></p>
   {/if}
 
   {#if ui.selecting}

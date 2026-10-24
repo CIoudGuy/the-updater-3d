@@ -64,7 +64,7 @@ export function installedNone(o: { query: string; filter: "updates" | "all" | "g
   }
   if (o.filter === "updates") return { text: "No updates available. Everything here is current.", showAll: true };
   if (o.filter === "drivers") return { text: "No drivers listed yet. They show once the next check is done.", showAll: true };
-  if (o.filter === "games") return { text: "No games found. Games from Steam, Epic Games, Ubisoft Connect and other launchers show here.", showAll: true };
+  if (o.filter === "games") return { text: "No games found. Games from Ubisoft Connect, EA app and the other launchers show here, and your Steam, Epic Games and GOG games once you sign in.", showAll: true };
   return { text: "Nothing here yet.", showAll: false };
 }
 

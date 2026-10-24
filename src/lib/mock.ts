@@ -3,6 +3,7 @@
 import type { Commands } from "./commands";
 import { matchRank } from "./browse";
 import type {
+  AccountInfo,
   ActivityEntry,
   AppEntry,
   BackupInfo,
@@ -522,9 +523,17 @@ function toolsId(key: string, version: string): string {
   return key === "godot" || key === "unity" ? `tools:${key}:${version}` : `tools:${key}`;
 }
 
+/** The games of the platforms signed in to ("Your games" in Get apps). */
+const OWNED: CatalogEntry[] = [
+  { id: "game:epic:fortnite", source: "games", group: "Games", name: "Fortnite", code: "Fo", fg: "#EDEDED", bg: "#2A2A2A", iconUrl: null, iconMiss: true, version: "42.40", size: null, tagline: "Your Epic Games game. Installs and updates here", description: null, blocked: null, installed: true, pickVersion: false, prerelease: false },
+  { id: "game:epic:sugar", source: "games", group: "Games", name: "Hades", code: "Ha", fg: "#EDEDED", bg: "#2A2A2A", iconUrl: null, iconMiss: true, version: "1.38290", size: null, tagline: "Your Epic Games game. Installs and updates here", description: null, blocked: null, installed: false, pickVersion: false, prerelease: false },
+  { id: "game:gog:1207658924", source: "games", group: "Games", name: "Unreal Tournament 2004", code: "Ut", fg: "#EDEDED", bg: "#2D1B3D", iconUrl: null, iconMiss: true, version: "", size: null, tagline: "Your GOG game. Installs and updates here", description: null, blocked: null, installed: false, pickVersion: false, prerelease: false },
+  { id: "game:steam:1174180", source: "games", group: "Games", name: "Red Dead Redemption 2", code: "Rd", fg: "#EDEDED", bg: "#1B2838", iconUrl: null, iconMiss: true, version: "", size: null, tagline: "Your Steam game. Installs in Steam", description: null, blocked: null, installed: false, pickVersion: false, prerelease: false },
+];
+
 /** Catalog as the backend would send it: installed flags follow the installed list. */
 function catalogNow(): CatalogEntry[] {
-  return CATALOG.map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id && !(a.jobId && a.status !== "current" && !a.updatedAt)) }));
+  return [...CATALOG, ...OWNED].map((e) => ({ ...e, installed: apps.some((a) => a.id === e.id && !(a.jobId && a.status !== "current" && !a.updatedAt)) }));
 }
 
 /** Pre-release builds the beta entry offers, newest first. */
@@ -544,6 +553,15 @@ const BLENDER_OLDER = ["5.1.2", "5.0.1", "4.5.6", "4.4.3", "4.3.2", "4.2.9", "4.
 let apps: AppEntry[] = [];
 let jobs: Job[] = [];
 let activity: ActivityEntry[] = [];
+/** A stand-in for Steam's QR code (a plain checkered square). */
+const MOCK_QR = "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" shape-rendering="crispEdges"><rect width="8" height="8" fill="#fff"/><path d="M1 1h2v2H1zM5 1h2v2H5zM1 5h2v2H1zM4 4h1v1H4zM5 5h1v1H5zM6 4h1v1H6z" fill="#000"/></svg>');
+
+const mockAccounts: AccountInfo[] = [
+  { platform: "steam", title: "Steam", signedIn: true, name: "Player", games: 214, syncedAt: iso(60 * MIN), installsHere: false, problem: null },
+  { platform: "epic", title: "Epic Games", signedIn: MODE !== "current", name: "Player", games: 87, syncedAt: iso(60 * MIN), installsHere: true, problem: MODE === "signin" ? "Sign in to Epic Games again" : null },
+  { platform: "gog", title: "GOG", signedIn: false, name: null, games: 0, syncedAt: null, installsHere: true, problem: null },
+];
+
 let settings: Settings = {
   checkInterval: 4,
   autoMode: "install",
@@ -567,7 +585,7 @@ let settings: Settings = {
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   showInstalledInGetApps: false,
-  sources: { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true, games: true },
   parallelDownloads: 3,
   silentElevation: true,
   uiZoom: 1,
@@ -1202,6 +1220,39 @@ const handlers: H = {
     { version: "1.1.8", date: iso(2 * DAY), notes: ["## New", "Programs from GitHub update here", "Icons for everything"], notesUrl: "https://github.com/CIoudGuy/the-updater-3d/releases/tag/v1.1.8", size: 7 * MB, installed: true, latest: MODE !== "selfupdate", prerelease: false },
     { version: "1.1.7", date: iso(3 * DAY), notes: ["Drivers, with your apps", "BIOS check"], notesUrl: "https://github.com/CIoudGuy/the-updater-3d/releases/tag/v1.1.7", size: 7 * MB, installed: false, latest: false, prerelease: false },
   ],
+  accounts: () => clone(mockAccounts),
+  account_sign_in: async ({ platform, window }) => {
+    if (platform !== "steam") return { kind: "paste" };
+    const a = mockAccounts.find((x) => x.platform === platform)!;
+    if (!window) return { kind: "qr", image: MOCK_QR };
+    await new Promise((r) => setTimeout(r, 2500));
+    Object.assign(a, { signedIn: true, name: "Player", games: 214, syncedAt: new Date().toISOString(), problem: null });
+    return { kind: "done", account: clone(a) };
+  },
+  account_wait: async ({ platform }) => {
+    await new Promise((r) => setTimeout(r, 6000));
+    const a = mockAccounts.find((x) => x.platform === platform)!;
+    Object.assign(a, { signedIn: true, name: "Player", games: 214, syncedAt: new Date().toISOString(), problem: null });
+    return clone(a);
+  },
+  account_code: async ({ platform, text }) => {
+    await new Promise((r) => setTimeout(r, 800));
+    if (!text.includes("code")) throw platform === "epic" ? "That is not the code Epic Games shows. After you sign in, copy all the text on its page and paste it here." : "That is not GOG's sign-in address. After you sign in, copy the address of the empty page GOG shows and paste it here.";
+    const a = mockAccounts.find((x) => x.platform === platform)!;
+    Object.assign(a, { signedIn: true, name: "Player", games: platform === "epic" ? 87 : 12, syncedAt: new Date().toISOString(), problem: null });
+    return clone(a);
+  },
+  account_cancel: () => {},
+  account_sign_out: ({ platform }) => {
+    const a = mockAccounts.find((x) => x.platform === platform)!;
+    Object.assign(a, { signedIn: false, name: null, games: 0, syncedAt: null, problem: null });
+  },
+  account_sync: ({ platform }) => {
+    const a = mockAccounts.find((x) => x.platform === platform)!;
+    a.syncedAt = new Date().toISOString();
+    return clone(a);
+  },
+  game_undo: () => "1.0.2",
   restart_pc: () => {},
   show_in_folder: () => {},
   get_versions: ({ appId }) => {

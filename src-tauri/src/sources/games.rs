@@ -12,7 +12,10 @@ pub mod check;
 pub mod battlenet;
 pub mod ea;
 pub mod epic;
+pub mod epic_dl;
 pub mod gog;
+pub mod gog_dl;
+pub mod here;
 pub mod itch;
 pub mod rockstar;
 pub mod steam;
@@ -20,6 +23,7 @@ pub mod sync;
 pub mod ubisoft;
 
 mod app;
+pub(crate) use app::mark;
 pub use app::{can_uninstall, installed, installed_with, latest, launch_uri, news, plan_uninstall, plan_uninstall_with, show_uri, steam_history, through};
 
 /// A game launcher.
@@ -140,8 +144,20 @@ pub fn own_uri(launcher: Launcher, uri: &str) -> bool {
     !rest.is_empty() && !uri.chars().any(|c| c.is_control() || c == '"' || c == ' ') && launcher.schemes().iter().any(|s| s.eq_ignore_ascii_case(scheme))
 }
 
-/// Every game the launchers on this PC list. A launcher that is not installed gives none.
+/// Every game the launchers on this PC list, and the games this app installed itself. A launcher
+/// that is not installed gives none. Steam, Epic Games and GOG games show once the user signed in
+/// to that platform here (see `accounts`); the other launchers have no sign-in and always show.
 pub fn scan() -> Vec<Game> {
+    let here = here::scan();
+    let mut out = launcher_games();
+    crate::accounts::games::link_epic(&mut out);
+    out.retain(|g| crate::accounts::shows(g.launcher) && !here.iter().any(|h| h.id() == g.id()));
+    let mut all = here;
+    all.extend(out);
+    all
+}
+
+fn launcher_games() -> Vec<Game> {
     // The launchers that leave only an uninstall entry share one read of the registry list.
     let uninstall = crate::winutil::uninstall_entries();
     let mut out = steam::scan();
@@ -326,7 +342,8 @@ mod tests {
     #[test]
     #[ignore]
     fn live_scan() {
-        let games = scan();
+        // Every launcher's games, signed in or not.
+        let games = launcher_games();
         for g in &games {
             let dir = g.install_dir.as_deref();
             println!(

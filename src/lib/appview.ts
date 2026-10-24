@@ -41,7 +41,7 @@ export function subline(app: AppEntry): string {
       return j?.step ?? "Close the app to continue";
     case "update":
       // A launcher's update has a build number at most: it is waiting there.
-      return app.source === "games" ? "Update waiting" : `${app.latest} available`;
+      return app.source === "games" && !app.gameHere ? "Update waiting" : `${app.latest} available`;
     case "failed": {
       const f = store.failedJobs.find((x) => x.appId === app.id);
       return f?.error ? f.error.code : "Last update failed";
