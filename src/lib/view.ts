@@ -9,8 +9,8 @@ export function splitMissing<T extends { status: string; source: string }>(apps:
 }
 
 /** An Other program nothing gives updates for (no catalog lists it, it names no GitHub project): listed to uninstall it. */
-export function listedOnly(app: { source: string; github?: string | null }): boolean {
-  return app.source === "programs" && !app.github;
+export function listedOnly(app: { source: string; github?: string | null; isSelf?: boolean }): boolean {
+  return app.source === "programs" && !app.github && !app.isSelf;
 }
 
 /** The short description an app's page shows under its version, like Get apps does. An Other

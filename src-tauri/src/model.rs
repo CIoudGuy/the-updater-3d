@@ -86,6 +86,10 @@ pub struct AppEntry {
     /// An Other program updated from its GitHub releases: "owner/repo"
     #[serde(default)]
     pub github: Option<String>,
+    /// The Updater 3D itself (its own entry in Windows' list): its page is the app's own page, and
+    /// it updates itself its own way.
+    #[serde(default)]
+    pub is_self: bool,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,
