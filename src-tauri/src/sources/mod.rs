@@ -10,6 +10,7 @@ pub mod browse;
 pub mod chipset;
 pub mod craft;
 pub mod drivers;
+pub mod games;
 pub mod ghapps;
 pub mod nvidia;
 pub mod iconfetch;
