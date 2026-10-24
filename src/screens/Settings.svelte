@@ -257,7 +257,7 @@
           </SRow>
           {#if s.sources.craft}
             <div class="nest" in:rise>
-              <SRow label="Pre-releases" desc="Show Craft app pre-releases in Get apps." id="craft-pre">
+              <SRow label="Pre-releases" desc="Craft apps get pre-releases. Each app's page can change it." id="craft-pre">
                 {#snippet control()}<Toggle checked={s.craftPrereleases} labelledby="craft-pre" onchange={(v) => store.patchSettings({ craftPrereleases: v })} />{/snippet}
               </SRow>
             </div>

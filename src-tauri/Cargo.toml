@@ -1,6 +1,6 @@
 [package]
 name = "the-updater-3d"
-version = "1.2.3"
+version = "1.2.4"
 license = "MIT"
 description = "Updates Adobe apps, Blender and the Craft apps"
 edition = "2021"

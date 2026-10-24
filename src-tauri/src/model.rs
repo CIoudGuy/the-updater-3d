@@ -87,6 +87,11 @@ pub struct AppEntry {
     /// it updates itself its own way.
     #[serde(default)]
     pub is_self: bool,
+    /// The app publishes pre-releases (betas, release candidates) the user can choose for it:
+    /// whether it follows them now. None when there is nothing to choose (Other apps: until its
+    /// version list shows pre-releases, or the user chose).
+    #[serde(default)]
+    pub pre_channel: Option<bool>,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,
@@ -349,6 +354,10 @@ pub struct Settings {
     /// notified or installed. Its own list (not an AutoMode), so older versions still read
     /// these settings.
     pub ignored: BTreeSet<String>,
+    /// Apps the user chose updates for: true gets their pre-releases (betas, release
+    /// candidates), false only final versions. An app not listed goes by its copy (a pre-release
+    /// copy keeps getting pre-releases) or, for the Craft apps, `craft_prereleases`.
+    pub pre_releases: BTreeMap<String, bool>,
     pub keep_previous_versions: bool,
     pub bandwidth_limit: u64,
     pub bandwidth_limit_enabled: bool,
@@ -390,6 +399,7 @@ impl Default for Settings {
             window_end: "06:00".into(),
             exceptions: BTreeMap::new(),
             ignored: BTreeSet::new(),
+            pre_releases: BTreeMap::new(),
             keep_previous_versions: false,
             bandwidth_limit: 40 * 1024 * 1024,
             bandwidth_limit_enabled: false,

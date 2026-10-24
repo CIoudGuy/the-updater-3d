@@ -9,6 +9,7 @@
   import Icon from "../components/Icon.svelte";
   import Paint from "../components/Paint.svelte";
   import Select from "../components/Select.svelte";
+  import Segmented from "../components/Segmented.svelte";
   import Toggle from "../components/Toggle.svelte";
   import BrushBar from "../components/BrushBar.svelte";
   import Num from "../components/Num.svelte";
@@ -46,6 +47,17 @@
   let versions = $state<VersionInfo[] | null>(null);
   /** the version list could not be loaded (offline); shown with a Retry button */
   let versionsError = $state<string | null>(null);
+  /** Stable or pre-release updates: shown when the app has pre-releases to choose (an Other app's show in its version list) */
+  const preOn = $derived(app?.preChannel ?? null);
+  const preShown = $derived(!!app && !app.readOnly && !app.isSelf && (preOn !== null || (app.source === "other" && !!versions?.some((v) => v.prerelease))));
+  const preOpts = [
+    { value: "stable", label: "Stable" },
+    { value: "pre", label: "Pre-release" },
+  ];
+  function setPre(v: string) {
+    if (!app) return;
+    store.patchSettings({ preReleases: { ...(store.settings.preReleases ?? {}), [app.id]: v === "pre" } });
+  }
   let reqSeq = 0;
   function loadVersions(aid: string) {
     const seq = ++reqSeq;
@@ -278,6 +290,15 @@
       {/if}
 
       <aside aria-label="Details">
+        {#if preShown}
+        <div class="blk">
+          <span class="lbl" id="pre-lbl">Updates</span>
+          <Segmented options={preOpts} value={preOn ? "pre" : "stable"} onchange={setPre} label="Stable or pre-release updates" />
+          <span class="hint">
+            {#if preOn}Betas and release candidates install as updates, like final versions.{:else if versions?.some((v) => v.installed && v.prerelease)}You stay on {app.version} until a newer final version is out, or roll back below.{:else}Only final versions. Pre-releases are listed below, marked.{/if}
+          </span>
+        </div>
+        {/if}
         {#if !app.readOnly && !listedOnly(app) && !isDriver}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>

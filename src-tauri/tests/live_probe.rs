@@ -430,7 +430,7 @@ async fn other_apps_coverage_and_changelogs() {
         let key = if !lines.is_empty() { src } else if url.is_some() { "link only" } else { "none" };
         *sources.entry(key).or_default() += 1;
         // What the version list shows (it can also use a notes page another version names).
-        let list = other::versions(i, &feed).await.unwrap_or_default();
+        let list = other::versions(i, &feed, false).await.unwrap_or_default();
         let shown = list.first().map(|v| v.notes.first().cloned().unwrap_or_default()).unwrap_or_default();
         let shown_key = if shown == other::NO_NOTES { "none" } else if shown == other::SEE_NOTES { "link only" } else { "lines" };
         *shown_counts.entry(shown_key).or_default() += 1;

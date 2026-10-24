@@ -29,6 +29,8 @@ Finds what you have, shows what changed, and updates everything in one click.
   instead of starting over.
 - **Roll back or keep versions.** Install any older version, or keep Blender, Godot and Unity
   versions side by side.
+- **Stable or pre-release.** Each app that publishes betas or release candidates can follow them,
+  or stay on final versions.
 - **Get new apps.** Browse and search the full catalog, with descriptions, icons and change lists.
 - **A better uninstaller.** Every program on the PC, uninstalled cleanly: leftover files, registry
   keys, shortcuts, services and startup entries are shown before anything is deleted, with a
