@@ -268,7 +268,7 @@
                 {/if}
                 <span class="grow"></span>
                 {#if v.notesUrl}
-                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>{isGame ? `Read on ${launcher === "Steam" ? "Steam" : "its page"}` : "Full release notes"}</button>
+                  <button class="lnk" title="Open the full release notes" onclick={() => openNotes(v.notesUrl!)}>{isGame ? `Read on ${v.notesUrl.includes("steampowered.com") ? "Steam" : "its page"}` : "Full release notes"}</button>
                 {/if}
                 {#if act}
                   <Btn variant="ghost" size="sm" title={act.title} onclick={() => installVersion(app, v.version, v.size)}>{act.label}</Btn>

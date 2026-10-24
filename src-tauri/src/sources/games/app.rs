@@ -181,9 +181,14 @@ fn unique(title: &str, seen: &mut Vec<String>) -> String {
 }
 
 /// The game's news and patch notes, newest first, as its version history (each item's title
-/// in place of a version). None for launchers that publish nothing.
-pub async fn news(g: &Game) -> Vec<VersionInfo> {
-    match g.notes {
+/// in place of a version). A game whose launcher publishes none reads them from its Steam page
+/// when it is sold there too (`steam_twin`, see `check`).
+pub async fn news(g: &Game, steam_twin: Option<u32>) -> Vec<VersionInfo> {
+    let from = match (&g.notes, steam_twin) {
+        (NotesFrom::None, Some(id)) => NotesFrom::SteamNews(id),
+        (n, _) => n.clone(),
+    };
+    match from {
         NotesFrom::SteamNews(id) => {
             let url = format!("https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid={id}&count=15&maxlength=0&format=json&feeds=steam_community_announcements");
             let Ok(Ok(f)) = tokio::time::timeout(Duration::from_secs(15), crate::http::get_cached(&url, &[], Duration::from_secs(3600))).await else { return vec![] };
