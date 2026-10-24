@@ -69,6 +69,22 @@ function app(p: Partial<AppEntry> & Pick<AppEntry, "id" | "source" | "name" | "c
 }
 
 const ADOBE = "C:\\Program Files\\Adobe\\";
+
+/** Drivers as the backend lists them: graphics with the maker's own driver, devices, the chipset and the BIOS. */
+type MockDriver = Pick<AppEntry, "id" | "name" | "code" | "fg" | "bg" | "version"> & Partial<AppEntry>;
+const DRIVERS: MockDriver[] = [
+  { id: "driver:nvidia:1022", name: "NVIDIA GeForce RTX 4060 Ti", code: "NV", fg: "#FFFFFF", bg: "#4E7A00", version: "610.88", latest: "621.01", status: "update", updateSize: 1116691496, tagline: "Graphics driver from NVIDIA", note: "GeForce Game Ready Driver from NVIDIA" },
+  { id: "driver:amd-chipset", name: "AMD Chipset Software", code: "AMD", fg: "#FFFFFF", bg: "#9E1B1B", version: "8.08.12.551", latest: "8.09.28.1124", status: "update", updateSize: 81551288, tagline: "Chipset from AMD", note: "AMD's chipset drivers for Ryzen processors and AMD motherboards" },
+  { id: "driver:dev:pci\\ven_10ec&dev_8125", name: "Realtek Gaming 2.5GbE Family Controller", code: "Rt", fg: "#EDEDED", bg: "#3A4A5C", version: "1125.21.903.2024", latest: "1125.22.10.2025", status: "update", updateSize: 2_400_000, tagline: "Network driver from Realtek", note: "From Windows Update. Some drivers need a restart." },
+  { id: "driver:dev:hdaudio\\func_01&ven_10ec&dev_0897", name: "Realtek High Definition Audio", code: "Rt", fg: "#EDEDED", bg: "#3A4A5C", version: "6.0.9733.1", latest: "6.0.9733.1", tagline: "Audio driver from Realtek", note: "Driver from Realtek" },
+  { id: "driver:intel:usb\\vid_8087&pid_0036", name: "Intel(R) Wireless Bluetooth(R)", code: "In", fg: "#FFFFFF", bg: "#0B5CAD", version: "24.70.0.4", latest: "24.70.0.4", tagline: "Bluetooth driver from Intel", note: "Intel Wireless Bluetooth Drivers from Intel" },
+  { id: "driver:bios", name: "B850 AORUS ELITE WIFI7 ICE BIOS", code: "GB", fg: "#EDEDED", bg: "#3A4A5C", version: "F12a", latest: "F13", status: "update", tagline: "BIOS from Gigabyte", manualUrl: "https://www.gigabyte.com/Motherboard/B850-AORUS-ELITE-WIFI7-ICE-rev-1x/support#support-dl-bios", note: "BIOS F13 is out. It is never flashed from here: download it from Gigabyte's page, put it on a USB stick and flash it yourself with Q-Flash in the BIOS." },
+];
+const DRIVER_NOTES: Record<string, string[]> = {
+  "driver:nvidia:1022": ["## Game Ready for Phantom Blade Zero", "This new Game Ready Driver provides the best gaming experience for the latest new games.", "## Fixed Gaming Bugs", "Wuthering Waves: may crash during gameplay with Freestyle filters and Frame Generation", "Star Citizen: a crash with the Vulkan API", "## Fixed General Bugs", "QHD monitor at 360 Hz may flash black during gameplay"],
+  "driver:amd-chipset": ["## Release Highlights", "Bug fixes included", "## Known Issues", "On a non-English Windows, some driver names may appear in English"],
+  "driver:dev:pci\\ven_10ec&dev_8125": ["Realtek Semiconductor Corp. - Net - 1125.22.10.2025", "Realtek Net driver update released in October 2025"],
+};
 function seedApps(): AppEntry[] {
   const upd = MODE !== "current" && MODE !== "repair";
   const list: AppEntry[] = [
@@ -200,6 +216,7 @@ function seedApps(): AppEntry[] {
       version: "1.2", status: "missing", installDir: null, updatedAt: iso(900 * DAY), tagline: "Its uninstaller C:\\Program Files\\Old Tool\\uninst.exe is missing",
       note: "Its uninstaller is missing. Remove from list cleans up what is left.", canRollback: false,
     }),
+    ...DRIVERS.map((d) => app({ ...d, source: "drivers", group: "Drivers", canUninstall: false, canRollback: false })),
   );
   if (MODE === "current") {
     const ps = list.find((x) => x.id === "adobe:PHSP")!;
@@ -528,7 +545,7 @@ let settings: Settings = {
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   showInstalledInGetApps: false,
-  sources: { adobe: true, craft: true, blender: true, tools: true, other: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true },
   parallelDownloads: 3,
   silentElevation: true,
   uiZoom: 1,
@@ -549,6 +566,7 @@ let status: Status = {
   firstScan: false,
   appVersion: "1.0.0",
   selfUpdate: MODE === "selfupdate" ? "1.2.0" : null,
+  restartNeeded: MODE === "restart",
 };
 
 let services: ServiceInfo[] = [
@@ -970,6 +988,12 @@ function otherVersions(id: string): VersionInfo[] {
 
 function versionsFor(a: AppEntry): VersionInfo[] {
   const list: VersionInfo[] = [];
+  if (a.source === "drivers") {
+    const newer = a.latest && a.latest !== a.version && !a.manualUrl;
+    if (newer) list.push({ version: a.latest!, date: iso(3 * DAY), notes: DRIVER_NOTES[a.id] ?? [], notesUrl: a.id.startsWith("driver:nvidia") ? "https://www.nvidia.com/en-gb/drivers/details/282478/" : null, size: a.updateSize, installed: false, latest: true, prerelease: false });
+    list.push({ version: a.version, date: null, notes: newer ? [] : DRIVER_NOTES[a.id] ?? [], notesUrl: null, size: null, installed: true, latest: !newer, prerelease: false });
+    return list;
+  }
   if (a.source === "other") return otherVersions(a.id);
   if (a.source === "tools") {
     const key = a.id.split(":")[1];
@@ -1140,6 +1164,8 @@ const handlers: H = {
   },
   open_app: () => {},
   open_store_page: () => {},
+  open_driver_page: () => {},
+  restart_pc: () => {},
   show_in_folder: () => {},
   get_versions: ({ appId }) => {
     const a = findApp(appId);

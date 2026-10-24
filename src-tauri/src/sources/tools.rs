@@ -1322,6 +1322,33 @@ fn run_installer(dest: &Path, args: Vec<String>, elevated: bool, label: String) 
     Step::Run { exe: dest.to_path_buf(), args, cwd: None, ok_codes: vec![0], elevated, label, log: None }
 }
 
+/// OBS Studio's files that other programs load: its game capture hook (in games and apps it
+/// captured) and its virtual camera (in apps that list cameras, like Discord or a browser). OBS's
+/// installer stops with exit code 6 while one is in use (the list its installer checks).
+pub fn obs_in_use_files(install_dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = [
+        "bin/64bit/avutil-57.dll",
+        "bin/64bit/swscale-6.dll",
+        "core/win-capture/data/graphics-hook32.dll",
+        "core/win-capture/data/graphics-hook64.dll",
+        "core/win-dshow/data/obs-virtualcam-module32.dll",
+        "core/win-dshow/data/obs-virtualcam-module64.dll",
+        "data/obs-plugins/win-capture/graphics-hook32.dll",
+        "data/obs-plugins/win-capture/graphics-hook64.dll",
+        "data/obs-plugins/win-dshow/obs-virtualcam-module32.dll",
+        "data/obs-plugins/win-dshow/obs-virtualcam-module64.dll",
+    ]
+    .iter()
+    .map(|f| install_dir.join(f.replace('/', "\\")))
+    .collect();
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let hook = PathBuf::from(appdata).join("obs-studio-hook");
+        v.push(hook.join("graphics-hook32.dll"));
+        v.push(hook.join("graphics-hook64.dll"));
+    }
+    v
+}
+
 /// Everything an install needs once the release is known. No network.
 pub fn build_plan(key: &str, rel: &Rel, kind: JobKind, current: Option<&Installed>, ctx: &Ctx<'_>) -> Result<Plan> {
     let d = def(key).ok_or_else(|| anyhow!("unknown app {key}"))?;

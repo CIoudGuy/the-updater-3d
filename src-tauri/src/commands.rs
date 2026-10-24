@@ -37,7 +37,8 @@ pub fn update_apps(core: C<'_>, app_ids: Vec<String>) -> Res<()> {
 #[tauri::command]
 pub fn update_all(core: C<'_>) -> Res<()> {
     let c = core.inner();
-    let ids: Vec<String> = c.apps().into_iter().filter(|a| a.status == AppStatus::Update).map(|a| a.id).collect();
+    // A BIOS is updated from its maker's page, not here.
+    let ids: Vec<String> = c.apps().into_iter().filter(|a| a.status == AppStatus::Update && a.manual_url.is_none()).map(|a| a.id).collect();
     if ids.is_empty() {
         c.toast("info", "Everything is current", None);
     }
@@ -357,6 +358,22 @@ pub async fn show_main(app: AppHandle, core: C<'_>, route: Option<String>) -> Re
         let _ = w.hide();
     }
     Ok(())
+}
+
+// ------------------------------------------------------------ drivers
+
+/// Restart the PC to finish installing drivers (in a minute, so work can be saved).
+#[tauri::command]
+pub fn restart_pc(core: C<'_>) -> Res<()> {
+    core.inner().restart_pc().map_err(err)
+}
+
+/// Open a driver's maker page: where a BIOS is updated from, or the maker's own updater for a
+/// card (only the makers' addresses).
+#[tauri::command]
+pub fn open_driver_page(core: C<'_>, id: String) -> Res<()> {
+    let url = core.inner().driver_page(&id).ok_or_else(|| "No maker page for that driver".to_string())?;
+    winutil::shell_open(&url).map_err(err)
 }
 
 #[tauri::command]

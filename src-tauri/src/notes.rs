@@ -146,7 +146,7 @@ async fn page_owned(url: String) -> Option<String> {
     page(&url).await
 }
 
-fn strip_tags(s: &str) -> String {
+pub(crate) fn strip_tags(s: &str) -> String {
     let re = regex::Regex::new(r"<[^>]+>").unwrap();
     let t = re.replace_all(s, "");
     // Named and numeric entities ("&#8216;Lattice Deform&#8217;"), then no long dashes.
@@ -1152,7 +1152,12 @@ fn html_lines(html: &str) -> String {
 /// page's own content when the whole page is about that version. A markdown or text file gives
 /// the section under its heading for the version.
 pub fn page_notes(body: &str, ver: &str) -> Vec<String> {
-    let head = &body[..body.len().min(2000)].to_ascii_lowercase();
+    // The first 2000 bytes, cut where a character starts (a page with "é" or "™" there crashed).
+    let mut cut = body.len().min(2000);
+    while !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &body[..cut].to_ascii_lowercase();
     if !(head.trim_start().starts_with('<') || head.contains("<html") || head.contains("<body")) {
         if let Some(s) = md_section(body, ver) {
             return text_lines(&s);
@@ -1333,6 +1338,16 @@ mod tests {
         // No cap: a long list stays whole.
         let long: String = (0..60).map(|i| format!("- Fixed problem number {i}\n")).collect();
         assert_eq!(text_lines(&long).len(), 60);
+    }
+
+    #[test]
+    fn a_page_with_a_long_character_at_its_start_is_read() {
+        // Seen on a live catalog page: a two-byte character right where the start is cut.
+        let page = format!("{}é
+## 2.0
+- Fixed a crash on start
+", "a".repeat(1999));
+        assert_eq!(page_notes(&page, "2.0"), vec!["Fixed a crash on start".to_string()]);
     }
 
     #[test]

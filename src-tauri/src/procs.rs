@@ -71,28 +71,120 @@ pub fn blocking(procs: &[Proc], dirs: &[PathBuf], names: &[String]) -> Vec<Proc>
         .collect()
 }
 
+/// Programs that have any of `files` open or loaded (Windows' Restart Manager: what installers
+/// ask before they replace files). Files that are not there are skipped.
+pub fn using_files(files: &[PathBuf]) -> Vec<u32> {
+    use windows::core::{HSTRING, PCWSTR, PWSTR};
+    use windows::Win32::System::RestartManager::*;
+    let files: Vec<HSTRING> = files.iter().filter(|f| f.exists()).map(|f| HSTRING::from(f.as_os_str())).collect();
+    if files.is_empty() {
+        return vec![];
+    }
+    let me = std::process::id();
+    unsafe {
+        let mut session = 0u32;
+        let mut key = [0u16; (CCH_RM_SESSION_KEY + 1) as usize];
+        if RmStartSession(&mut session, None, PWSTR(key.as_mut_ptr())).is_err() {
+            return vec![];
+        }
+        let names: Vec<PCWSTR> = files.iter().map(|f| PCWSTR(f.as_ptr())).collect();
+        let mut out = vec![];
+        if RmRegisterResources(session, Some(&names), None, None).is_ok() {
+            let mut need = 0u32;
+            let mut have = 0u32;
+            let mut reasons = 0u32;
+            let _ = RmGetList(session, &mut need, &mut have, None, &mut reasons);
+            if need > 0 {
+                let mut list = vec![RM_PROCESS_INFO::default(); need as usize + 4];
+                have = list.len() as u32;
+                if RmGetList(session, &mut need, &mut have, Some(list.as_mut_ptr()), &mut reasons).is_ok() {
+                    out = list[..have as usize].iter().map(|p| p.Process.dwProcessId).filter(|&p| p != 0 && p != me).collect();
+                }
+            }
+        }
+        let _ = RmEndSession(session);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 /// Friendly name for a blocking process: "Photoshop" from "Photoshop.exe".
 pub fn friendly(name: &str) -> String {
     name.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()
 }
 
-/// Ask the processes to close (like clicking X), then force them after `grace`.
-pub fn close(pids: &[u32], grace: std::time::Duration) {
-    for pid in pids {
+/// Ask the processes to close (like clicking X), then force them after `grace`. A process with
+/// no window of its own (a background helper such as a browser's native messaging host) has
+/// nothing to click, so it is ended at once. Returns the ones still running (one that runs as
+/// admin cannot be ended from here).
+pub fn close(pids: &[u32], grace: std::time::Duration) -> Vec<u32> {
+    let (windowed, windowless): (Vec<u32>, Vec<u32>) = pids.iter().partition(|p| crate::winutil::has_windows(**p));
+    for pid in &windowed {
         crate::winutil::close_process_windows(*pid);
     }
+    for pid in &windowless {
+        crate::winutil::kill_process(*pid);
+    }
     let deadline = std::time::Instant::now() + grace;
+    let mut forced = false;
     loop {
         let alive: Vec<u32> = list_fresh().iter().map(|p| p.pid).filter(|p| pids.contains(p)).collect();
         if alive.is_empty() {
-            return;
+            return alive;
         }
-        if std::time::Instant::now() > deadline {
-            for pid in alive {
-                crate::winutil::kill_process(pid);
+        if forced {
+            return alive;
+        }
+        if std::time::Instant::now() > deadline || alive.iter().all(|p| windowless.contains(p)) {
+            for pid in &alive {
+                crate::winutil::kill_process(*pid);
             }
-            return;
+            forced = true;
+            // Ending a process takes a moment.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            continue;
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_program_holding_a_file_open_is_found() {
+        let dir = std::env::temp_dir().join(format!("u3d-rm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("graphics-hook64.dll");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(super::using_files(&[f.clone()]).is_empty());
+        // A program that keeps the file open (as a game keeps OBS's capture hook loaded).
+        let mut child = crate::winutil::cmd("powershell.exe")
+            .args(["-NoProfile", "-Command", &format!("$f=[IO.File]::Open('{}','Open','Read','Read'); Start-Sleep 30", f.display())])
+            .spawn()
+            .unwrap();
+        let t = std::time::Instant::now();
+        let mut found = vec![];
+        while found.is_empty() && t.elapsed() < std::time::Duration::from_secs(15) {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            found = super::using_files(&[f.clone()]);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(found, vec![child.id()]);
+        assert!(super::using_files(&[dir.join("missing.dll")]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_helper_with_no_window_is_closed_at_once() {
+        // Like a browser's native messaging host (wenativehost): nothing to click X on.
+        let mut child = crate::winutil::cmd("ping.exe").args(["-n", "60", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let pid = child.id();
+        let t = std::time::Instant::now();
+        let left = super::close(&[pid], std::time::Duration::from_secs(12));
+        assert!(left.is_empty(), "still running");
+        assert!(t.elapsed() < std::time::Duration::from_secs(4), "waited {:?} for a window that is not there", t.elapsed());
+        assert!(child.try_wait().unwrap().is_some());
     }
 }

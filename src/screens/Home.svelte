@@ -43,6 +43,8 @@
   });
 
   const updates = $derived(store.updates);
+  /** Drivers are listed with the apps but are not apps. */
+  const appCount = $derived(store.apps.filter((a) => a.source !== "drivers").length);
   const sourcesOff = $derived(allSourcesOff(store.settings.sources));
   const colors = $derived.by(() => {
     const src = hs === "updating" ? store.openJobs.map((j) => j.fg) : hs === "ready" || hs === "offline" ? updates.map((a) => a.fg) : hs === "repair" || hs === "failed" ? [...store.failedJobs.map((j) => j.fg), ...store.missing.map((a) => a.fg)] : [];
@@ -176,7 +178,7 @@
     {:else}
       <span class="lt">
         {#if hs === "current"}<Dab color="#7FB77E" />{/if}
-        <Num value={store.apps.length} /> {store.apps.length === 1 ? "app" : "apps"} installed
+        <Num value={appCount} /> {appCount === 1 ? "app" : "apps"} installed
       </span>
     {/if}
     {#if hs !== "ccdown" && hs !== "signedout"}
@@ -203,6 +205,13 @@
       <Dab color="#7C93D6" />
       <span>The Updater 3D {store.status.selfUpdate} is ready.</span>
       <button class="lnk" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading, restarts by itself" : "Update and restart"}</button>
+    </div>
+  {/if}
+  {#if store.status.restartNeeded && hs !== "first"}
+    <div class="selfup" in:rise>
+      <Dab color="#D9B26A" />
+      <span>Restart your PC to finish installing drivers.</span>
+      <button class="lnk" onclick={() => send("restart_pc", {})} title="Restarts in a minute, so you can save your work">Restart in a minute</button>
     </div>
   {/if}
 

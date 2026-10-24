@@ -55,3 +55,10 @@ test("empty library and all sources off", () => {
   assert.equal(allSourcesOff({ adobe: false, craft: false, blender: false, tools: false, other: false }), true);
   assert.equal(allSourcesOff({ adobe: false, craft: true, blender: false, tools: false, other: false }), false);
 });
+
+test("the Drivers filter says when no drivers are listed and names itself when it hides a match", () => {
+  const empty = installedNone({ query: "", filter: "drivers", matchesIgnoringFilter: 0 });
+  assert.match(empty.text, /No drivers listed yet/);
+  assert.equal(empty.showAll, true);
+  assert.match(installedNone({ query: "blender", filter: "drivers", matchesIgnoringFilter: 2 }).text, /hidden by the Drivers filter/);
+});

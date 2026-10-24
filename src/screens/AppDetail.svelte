@@ -31,6 +31,8 @@
   const job = $derived(app ? store.jobByApp.get(app.id) : undefined);
   const isBlender = $derived(app?.source === "blender");
   const isAdobe = $derived(app?.source === "adobe");
+  /** a device driver, the chipset or the BIOS: installs only its newest version, never rolls back */
+  const isDriver = $derived(app?.source === "drivers");
   /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
   const sideBySide = $derived(isBlender || (app?.source === "tools" && app.id.split(":").length > 2));
 
@@ -116,7 +118,7 @@
     import("@tauri-apps/plugin-opener").then((m) => m.openUrl(url)).catch(() => window.open(url, "_blank"));
   }
   function rowAction(v: VersionInfo): { label: string; title: string } | null {
-    if (!app || v.installed || app.readOnly) return null;
+    if (!app || v.installed || app.readOnly || isDriver) return null;
     if (sideBySide) return { label: `Install ${v.version}`, title: `Install ${v.version} next to ${app.version}` };
     if (v.latest && cmpVersion(v.version, app.version) > 0) return null;
     if (cmpVersion(v.version, app.version) < 0) return app.canRollback ? { label: `Roll back to ${v.version}`, title: `Roll back to ${v.version}` } : null;
@@ -129,6 +131,7 @@
   const statusLine = $derived.by(() => {
     if (!app) return "";
     if (app.source === "programs" && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
+    if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
     switch (app.status) {
       case "update":
         return `${app.latest} available${app.updateSize ? ", " + bytes(app.updateSize) : ""}`;
@@ -175,10 +178,15 @@
             </Btn>
             <Btn variant="secondary" disabled={!canCancel(job)} onclick={() => send("cancel_job", { jobId: job.id })} title={cancelTip(job)}>Cancel</Btn>
           {:else}
-            {#if app.status !== "missing"}
+            {#if app.status !== "missing" && !isDriver}
               <Btn variant="ghost" title="Open {app.name}  O" onclick={() => openApp(app.id)}>Open</Btn>
             {/if}
-            {#if app.status === "update"}
+            {#if isDriver && store.status.restartNeeded}
+              <Btn variant="secondary" title="Restart the PC in a minute to finish installing drivers" onclick={() => send("restart_pc", {})}>Restart PC</Btn>
+            {/if}
+            {#if app.manualUrl}
+              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : `Get ${app.latest}`) : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
+            {:else if app.status === "update"}
               <Btn variant="primary" hint="U" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update to {app.latest}</Btn>
             {:else if app.status === "missing" && canRepair(app)}
               <Btn variant="primary" hint="R" title="Repair {app.name}  R" onclick={() => repairApp(app.id)}>Repair</Btn>
@@ -201,16 +209,21 @@
     {/if}
 
     <div class="cols">
-      {#if app.source === "programs"}
+      {#if app.source === "programs" || (isDriver && versions?.length === 1 && !versions[0].notes.length && !versions[0].notesUrl)}
       <section aria-label="About this program">
+        {#if isDriver}
+        <div class="sec-h"><span>About this driver</span></div>
+        <p class="gone">{app.manualUrl ? "Its maker's page has the newest version, its changes and how to install it." : "Installed for a device in this PC. Windows Update and the makers are asked for a newer one with every check."}</p>
+        {:else}
         <div class="sec-h"><span>About this program</span></div>
         <p class="gone">No catalog lists {app.name}, so its updates are not checked here. Uninstall runs its own uninstaller and then shows what it left behind, to clean up.</p>
+        {/if}
       </section>
       {:else}
       <section aria-label="Version history">
         <div class="sec-h">
           <span>Version history</span>
-          <span class="aside">{versions && !versionsError && !app.readOnly ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
+          <span class="aside">{versions && !versionsError && !app.readOnly && !isDriver ?`${installable.length} ${installable.length === 1 ? "version" : "versions"} you can install` : ""}</span>
         </div>
         {#if !versions}
           {#each [0, 1, 2, 3] as i (i)}
@@ -253,7 +266,7 @@
       {/if}
 
       <aside aria-label="Details">
-        {#if !app.readOnly && app.source !== "programs"}
+        {#if !app.readOnly && app.source !== "programs" && !isDriver}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>
           <div class="pk">
@@ -268,6 +281,12 @@
 
         <dl>
           {#if app.source === "programs" && app.status !== "missing" && app.tagline}<dt>Publisher</dt><dd>{app.tagline}</dd>{/if}
+          {#if isDriver}
+          <dt>Kind</dt>
+          <dd>{app.tagline ?? "Driver"}</dd>
+          <dt>Updated</dt>
+          <dd>{app.updatedAt ? dateLong(app.updatedAt) : "Not by this app"}</dd>
+          {:else}
           <dt>Location</dt>
           <dd>
             {#if app.installDir}
@@ -283,9 +302,10 @@
           <dd>{app.sizeOnDisk ? bytes(app.sizeOnDisk) : "Not known"}</dd>
           <dt>Updated</dt>
           <dd>{app.updatedAt ? dateLong(app.updatedAt) : "Not known"}</dd>
+          {/if}
         </dl>
 
-        {#if app.readOnly || app.source === "programs"}
+        {#if app.readOnly || app.source === "programs" || isDriver}
           <!-- Steam or the Microsoft Store keeps this copy up to date; no catalog knows Other programs -->
         {:else if isBlender && app.channel === "beta"}
           <!-- a pre-release copy has no bug-fix releases to keep -->

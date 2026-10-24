@@ -50,8 +50,8 @@ export type DialogState =
       onRelocate: () => void;
     };
 
-export type InstalledFilter = "updates" | "all" | "recent";
-export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Other programs";
+export type InstalledFilter = "updates" | "all" | "drivers" | "recent";
+export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Drivers" | "Other programs";
 /** Installed: every program, or only the apps a catalog updates. */
 export type InstalledScope = "everything" | "catalog";
 export type SortKey = "name" | "size" | "updated" | "status";

@@ -8,17 +8,18 @@ export function groupOrAll<T extends string>(group: T | "all", present: readonly
 }
 
 /** The Updates and Recently updated filters hide apps; say so when a search matches only hidden ones. */
-export function installedNone(o: { query: string; filter: "updates" | "all" | "recent"; matchesIgnoringFilter: number }): { text: string; showAll: boolean } {
+export function installedNone(o: { query: string; filter: "updates" | "all" | "drivers" | "recent"; matchesIgnoringFilter: number }): { text: string; showAll: boolean } {
   const q = o.query.trim();
   if (q) {
     if (o.filter !== "all" && o.matchesIgnoringFilter > 0) {
-      const f = o.filter === "updates" ? "Updates available" : "Recently updated";
+      const f = o.filter === "updates" ? "Updates available" : o.filter === "drivers" ? "Drivers" : "Recently updated";
       const n = o.matchesIgnoringFilter;
       return { text: `${n === 1 ? "1 app matches" : `${n} apps match`} "${q}", hidden by the ${f} filter.`, showAll: true };
     }
     return { text: `No apps match "${o.query}".`, showAll: false };
   }
   if (o.filter === "updates") return { text: "No updates available. Everything here is current.", showAll: true };
+  if (o.filter === "drivers") return { text: "No drivers listed yet. They show once the next check is done.", showAll: true };
   return { text: "Nothing here yet.", showAll: false };
 }
 
