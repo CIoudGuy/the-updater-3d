@@ -39,12 +39,15 @@ const MAX_TRIES: usize = 5;
 /// Candidates fetched ahead while the better one before them is still loading.
 const AHEAD: usize = 3;
 /// Apps whose icon is searched for at the same time: as many as this PC is tuned for (16 on a
-/// usual PC); each server still gets at most `PER_HOST`.
+/// usual PC); each server still gets at most `PER_HOST`. No more than that: a search that started
+/// early waits ahead of one that started later, so more of them would make the cards on screen
+/// wait behind the ones around them.
 pub fn parallel() -> usize {
     crate::machine::tuned().icon_parallel
 }
-/// Requests to one server at the same time, so a page of apps by one publisher does not flood it.
-const PER_HOST: usize = 4;
+/// Requests to one server at the same time (a browser opens 6), so a page of apps by one
+/// publisher does not flood it.
+const PER_HOST: usize = 6;
 /// Edge of a saved icon in pixels: sharp at the biggest mark (80 px) on a 150% screen.
 pub const EDGE: u32 = 128;
 /// An app whose search failed for a passing reason (no answer in time, a busy server) is searched
@@ -84,46 +87,104 @@ pub fn may_search(id: &str) -> bool {
     }
 }
 
-/// Apps waiting for their icon search, the ones on screen first. A page that is shown puts its
-/// apps in front of everything asked for earlier (the list scrolled past is still searched, after
-/// it); the starter list in the background goes to the back.
+/// How soon an app's icon is wanted, most urgent first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// The app whose page the user opened.
+    Pinned,
+    /// The cards on screen.
+    View,
+    /// The rows kept just above and below the screen.
+    Near,
+    /// The starter list and installed apps, searched while nothing else waits.
+    Rest,
+}
+
+/// Apps waiting for their icon search, the most urgent first. What the window shows is told with
+/// `view`: the cards on screen go first, the rows around them next, and apps that were waiting
+/// for a place that scrolled away are dropped (they are asked for again if the list comes back).
 #[derive(Default)]
 pub struct Queue {
-    order: VecDeque<String>,
-    queued: HashSet<String>,
+    tiers: [VecDeque<String>; 4],
+    /// Lowercase id -> the tier it waits in
+    at: HashMap<String, Tier>,
 }
 
 impl Queue {
-    /// Put these ids first, in their order; ids already waiting move up.
-    pub fn front(&mut self, ids: &[String]) {
-        let keys: HashSet<String> = ids.iter().map(|i| i.to_ascii_lowercase()).collect();
-        self.order.retain(|i| !keys.contains(&i.to_ascii_lowercase()));
-        let mut seen = HashSet::new();
-        for id in ids.iter().rev() {
-            if seen.insert(id.to_ascii_lowercase()) {
-                self.order.push_front(id.clone());
-            }
-        }
-        self.queued.extend(keys);
+    fn lane(&mut self, t: Tier) -> &mut VecDeque<String> {
+        &mut self.tiers[t as usize]
     }
-    /// Add these ids after everything waiting; ids already waiting keep their place.
+    fn take_out(&mut self, key: &str) {
+        if let Some(t) = self.at.remove(key) {
+            self.lane(t).retain(|i| !i.eq_ignore_ascii_case(key));
+        }
+    }
+    /// Put these ids in the front of a tier, in their order; ids waiting in a less urgent tier or
+    /// further back in this one move up, ids in a more urgent tier stay where they are.
+    pub fn front(&mut self, tier: Tier, ids: &[String]) {
+        let mut seen = HashSet::new();
+        let mut fresh: Vec<&String> = Vec::new();
+        for id in ids {
+            let k = id.to_ascii_lowercase();
+            if self.at.get(&k).is_some_and(|t| *t < tier) || !seen.insert(k) {
+                continue;
+            }
+            fresh.push(id);
+        }
+        for id in &fresh {
+            self.take_out(&id.to_ascii_lowercase());
+        }
+        for id in fresh.into_iter().rev() {
+            self.at.insert(id.to_ascii_lowercase(), tier);
+            self.lane(tier).push_front(id.clone());
+        }
+    }
+    /// Add these ids after everything waiting in the `Rest` tier; ids already waiting keep their place.
     pub fn back(&mut self, ids: &[String]) {
         for id in ids {
-            if self.queued.insert(id.to_ascii_lowercase()) {
-                self.order.push_back(id.clone());
+            let k = id.to_ascii_lowercase();
+            if !self.at.contains_key(&k) {
+                self.at.insert(k, Tier::Rest);
+                self.lane(Tier::Rest).push_back(id.clone());
             }
         }
     }
+    /// The window shows `visible` cards and keeps `near` ones around them: they wait in the
+    /// `View` and `Near` tiers in that order, and what waited in those tiers for other places is
+    /// dropped. Returns how many waiting apps were dropped.
+    pub fn view(&mut self, visible: &[String], near: &[String]) -> usize {
+        let keep: HashSet<String> = visible.iter().chain(near).map(|i| i.to_ascii_lowercase()).collect();
+        let mut dropped = 0;
+        for t in [Tier::View, Tier::Near] {
+            for id in std::mem::take(self.lane(t)) {
+                let k = id.to_ascii_lowercase();
+                // the ones still wanted are put back below, in their new places
+                dropped += !keep.contains(&k) as usize;
+                self.at.remove(&k);
+            }
+        }
+        self.front(Tier::Near, near);
+        self.front(Tier::View, visible);
+        dropped
+    }
     pub fn pop(&mut self) -> Option<String> {
-        let id = self.order.pop_front()?;
-        self.queued.remove(&id.to_ascii_lowercase());
-        Some(id)
+        for t in [Tier::Pinned, Tier::View, Tier::Near, Tier::Rest] {
+            if let Some(id) = self.lane(t).pop_front() {
+                self.at.remove(&id.to_ascii_lowercase());
+                return Some(id);
+            }
+        }
+        None
     }
     pub fn len(&self) -> usize {
-        self.order.len()
+        self.at.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
+        self.at.is_empty()
+    }
+    /// Apps waiting in a tier.
+    pub fn waiting(&self, t: Tier) -> usize {
+        self.tiers[t as usize].len()
     }
 }
 
@@ -348,6 +409,7 @@ async fn get(url: &str, max: usize) -> Fetched {
 }
 
 /// A found icon: the picture, its file type and where it came from.
+#[derive(Clone)]
 pub struct Got {
     pub bytes: Vec<u8>,
     pub ext: &'static str,
@@ -364,16 +426,133 @@ pub struct Miss {
     pub passing: bool,
 }
 
+/// Pictures and pages already asked for in this run. Apps of one publisher name the same pages
+/// and the same icon, so the first search reads them and the others, even the ones started at the
+/// same moment, take its answer instead of asking the server again.
+type Shared<T> = futures_util::future::Shared<futures_util::future::BoxFuture<'static, T>>;
+
+/// The work of one memo entry runs as its own task, so a search that gives up (it took too long,
+/// or its card scrolled away) never leaves half of it holding a place on a server; the others
+/// waiting for the same answer still get it.
+fn shared<T: Clone + Send + 'static>(work: impl std::future::Future<Output = T> + Send + 'static, lost: T) -> Shared<T> {
+    let task = tokio::spawn(work);
+    futures_util::FutureExt::shared(futures_util::FutureExt::boxed(async move { task.await.unwrap_or(lost) }))
+}
+
+/// What a picture came to: the answer, or a failure that may be gone soon (not remembered).
+#[derive(Clone)]
+enum Pic {
+    Got(Arc<Got>),
+    Gone,
+    Passing,
+}
+
+/// Biggest picture kept for the other searches; bigger ones are read again when asked for.
+const KEEP_PIC: usize = 256 * 1024;
+/// Entries kept in each memo before it starts over.
+const KEEP_ENTRIES: usize = 512;
+
+static PICS: Lazy<Mutex<HashMap<String, Shared<Pic>>>> = Lazy::new(Default::default);
+
+async fn fetch_pic(url: String, via: &'static str) -> Pic {
+    match get(&url, MAX_IMAGE).await {
+        Fetched::Body(bytes) => match sniff(&bytes) {
+            Some(ext) => Pic::Got(Arc::new(Got { bytes, ext, via, dark: false })),
+            None => Pic::Gone,
+        },
+        Fetched::Failed => Pic::Passing,
+        Fetched::Gone | Fetched::Refused => Pic::Gone,
+    }
+}
+
 /// Ok with the picture, or Err(true) when it failed for a passing reason.
 async fn image(url: &str, via: &'static str) -> Result<Got, bool> {
-    match get(url, MAX_IMAGE).await {
-        Fetched::Body(bytes) => match sniff(&bytes) {
-            Some(ext) => Ok(Got { bytes, ext, via, dark: false }),
-            None => Err(false),
-        },
-        Fetched::Failed => Err(true),
-        Fetched::Gone | Fetched::Refused => Err(false),
+    let fut = {
+        let mut m = PICS.lock();
+        if m.len() >= KEEP_ENTRIES {
+            m.clear();
+        }
+        m.entry(url.to_string()).or_insert_with(|| shared(fetch_pic(url.to_string(), via), Pic::Passing)).clone()
+    };
+    match fut.await {
+        Pic::Got(g) => {
+            if g.bytes.len() > KEEP_PIC {
+                PICS.lock().remove(url);
+            }
+            Ok((*g).clone())
+        }
+        Pic::Gone => Err(false),
+        Pic::Passing => {
+            PICS.lock().remove(url);
+            Err(true)
+        }
     }
+}
+
+/// A picture at an address, read as the icon search reads every picture: our own agent, one
+/// request, the server's turn kept. Err(true): it failed for a passing reason.
+pub async fn picture(url: &str) -> Result<Got, bool> {
+    image(url, "site").await
+}
+
+/// A small text (a JSON answer) at an address; None when the server has none or does not answer.
+pub async fn text(url: &str) -> Option<String> {
+    match get(url, MAX_PAGE).await {
+        Fetched::Body(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        _ => None,
+    }
+}
+
+/// What reading one page came to.
+#[derive(Clone)]
+enum Links {
+    /// The server refuses us.
+    Refused,
+    /// The icons the page names (and its web app manifest), best first; none when it names none.
+    Read(Arc<Vec<String>>),
+    /// Some step failed for a passing reason; what was read until then.
+    Passing(Arc<Vec<String>>),
+}
+
+static PAGES: Lazy<Mutex<HashMap<String, Shared<Links>>>> = Lazy::new(Default::default);
+/// Servers that refused us in this run (401, 403, 451): nothing more is asked of them.
+static REFUSED: Lazy<Mutex<HashSet<String>>> = Lazy::new(Default::default);
+
+async fn read_page(page: String) -> Links {
+    let mut tries: Vec<String> = Vec::new();
+    match get(&page, MAX_PAGE).await {
+        Fetched::Body(body) => {
+            let html = String::from_utf8_lossy(&body).into_owned();
+            let (found, web_manifest) = icons_from_html(&html, &page);
+            tries.extend(found.into_iter().map(|f| f.url));
+            if let Some(m) = web_manifest {
+                match get(&m, MAX_PAGE).await {
+                    Fetched::Body(b2) => tries.extend(icons_from_web_manifest(&String::from_utf8_lossy(&b2), &m).into_iter().map(|f| f.url)),
+                    Fetched::Failed => return Links::Passing(Arc::new(tries)),
+                    _ => {}
+                }
+            }
+            Links::Read(Arc::new(tries))
+        }
+        Fetched::Refused => Links::Refused,
+        Fetched::Failed => Links::Passing(Arc::new(tries)),
+        Fetched::Gone => Links::Read(Arc::new(tries)),
+    }
+}
+
+async fn links_of(page: &str) -> Links {
+    let fut = {
+        let mut m = PAGES.lock();
+        if m.len() >= KEEP_ENTRIES * 8 {
+            m.clear();
+        }
+        m.entry(page.to_string()).or_insert_with(|| shared(read_page(page.to_string()), Links::Passing(Arc::new(Vec::new())))).clone()
+    };
+    let out = fut.await;
+    if matches!(out, Links::Passing(_)) {
+        PAGES.lock().remove(page);
+    }
+    out
 }
 
 /// Find an icon for a package. `manifest_icon` is the manifest's own `IconUrl`; `pages` are the
@@ -404,27 +583,21 @@ pub async fn find(id: &str, manifest_icon: Option<&str>, pages: &[String]) -> Re
         }
         let Ok(url) = Url::parse(page) else { continue };
         let Some(host) = url.host_str().map(|h| h.to_ascii_lowercase()) else { continue };
-        if seen_hosts.contains(&host) || !matches!(url.scheme(), "http" | "https") {
+        if seen_hosts.contains(&host) || !matches!(url.scheme(), "http" | "https") || REFUSED.lock().contains(&host) {
             continue;
         }
-        seen_hosts.push(host);
+        seen_hosts.push(host.clone());
         let mut tries: Vec<String> = Vec::new();
-        match get(page, MAX_PAGE).await {
-            Fetched::Body(body) => {
-                let html = String::from_utf8_lossy(&body).into_owned();
-                let (found, web_manifest) = icons_from_html(&html, page);
-                tries.extend(found.into_iter().map(|f| f.url));
-                if let Some(m) = web_manifest {
-                    match get(&m, MAX_PAGE).await {
-                        Fetched::Body(b2) => tries.extend(icons_from_web_manifest(&String::from_utf8_lossy(&b2), &m).into_iter().map(|f| f.url)),
-                        Fetched::Failed => passing = true,
-                        _ => {}
-                    }
-                }
+        match links_of(page).await {
+            Links::Read(t) => tries.extend(t.iter().cloned()),
+            Links::Passing(t) => {
+                passing = true;
+                tries.extend(t.iter().cloned());
             }
-            Fetched::Refused => continue,
-            Fetched::Failed => passing = true,
-            Fetched::Gone => {}
+            Links::Refused => {
+                REFUSED.lock().insert(host);
+                continue;
+            }
         }
         let root = url.join("/").ok().map(|u| u.to_string()).unwrap_or_default();
         tries.push(format!("{root}apple-touch-icon.png"));
@@ -483,6 +656,24 @@ pub fn normalize(got: Got) -> Got {
         },
         None => got,
     }
+}
+
+/// A tall or wide picture cut to its middle square and made small, as an icon (the store
+/// pictures of a game). A picture Windows cannot read stays as it is.
+pub fn normalize_square(got: Got) -> Got {
+    if let Some((w, h, rgba)) = decode_scaled(&got.bytes, 4096) {
+        let side = w.min(h);
+        let (x0, y0) = ((w - side) / 2, (h - side) / 2);
+        let mut square: Vec<u8> = Vec::with_capacity((side * side * 4) as usize);
+        for y in 0..side {
+            let from = (((y0 + y) * w + x0) * 4) as usize;
+            square.extend_from_slice(&rgba[from..from + (side * 4) as usize]);
+        }
+        if let Some(png) = encode_png(side, side, &square) {
+            return normalize(Got { bytes: png, ext: "png", via: got.via, dark: false });
+        }
+    }
+    normalize(got)
 }
 
 fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
@@ -555,7 +746,11 @@ pub fn decode_scaled(_bytes: &[u8], _edge: u32) -> Option<(u32, u32, Vec<u8>)> {
 /// The file an icon is saved as: normalized pictures are `<stem>.icon.png`, or `<stem>.dark.png`
 /// when they need the light plate; a vector keeps its own type.
 pub fn saved_name(id: &str, got: &Got) -> String {
-    let stem = file_stem(id);
+    saved_name_for(&file_stem(id), got)
+}
+
+/// `saved_name` for a file name stem that is not a package's (a maker's, a Steam app's).
+pub fn saved_name_for(stem: &str, got: &Got) -> String {
     match (got.ext, got.dark) {
         ("png", true) => format!("{stem}.dark.png"),
         ("png", false) => format!("{stem}.icon.png"),
@@ -565,6 +760,104 @@ pub fn saved_name(id: &str, got: &Got) -> String {
 
 /// File types an icon of an earlier version was saved with, before icons were made small.
 pub const OLD_EXTS: &[&str] = &["png", "webp", "jpg", "gif", "ico"];
+
+/// The files in the icon cache (lower case name and size), read at most every few seconds and
+/// again after an icon is written or removed here: a page of 60 apps asks for 60 icons at once,
+/// and asking Windows about each of the several names an icon can have takes longer than reading
+/// the whole folder once.
+struct Listing {
+    dir: std::path::PathBuf,
+    at: Instant,
+    files: Arc<HashMap<String, u64>>,
+}
+
+static LISTING: Lazy<Mutex<Option<Listing>>> = Lazy::new(Default::default);
+const LISTING_FRESH: Duration = Duration::from_secs(4);
+
+/// An icon file was written or removed just now: the next look at the folder reads it again.
+pub fn wrote() {
+    *LISTING.lock() = None;
+}
+
+fn listing(dir: &std::path::Path) -> Arc<HashMap<String, u64>> {
+    if let Some(l) = LISTING.lock().as_ref().filter(|l| l.dir == dir && l.at.elapsed() < LISTING_FRESH) {
+        return l.files.clone();
+    }
+    let files: HashMap<String, u64> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().to_string_lossy().to_ascii_lowercase(), e.metadata().ok()?.len())))
+        .collect();
+    let files = Arc::new(files);
+    *LISTING.lock() = Some(Listing { dir: dir.to_path_buf(), at: Instant::now(), files: files.clone() });
+    files
+}
+
+/// An icon kept in the icon cache from an earlier run under this file name stem: a small one
+/// first, else one saved at full size by an earlier version.
+pub fn on_disk(stem: &str) -> Option<std::path::PathBuf> {
+    // the folder's own path is asked for (and made, if need be) only when the listing is read again
+    let kept = LISTING.lock().as_ref().filter(|l| l.at.elapsed() < LISTING_FRESH).map(|l| (l.dir.clone(), l.files.clone()));
+    let (dir, files) = kept.unwrap_or_else(|| {
+        let dir = crate::paths::icons();
+        let files = listing(&dir);
+        (dir, files)
+    });
+    pick(&dir, &files, stem)
+}
+
+#[cfg(test)]
+fn on_disk_in(dir: &std::path::Path, stem: &str) -> Option<std::path::PathBuf> {
+    pick(dir, &listing(dir), stem)
+}
+
+fn pick(dir: &std::path::Path, files: &HashMap<String, u64>, stem: &str) -> Option<std::path::PathBuf> {
+    ["icon.png", "dark.png", "svg"].iter().chain(OLD_EXTS).map(|e| format!("{stem}.{e}").to_ascii_lowercase()).find(|n| files.get(n).is_some_and(|len| *len > 0)).map(|n| dir.join(n))
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    #[test]
+    fn icons_are_found_among_the_files_of_the_folder_and_a_change_is_seen_after_wrote() {
+        let d = std::env::temp_dir().join(format!("tu3d-icons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        wrote();
+        assert_eq!(on_disk_in(&d, "other-a.b"), None);
+        std::fs::write(d.join("other-a.b.png"), b"old").unwrap();
+        wrote();
+        // an icon of an earlier version at full size is found
+        assert_eq!(on_disk_in(&d, "other-a.b"), Some(d.join("other-a.b.png")));
+        // a small one comes before it, whatever the case of its name
+        std::fs::write(d.join("Other-A.B.icon.png"), b"new").unwrap();
+        wrote();
+        assert_eq!(on_disk_in(&d, "other-a.b"), Some(d.join("other-a.b.icon.png")));
+        // an empty file is no icon
+        std::fs::write(d.join("other-e.mpty.icon.png"), b"").unwrap();
+        wrote();
+        assert_eq!(on_disk_in(&d, "other-e.mpty"), None);
+        // the folder is read once for many questions, not again for each
+        std::fs::write(d.join("other-late.icon.png"), b"x").unwrap();
+        assert_eq!(on_disk_in(&d, "other-late"), None);
+        wrote();
+        assert_eq!(on_disk_in(&d, "other-late"), Some(d.join("other-late.icon.png")));
+        // removed icons are gone for the next look
+        std::fs::remove_file(d.join("other-a.b.png")).unwrap();
+        std::fs::remove_file(d.join("Other-A.B.icon.png")).unwrap();
+        wrote();
+        assert_eq!(on_disk_in(&d, "other-a.b"), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// Made small already (or a vector, which needs no making small).
+pub fn is_small(p: &std::path::Path) -> bool {
+    let n = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    n.ends_with(".icon.png") || n.ends_with(".dark.png") || n.ends_with(".svg")
+}
 
 #[cfg(test)]
 mod tests {
@@ -660,21 +953,65 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    #[test]
-    fn the_page_on_screen_is_searched_first_and_the_rest_after_it() {
-        let mut q = Queue::default();
-        q.back(&ids(&["s1", "s2", "s3"]));
-        q.front(&ids(&["p1", "s2"]));
-        q.front(&ids(&["v1", "v2", "p1"]));
-        q.back(&ids(&["s1", "s4"]));
+    fn drain(q: &mut Queue) -> Vec<String> {
         let mut out = vec![];
         while let Some(i) = q.pop() {
             out.push(i);
         }
-        assert_eq!(out, ids(&["v1", "v2", "p1", "s2", "s1", "s3", "s4"]));
+        out
+    }
+
+    #[test]
+    fn the_cards_on_screen_go_first_then_the_rows_around_them_then_the_background() {
+        let mut q = Queue::default();
+        q.back(&ids(&["s1", "s2", "s3"]));
+        q.view(&ids(&["v1", "v2"]), &ids(&["n1", "v2", "n2"]));
+        q.back(&ids(&["s1", "s4"]));
+        assert_eq!(q.waiting(Tier::View), 2);
+        assert_eq!(q.waiting(Tier::Near), 2);
+        assert_eq!(drain(&mut q), ids(&["v1", "v2", "n1", "n2", "s1", "s2", "s3", "s4"]));
         assert!(q.is_empty());
         q.back(&ids(&["s1"]));
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn searches_for_places_that_scrolled_away_are_dropped() {
+        let mut q = Queue::default();
+        q.back(&ids(&["s1"]));
+        assert_eq!(q.view(&ids(&["a", "b"]), &ids(&["c", "d"])), 0);
+        // the list was flung on: a, c and d are no longer wanted, b is only around the screen now
+        assert_eq!(q.view(&ids(&["e", "f"]), &ids(&["b"])), 3);
+        assert_eq!(drain(&mut q), ids(&["e", "f", "b", "s1"]));
+        // an empty view drops everything it had queued
+        q.view(&ids(&["a"]), &ids(&["b"]));
+        assert_eq!(q.view(&[], &[]), 2);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_card_that_comes_into_view_moves_up_from_the_background() {
+        let mut q = Queue::default();
+        q.back(&ids(&["s1", "S2", "s3"]));
+        q.view(&ids(&["s2"]), &[]);
+        assert_eq!(drain(&mut q), ids(&["s2", "s1", "s3"]));
+    }
+
+    #[test]
+    fn the_page_of_one_app_is_searched_before_the_cards_and_stays_when_the_view_changes() {
+        let mut q = Queue::default();
+        q.view(&ids(&["v1"]), &[]);
+        q.front(Tier::Pinned, &ids(&["p1", "v1"]));
+        q.view(&ids(&["v2", "p1"]), &[]);
+        assert_eq!(drain(&mut q), ids(&["p1", "v1", "v2"]));
+    }
+
+    #[test]
+    fn ids_that_differ_in_case_are_one_app() {
+        let mut q = Queue::default();
+        q.view(&ids(&["Azul.Zulu", "azul.zulu"]), &ids(&["AZUL.ZULU"]));
+        assert_eq!(q.len(), 1);
+        assert_eq!(drain(&mut q), ids(&["Azul.Zulu"]));
     }
 
     #[test]
@@ -716,6 +1053,79 @@ mod tests {
         encode_png(w, h, &rgba).unwrap()
     }
 
+    /// A server with a few files; answers 404 to the rest and notes every path asked for.
+    async fn serve(bind: &str, files: Vec<(&'static str, u16, &'static str, Vec<u8>)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind(format!("{bind}:0")).await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let log: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = log.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = l.accept().await {
+                let (files, seen) = (files.clone(), seen.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    seen.lock().push(path.clone());
+                    let (code, kind, body) = files.iter().find(|f| f.0 == path).map(|f| (f.1, f.2, f.3.clone())).unwrap_or((404, "text/plain", b"no".to_vec()));
+                    let head = format!("HTTP/1.1 {code} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (base, log)
+    }
+
+    fn hits(log: &Arc<Mutex<Vec<String>>>, path: &str) -> usize {
+        log.lock().iter().filter(|p| *p == path).count()
+    }
+
+    #[tokio::test]
+    async fn apps_of_one_publisher_read_the_same_page_and_icon_once() {
+        let html = b"<html><head><link rel=\"icon\" sizes=\"128x128\" href=\"/logo.png\"></head></html>".to_vec();
+        let (base, log) = serve("127.0.0.1", vec![("/downloads", 200, "text/html", html), ("/logo.png", 200, "image/png", png_of(64, 64, [200, 30, 30, 255]))]).await;
+        let pages = vec![format!("{base}/downloads")];
+        // the whole run of a publisher's apps starts at the same moment
+        let runs = futures_util::future::join_all((0..12).map(|i| {
+            let pages = pages.clone();
+            async move { find(&format!("Pub.App{i}"), None, &pages).await }
+        }))
+        .await;
+        assert!(runs.iter().all(|r| r.as_ref().is_ok_and(|g| g.ext == "png")));
+        assert_eq!(hits(&log, "/downloads"), 1);
+        assert_eq!(hits(&log, "/logo.png"), 1);
+        // and an app that comes later takes the answer too
+        assert!(find("Pub.Later", None, &pages).await.is_ok());
+        assert_eq!(hits(&log, "/downloads"), 1);
+        assert_eq!(hits(&log, "/logo.png"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_refuses_us_is_asked_once() {
+        let (base, log) = serve("127.0.0.2", vec![("/a", 403, "text/html", b"no".to_vec()), ("/b", 403, "text/html", b"no".to_vec())]).await;
+        let first = find("Pub.One", None, &[format!("{base}/a")]).await;
+        assert_eq!(first.err(), Some(Miss { passing: false }));
+        // another app of the same publisher does not knock again, not even for its favicon
+        let second = find("Pub.Two", None, &[format!("{base}/b")]).await;
+        assert_eq!(second.err(), Some(Miss { passing: false }));
+        assert_eq!(log.lock().clone(), vec!["/a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_page_that_failed_for_a_passing_reason_is_read_again_by_the_next_search() {
+        // nothing listens here: the page cannot be read, which is a passing failure
+        let l = std::net::TcpListener::bind("127.0.0.3:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        let page = format!("http://{addr}/p");
+        assert_eq!(find("Pub.One", None, &[page.clone()]).await.err(), Some(Miss { passing: true }));
+        assert!(PAGES.lock().get(&page).is_none(), "a failure for a passing reason is not kept");
+    }
+
     #[test]
     fn dark_logos_on_clear_backgrounds_are_told_apart() {
         let px = |c: [u8; 4], n: usize| -> Vec<u8> { (0..n).flat_map(|_| c).collect() };
@@ -731,6 +1141,22 @@ mod tests {
         assert!(!mostly_dark(&px([30, 215, 96, 255], 100)));
         // nothing visible at all
         assert!(!mostly_dark(&px([0, 0, 0, 0], 100)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_tall_picture_becomes_its_middle_square() {
+        // 60 x 180: red on top, green in the middle, blue at the bottom
+        let mut rgba = Vec::new();
+        for y in 0..180u32 {
+            let px = if y < 60 { [255, 0, 0, 255] } else if y < 120 { [0, 255, 0, 255] } else { [0, 0, 255, 255] };
+            rgba.extend((0..60).flat_map(|_| px));
+        }
+        let got = normalize_square(Got { bytes: encode_png(60, 180, &rgba).unwrap(), ext: "png", via: "site", dark: false });
+        assert_eq!(got.ext, "png");
+        let (w, h, out) = decode_scaled(&got.bytes, 4096).unwrap();
+        assert_eq!((w, h), (60, 60));
+        assert!(out.chunks(4).all(|p| p[0] < 10 && p[1] > 245 && p[2] < 10), "only the middle third is left");
     }
 
     #[cfg(windows)]
