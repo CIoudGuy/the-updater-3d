@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod amazon;
+pub mod check;
 pub mod battlenet;
 pub mod ea;
 pub mod epic;

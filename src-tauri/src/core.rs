@@ -43,6 +43,14 @@ fn other_icon_on_disk(id: &str) -> Option<std::path::PathBuf> {
     crate::sources::icons::on_disk(&crate::sources::icons::file_stem(id))
 }
 
+/// The launchers' games among the installed apps.
+fn games_of(v: &[Installed]) -> Vec<sources::games::Game> {
+    v.iter().filter_map(|i| match &i.data {
+        SourceData::Game(g) => Some((**g).clone()),
+        _ => None,
+    }).collect()
+}
+
 /// The apps the catalog sources look at: Other programs are what no source matched, so they
 /// must not count as handled by one.
 fn catalog_apps(v: &[Installed]) -> Vec<Installed> {
@@ -620,6 +628,8 @@ pub struct Core {
     pub other: RwLock<Option<Arc<other::Feed>>>,
     /// Releases of the GitHub projects that Other programs name (see `ghapps`)
     pub ghapps: RwLock<Option<Arc<ghapps::Feed>>>,
+    /// What the launchers' public lists say about the games (see `games::check`)
+    pub games_feed: RwLock<Option<Arc<sources::games::check::Feed>>>,
     jobs: Mutex<Vec<JobRec>>,
     pub elevator: Elevator,
     /// Bumped by "Allow admin rights": the jobs waiting for admin rights try again.
@@ -692,6 +702,7 @@ impl Core {
             tools: RwLock::new(None),
             other: RwLock::new(None),
             ghapps: RwLock::new(None),
+            games_feed: RwLock::new(None),
             jobs: Mutex::new(Vec::new()),
             elevator: Elevator::new(),
             admin_gen: watch::channel(0).0,
@@ -1368,6 +1379,7 @@ impl Core {
         let tf = self.tools.read().clone();
         let of = self.other.read().clone();
         let gf = self.ghapps.read().clone();
+        let gmf = self.games_feed.read().clone();
         let keep_patch = self.settings.read().blender_keep_patch_versions;
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
@@ -1378,8 +1390,8 @@ impl Core {
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest(i, &installed, f)),
                 Source::Other => of.as_ref().and_then(|f| other::latest(i, f)),
-                // The launcher marks its own updates.
-                Source::Games => sources::games::latest(i),
+                // The launcher marks its own updates; GOG's public list has the rest.
+                Source::Games => sources::games::latest(i).or_else(|| gmf.as_ref().and_then(|f| f.updates.get(&i.id)).map(|u| Latest { version: u.clone(), size: None, note: None })),
                 // Listed to uninstall them; no catalog knows their versions, their GitHub project may.
                 Source::Programs => gf.as_ref().and_then(|f| ghapps::latest(i, f)),
                 // Not in the installed list: the driver check has their versions.
@@ -1702,8 +1714,16 @@ impl Core {
             }
             Some(Arc::new(ghapps::fetch(&installed).await))
         };
-        let (a, c, b, t, o, g) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f, gh_f);
+        // Games: GOG's newest builds, and the Steam pages of games from other launchers.
+        let games_f = async {
+            if !settings.sources.games {
+                return None;
+            }
+            Some(Arc::new(sources::games::check::check(&games_of(&installed)).await))
+        };
+        let (a, c, b, t, o, g, gm) = tokio::join!(adobe_f, craft_f, blender_f, tools_f, other_f, gh_f, games_f);
         *self.ghapps.write() = g;
+        *self.games_feed.write() = gm;
         if a.is_some() {
             *self.adobe.write() = a;
         } else if settings.sources.adobe {
@@ -1974,6 +1994,8 @@ impl Core {
             async { if settings.sources.other { other::fetch(&catalog_apps(&installed), None).await.ok() } else { None } },
         );
         let g = if settings.sources.other { Some(Arc::new(ghapps::fetch(&installed).await)) } else { None };
+        let gm = if settings.sources.games { Some(Arc::new(sources::games::check::check(&games_of(&installed)).await)) } else { None };
+        *self.games_feed.write() = gm;
         crate::http::PREFER_CACHE.store(false, Ordering::Relaxed);
         *self.ghapps.write() = g;
         if settings.sources.other && crate::machine::tuned().prebuild_browse && self.window_open() {
@@ -2669,7 +2691,8 @@ impl Core {
         }
         let inst = self.installed(app_id).ok_or_else(|| anyhow!("That app is no longer installed"))?;
         if let SourceData::Game(g) = &inst.data {
-            return Ok(sources::games::news(g).await);
+            let twin = self.games_feed.read().as_ref().and_then(|f| f.steam.get(&inst.id).copied());
+            return Ok(sources::games::news(g, twin).await);
         }
         if inst.source == Source::Programs {
             // No catalog knows its versions: its GitHub releases, when it names its project.
@@ -2756,7 +2779,10 @@ impl Core {
                 Ok(with_adobe_notes(list).await)
             }
             SourceData::Craft { key, .. } => craft::versions(key, Some(&inst.version), s.craft_prereleases).await,
-            SourceData::Game(g) => Ok(sources::games::news(g).await),
+            SourceData::Game(g) => {
+                let twin = self.games_feed.read().as_ref().and_then(|f| f.steam.get(&inst.id).copied());
+                Ok(sources::games::news(g, twin).await)
+            }
             SourceData::Blender { .. } => {
                 let feed = self.blender.read().clone().ok_or_else(|| anyhow!("Blender releases are not loaded yet"))?;
                 blender::versions(&inst, &feed).await
