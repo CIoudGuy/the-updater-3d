@@ -2954,7 +2954,8 @@ impl Core {
             }
             SourceData::Tools { .. } => {
                 let feed = self.tools.read().clone().ok_or_else(|| anyhow!("The release lists are not loaded yet"))?;
-                tools::versions_with(&inst, &feed, s.pre_releases.get(&inst.id).copied()).await
+                let all = self.installed_all();
+                tools::versions_with(&inst, &all, &feed, s.pre_releases.get(&inst.id).copied()).await
             }
             SourceData::Other { .. } => {
                 let feed = self.other.read().clone().unwrap_or_default();

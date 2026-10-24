@@ -1230,11 +1230,11 @@ fn with_fallback_notes(key: &str, list: &mut [Rel]) {
 
 /// Versions an installed app can be set to (newest first, at most 25).
 pub async fn versions(inst: &Installed, feed: &Feed) -> Result<Vec<VersionInfo>> {
-    versions_with(inst, feed, None).await
+    versions_with(inst, std::slice::from_ref(inst), feed, None).await
 }
 
 /// `versions` with the user's choice of pre-releases for the app (None: as the copy is).
-pub async fn versions_with(inst: &Installed, feed: &Feed, choice: Option<bool>) -> Result<Vec<VersionInfo>> {
+pub async fn versions_with(inst: &Installed, all: &[Installed], feed: &Feed, choice: Option<bool>) -> Result<Vec<VersionInfo>> {
     let key = tools_key(inst).to_string();
     let d = def(&key).ok_or_else(|| anyhow!("unknown app"))?;
     let mut list: Vec<Rel> = match key.as_str() {
@@ -1253,7 +1253,13 @@ pub async fn versions_with(inst: &Installed, feed: &Feed, choice: Option<bool>) 
         _ => feed.list(&key).to_vec(),
     };
     if d.side_by_side && key != "unity" {
+        // The newer version this copy is offered (it installs next to it, a beta of it when the
+        // copy follows pre-releases) shows on top of its own series.
+        let next = latest_with(inst, all, feed, choice).filter(|l| version::series(&l.version) != version::series(&inst.version)).and_then(|l| list.iter().find(|r| r.version == l.version).cloned());
         list.retain(|r| version::series(&r.version) == version::series(&inst.version));
+        if let Some(n) = next {
+            list.insert(0, n);
+        }
     }
     if list.is_empty() {
         bail!("{} has no other versions to choose from", d.name);

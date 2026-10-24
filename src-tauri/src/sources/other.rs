@@ -1685,7 +1685,7 @@ fn make_with(m: &Match, feed: Option<&Feed>, hints: &std::cell::OnceCell<super::
         code,
         fg,
         bg,
-        version: e.display_version.trim().to_string(),
+        version: shown_version(e, pf),
         install_dir: dir,
         exe,
         uninstall: uninstall_cmd(e, kind.as_deref()),
@@ -2481,6 +2481,86 @@ fn version_shape(name: &str) -> String {
     VER.replace_all(name, "<v>").into_owned()
 }
 
+/// A beta whose Windows entry names it ("WinRAR 7.30 beta 1 (x64)") but writes a plain version
+/// ("7.30.1", which reads newer than the final "7.30.0"): its version as a pre-release of the
+/// named one ("7.30-beta1"), so the final release is an update for it. Only for a version the
+/// catalog does not list.
+pub fn beta_from_name(name: &str, shown: &str, catalog_has: impl Fn(&str) -> bool) -> Option<String> {
+    static NAMED: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(?i)\b(\d+\.\d+(?:\.\d+)?)\s+(alpha|beta|rc|preview)\s*(\d*)\b").unwrap());
+    let shown = shown.trim();
+    if shown.is_empty() || shown.chars().any(|c| c.is_ascii_alphabetic()) || catalog_has(shown) {
+        return None;
+    }
+    let c = NAMED.captures(name)?;
+    let named = &c[1];
+    // The plain version is that release's ("7.30" and "7.30.1").
+    let series = |v: &str| v.split('.').take(2).collect::<Vec<_>>().join(".");
+    if series(named) != series(shown) {
+        return None;
+    }
+    Some(format!("{named}-{}{}", c[2].to_ascii_lowercase(), &c[3]))
+}
+
+/// The version an installed copy reads as (see `beta_from_name`).
+fn shown_version(e: &winutil::UninstallEntry, pf: Option<&PkgFeed>) -> String {
+    let shown = e.display_version.trim().to_string();
+    let listed = |v: &str| pf.is_some_and(|p| p.versions.iter().any(|r| r.version == v || version::cmp(&r.version, v).is_eq()));
+    beta_from_name(&e.display_name, &shown, listed).unwrap_or(shown)
+}
+
+// ---------------------------------------------------------------- betas on a publisher's own site
+
+/// Publishers whose betas are only on their own site, signed (no checksum published): the page
+/// that lists them, the signer Windows must report, and the change list.
+struct SiteBetas {
+    pkg: &'static str,
+    page: &'static str,
+    signer: &'static str,
+    notes: &'static str,
+}
+
+const SITE_BETAS: &[SiteBetas] = &[SiteBetas { pkg: "RARLab.WinRAR", page: "https://www.rarlab.com/download.htm", signer: "win.rar GmbH", notes: "https://www.rarlab.com/rarnew.htm" }];
+
+/// WinRAR's betas on its download page for the catalog's installer `stable_file`, newest first:
+/// (version as the app reads it, as WinRAR names it, file). The same build and language as the
+/// installer: "winrar-x64-723d.exe" gets "winrar-x64-730b1d.exe" ("7.30-beta1", "7.30 beta 1").
+pub fn winrar_betas(page: &str, stable_file: &str) -> Vec<(String, String, String)> {
+    static STABLE: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(?i)^winrar-(x64|x32|arm64)-\d{3,4}([a-z]*)\.exe$").unwrap());
+    let Some(c) = STABLE.captures(stable_file) else { return vec![] };
+    let (arch, lang) = (c[1].to_ascii_lowercase(), c[2].to_ascii_lowercase());
+    let Ok(re) = regex::Regex::new(&format!(r"(?i)/rar/(winrar-{arch}-(\d)(\d{{2}})b(\d+){lang}\.exe)")) else { return vec![] };
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for c in re.captures_iter(page) {
+        let file = c[1].to_ascii_lowercase();
+        if out.iter().any(|(_, _, f)| *f == file) {
+            continue;
+        }
+        out.push((format!("{}.{}-beta{}", &c[2], &c[3], &c[4]), format!("{}.{} beta {}", &c[2], &c[3], &c[4]), file));
+    }
+    out.sort_by(|a, b| super::tools::cmp_ver(&b.0, &a.0));
+    out
+}
+
+/// A publisher's own betas newer than the catalog's version `m`, as the catalog's installer
+/// installs, checked by the publisher's signature.
+async fn site_pre_releases(m: &Manifest, stable: &Installer) -> Vec<(super::ghapps::Release, Installer)> {
+    let Some(site) = SITE_BETAS.iter().find(|s| s.pkg.eq_ignore_ascii_case(&m.id)) else { return vec![] };
+    let file = stable.url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).unwrap_or_default();
+    let Some(page) = notes::page(site.page).await else { return vec![] };
+    let base = site.page.rsplit_once('/').map(|(b, _)| b).unwrap_or(site.page);
+    let mut out = Vec::new();
+    for (version, label, f) in winrar_betas(&page, file).into_iter().filter(|(v, _, _)| is_newer(v, &m.version)) {
+        let url = format!("{base}/rar/{f}");
+        let lines = linked_notes(site.notes, &label).await;
+        let body = lines.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n");
+        let asset = super::ghapps::Asset { name: f.clone(), url: url.clone(), size: None, sha256: None };
+        let rel = super::ghapps::Release { tag: label, version, body, url: site.notes.into(), date: None, prerelease: true, assets: vec![asset] };
+        let inst = Installer { url, sha256: String::new(), signer: Some(site.signer.into()), product_code: None, arp: vec![], release_date: None, ..stable.clone() };
+        out.push((rel, inst));
+    }
+    out
+}
+
 /// What a package's pre-release builds are called when the catalog lists them as packages of
 /// their own ("Google.Chrome.Beta" next to "Google.Chrome").
 const BUILD_SUFFIXES: &[&str] = &["Beta", "Preview", "Insiders", "Insider", "Dev", "Development", "DeveloperEdition", "Canary", "Nightly", "Alpha", "EAP", "PreRelease", "Snapshot", "PTB", "RC", "EarlyAccess"];
@@ -2539,9 +2619,14 @@ pub fn pre_repo(m: &Manifest, stable: &Installer) -> Option<String> {
 
 pub async fn pre_releases(m: &Manifest, w: &Want) -> Vec<(super::ghapps::Release, Installer)> {
     let Ok(stable) = choose(m, w) else { return vec![] };
-    let Some(repo) = pre_repo(m, stable) else { return vec![] };
-    let rels = super::ghapps::releases(&repo).await;
-    pre_of(&rels, m, stable)
+    let from_github = match pre_repo(m, stable) {
+        Some(repo) => pre_of(&super::ghapps::releases(&repo).await, m, stable),
+        None => vec![],
+    };
+    if from_github.is_empty() {
+        return site_pre_releases(m, stable).await;
+    }
+    from_github
 }
 
 /// What an app's GitHub pre-releases `pres` (newest first) offer it: the newest, with its
@@ -2729,7 +2814,7 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
     let log = paths::logs().join(format!("other-{}-{}.log", tail, safe_name(&m.version)));
     let update = current.is_some() && kind != JobKind::Install;
     let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
-    let download = Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()), sha512: None, md5: None, signer: None, headers: vec![] };
+    let download = Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()).filter(|s| !s.is_empty()), sha512: None, md5: None, signer: i.signer.clone(), headers: vec![] };
     if package_kind(&i.kind) {
         // An app package: Windows' package manager installs it for this user, no admin rights.
         let family = i.family.clone().filter(|f| !f.trim().is_empty()).ok_or_else(|| anyhow!("{name}: the catalog does not name its package family"))?;

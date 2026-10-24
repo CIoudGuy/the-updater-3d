@@ -809,6 +809,20 @@ async fn live_beta_channels() {
 }
 
 #[tokio::test]
+async fn a_godot_copys_version_list_shows_the_next_version_it_is_offered() {
+    let here = inst("godot", "tools:godot:4.7.2", "4.7.2", "4.7.2");
+    let feed = feed_with("godot", vec![rel("4.8-beta1", true), rel("4.7.2", false), rel("4.7.1", false), rel("4.6.3", false)]);
+    let all = std::slice::from_ref(&here);
+    let names = |l: &[VersionInfo]| l.iter().map(|v| (v.version.clone(), v.latest)).collect::<Vec<_>>();
+    // Following pre-releases: the beta it is offered is on top, marked newest; then its series.
+    let pre = versions_with(&here, all, &feed, Some(true)).await.unwrap();
+    assert_eq!(names(&pre), vec![("4.8-beta1".to_string(), true), ("4.7.2".to_string(), false), ("4.7.1".to_string(), false)]);
+    // Stable: only its own series (no final 4.8 yet).
+    let stable = versions_with(&here, all, &feed, Some(false)).await.unwrap();
+    assert_eq!(names(&stable), vec![("4.7.2".to_string(), true), ("4.7.1".to_string(), false)]);
+}
+
+#[tokio::test]
 async fn the_next_godot_beta_installs_next_to_the_copy_here() {
     let root = std::env::temp_dir().join("updater3d-tests").join("godot-next");
     let _ = std::fs::remove_dir_all(&root);
