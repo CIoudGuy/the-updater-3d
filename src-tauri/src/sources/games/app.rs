@@ -54,7 +54,9 @@ pub fn installed(g: Game) -> Installed {
         // A launcher that keeps no version (Ubisoft Connect) still has it installed.
         version: if g.version.trim().is_empty() { "Installed".into() } else { g.version.clone() },
         install_dir: g.install_dir.clone(),
-        exe: None,
+        // The program the launcher names (Epic's build manifest): Open starts it when there is no
+        // launch address.
+        exe: g.program.clone(),
         uninstall: None,
         updated_at: g.updated_at.clone(),
         size_hint: g.size,
@@ -92,7 +94,7 @@ pub fn installed_with(g: Game, entries: &[UninstallEntry]) -> Installed {
         }
         // The game's program, as its entry names it: Open starts it when the launcher has no
         // address for that, and its icon is read from it when the launcher keeps no picture.
-        if no_launch || i.icon_remote.is_none() {
+        if i.exe.is_none() && (no_launch || i.icon_remote.is_none()) {
             i.exe = crate::sources::proglogo::display_icon(&e.display_icon).map(|(p, _)| p).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) && p.is_file());
         }
     }
@@ -249,6 +251,7 @@ mod tests {
             page: Some("https://store.steampowered.com/app/1912410/".into()),
             notes: NotesFrom::SteamNews(1912410),
             icon: None,
+            program: None,
         }
     }
 

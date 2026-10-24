@@ -121,6 +121,9 @@ pub struct Game {
     pub notes: NotesFrom,
     /// A picture of it the launcher keeps on this PC (its icon), when there is one
     pub icon: Option<PathBuf>,
+    /// The game's own program, as its launcher names it: Open starts it when the launcher has no
+    /// launch address.
+    pub program: Option<PathBuf>,
 }
 
 impl Game {
@@ -351,7 +354,7 @@ mod tests {
 
     #[test]
     fn a_game_id_names_its_launcher() {
-        let g = Game { launcher: Launcher::Epic, key: "Fortnite".into(), name: "Fortnite".into(), version: String::new(), update: None, install_dir: None, size: None, updated_at: None, launch_uri: None, show_uri: None, uninstall_uri: None, page: None, notes: NotesFrom::None, icon: None };
+        let g = Game { launcher: Launcher::Epic, key: "Fortnite".into(), name: "Fortnite".into(), version: String::new(), update: None, install_dir: None, size: None, updated_at: None, launch_uri: None, show_uri: None, uninstall_uri: None, page: None, notes: NotesFrom::None, icon: None, program: None };
         assert_eq!(g.id(), "game:epic:fortnite");
     }
 }

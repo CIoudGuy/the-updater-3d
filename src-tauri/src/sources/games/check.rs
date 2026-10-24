@@ -143,7 +143,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_public_answers() {
-        let gog_game = Game { launcher: Launcher::Gog, key: "1423049311".into(), name: "Cyberpunk 2077".into(), version: "2.31a".into(), update: None, install_dir: None, size: None, updated_at: None, launch_uri: None, show_uri: None, uninstall_uri: None, page: None, notes: NotesFrom::Gog(1423049311), icon: None };
+        let gog_game = Game { launcher: Launcher::Gog, key: "1423049311".into(), name: "Cyberpunk 2077".into(), version: "2.31a".into(), update: None, install_dir: None, size: None, updated_at: None, launch_uri: None, show_uri: None, uninstall_uri: None, page: None, notes: NotesFrom::Gog(1423049311), icon: None, program: None };
         let rdr2 = Game { launcher: Launcher::Rockstar, key: "rdr2".into(), name: "Red Dead Redemption 2".into(), notes: NotesFrom::None, ..gog_game.clone() };
         let f = check(&[gog_game.clone(), rdr2.clone()]).await;
         eprintln!("{f:?}");

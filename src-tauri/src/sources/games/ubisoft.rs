@@ -70,6 +70,7 @@ pub fn game_of(i: &Install, icon: Option<PathBuf>) -> Option<Game> {
         page: None,
         notes: NotesFrom::None,
         icon,
+        program: None,
     })
 }
 

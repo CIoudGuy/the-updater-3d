@@ -59,6 +59,7 @@ pub fn game_of(e: &UninstallEntry) -> Option<Game> {
         page: None,
         notes: NotesFrom::None,
         icon: None,
+        program: None,
     })
 }
 

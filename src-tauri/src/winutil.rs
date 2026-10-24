@@ -206,6 +206,20 @@ pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
     Some((free, total))
 }
 
+/// The roots ("C:\", "D:\") of this PC's fixed drives: its own disks, not removable, network or
+/// optical ones (a drive that is asleep or unplugged is not woken or waited for).
+pub fn fixed_drives() -> Vec<PathBuf> {
+    use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    const DRIVE_FIXED: u32 = 3;
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u32)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| format!("{}:\\", (b'A' + i as u8) as char))
+        .filter(|root| unsafe { GetDriveTypeW(PCWSTR(HSTRING::from(root.as_str()).as_ptr())) } == DRIVE_FIXED)
+        .map(PathBuf::from)
+        .collect()
+}
+
 /// Root of the volume ("C:\") for display and grouping.
 pub fn volume_root(path: &Path) -> String {
     let s = path.to_string_lossy();

@@ -201,7 +201,7 @@
               <Btn variant="secondary" title="Restart the PC in a minute to finish installing drivers" onclick={() => send("restart_pc", {})}>Restart PC</Btn>
             {/if}
             {#if app.manualUrl}
-              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : isGame ? `Update in ${launcher}` : `Get ${app.latest}`) : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
+              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : isGame ? `Update in ${launcher}` : `Get ${app.latest}`) : isGame ? `Open in ${launcher}` : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
             {:else if app.status === "update"}
               <Btn variant="primary" hint="U" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update to {app.latest}</Btn>
             {:else if app.status === "missing" && canRepair(app)}
@@ -211,6 +211,10 @@
             {/if}
             {#if app.storeUrl}
               <Btn variant="secondary" title="Updates and removal happen in the Microsoft Store" onclick={() => openStorePage(app.id)}>Open in Microsoft Store <Icon d={I.external} size={14} width={2.5} /></Btn>
+            {/if}
+            {#if isGame && !app.canUninstall && app.manualUrl}
+              <!-- its launcher keeps no uninstall address or entry: it is uninstalled there -->
+              <Btn variant="secondary" title="{launcher} uninstalls {app.name}" onclick={() => send("open_driver_page", { id: app.id })}>Uninstall in {launcher}</Btn>
             {/if}
             {#if app.canUninstall}
               <Btn variant="danger" title="Uninstall {app.name}" onclick={() => askUninstall(app.id)}>{app.source === "programs" && app.status === "missing" ? "Remove from list" : "Uninstall"}</Btn>

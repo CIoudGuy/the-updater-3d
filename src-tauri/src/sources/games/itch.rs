@@ -61,6 +61,7 @@ pub fn game_of(cave: &Row, locations: &[Row], games: &[Row]) -> Option<Game> {
         page: None,
         notes: NotesFrom::None,
         icon: None,
+        program: None,
     })
 }
 

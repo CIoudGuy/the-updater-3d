@@ -41,6 +41,7 @@ pub fn game_of(r: &Row) -> Option<Game> {
         page: None,
         notes: NotesFrom::None,
         icon: None,
+        program: None,
     })
 }
 
