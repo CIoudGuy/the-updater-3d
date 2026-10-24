@@ -4,7 +4,8 @@
 use super::{own_uri, Game, Launcher, NotesFrom};
 use crate::model::{JobKind, Source, VersionInfo};
 use crate::sources::{Installed, Latest, Plan, SourceData, Step, Verify, WAITING_FOR_YOU};
-use anyhow::{bail, Result};
+use crate::winutil::UninstallEntry;
+use anyhow::{anyhow, bail, Result};
 use std::time::Duration;
 
 /// Two letters and colors for a game without a picture.
@@ -66,6 +67,52 @@ pub fn installed(g: Game) -> Installed {
         icon_remote: g.icon.as_ref().map(|p| p.to_string_lossy().into_owned()),
         data: SourceData::Game(Box::new(g)),
     }
+}
+
+fn norm(p: &str) -> String {
+    p.trim().trim_matches('"').replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase()
+}
+
+/// The game's own entry in Windows' list: the one installed in the game's folder.
+fn entry_of<'a>(g: &Game, entries: &'a [UninstallEntry]) -> Option<&'a UninstallEntry> {
+    let dir = norm(&g.install_dir.as_ref()?.to_string_lossy());
+    entries.iter().find(|e| !e.install_location.trim().is_empty() && norm(&e.install_location) == dir)
+}
+
+/// The game as an installed app. A launcher with no uninstall address (Rockstar, EA, Battle.net,
+/// GOG) leaves the game's own uninstaller in Windows' list: that one is used.
+pub fn installed_with(g: Game, entries: &[UninstallEntry]) -> Installed {
+    let own = g.uninstall_uri.as_deref().is_some_and(|u| own_uri(g.launcher, u));
+    let no_launch = g.launch_uri.as_deref().is_none_or(|u| !own_uri(g.launcher, u));
+    let entry = entry_of(&g, entries).cloned();
+    let mut i = installed(g);
+    if let Some(e) = entry {
+        if !own {
+            i.uninstall = crate::uninstall::switches::choose(&e, crate::uninstall::switches::detect(&e, &[])).map(|c| c.args);
+        }
+        // The game's program, as its entry names it: Open starts it when the launcher has no
+        // address for that, and its icon is read from it when the launcher keeps no picture.
+        if no_launch || i.icon_remote.is_none() {
+            i.exe = crate::sources::proglogo::display_icon(&e.display_icon).map(|(p, _)| p).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) && p.is_file());
+        }
+    }
+    i
+}
+
+/// Uninstalling a game: through its launcher when it has an address for it, else with the
+/// game's own uninstaller from Windows' list.
+pub fn plan_uninstall_with(i: &Installed, entries: &[UninstallEntry]) -> Result<Plan> {
+    if can_uninstall(i) {
+        return plan_uninstall(i);
+    }
+    let g = game(i).ok_or_else(|| anyhow!("{} is not a launcher's game", i.name))?;
+    let e = entry_of(g, entries).ok_or_else(|| anyhow!("{} is uninstalled in {}", i.name, g.launcher.name()))?;
+    let prog = crate::uninstall::programs::make(e, None, g.install_dir.clone(), &|p| p.exists(), None);
+    let mut p = crate::uninstall::run::plan(&prog)?;
+    p.app_id = i.id.clone();
+    p.name = i.name.clone();
+    p.verify = Verify::Removed { app_id: i.id.clone() };
+    Ok(p)
 }
 
 fn game(i: &Installed) -> Option<&Game> {
@@ -142,7 +189,17 @@ pub async fn news(g: &Game) -> Vec<VersionInfo> {
             let Ok(Ok(f)) = tokio::time::timeout(Duration::from_secs(15), crate::http::get_cached(&url, &[], Duration::from_secs(3600))).await else { return vec![] };
             steam_history(id, &String::from_utf8_lossy(&f.body))
         }
-        NotesFrom::Gog(_) | NotesFrom::None => vec![],
+        NotesFrom::Gog(id) => {
+            let Ok(Ok(f)) = tokio::time::timeout(Duration::from_secs(15), crate::http::get_cached(&super::gog::changelog_url(id), &[], Duration::from_secs(12 * 3600))).await else { return vec![] };
+            let mut seen = Vec::new();
+            super::gog::changelog_items(&String::from_utf8_lossy(&f.body))
+                .into_iter()
+                .take(15)
+                .enumerate()
+                .map(|(n, (title, date, lines))| VersionInfo { version: unique(&title, &mut seen), date, notes: lines, notes_url: None, size: None, installed: false, latest: n == 0, prerelease: false })
+                .collect()
+        }
+        NotesFrom::None => vec![],
     }
 }
 
@@ -220,6 +277,37 @@ mod tests {
         assert!(plan_uninstall(&i).is_err());
         assert!(!can_uninstall(&i));
         assert_eq!(show_uri(&i), None);
+    }
+
+    #[test]
+    fn a_launcher_without_an_uninstall_address_uses_the_games_own_uninstaller() {
+        let mut g = starfield(None);
+        g.launcher = Launcher::Rockstar;
+        g.key = "rdr2".into();
+        g.uninstall_uri = None;
+        g.install_dir = Some(PathBuf::from(r"D:\Games\Red Dead Redemption 2"));
+        let e = UninstallEntry {
+            key: "Rockstar Games Red Dead Redemption 2".into(),
+            hive: "HKLM32",
+            display_name: "Red Dead Redemption 2".into(),
+            install_location: r"D:\Games\Red Dead Redemption 2\".into(),
+            uninstall_string: r#""C:\Program Files\Rockstar Games\Launcher\uninstall.exe" -uninstall=rdr2"#.into(),
+            ..Default::default()
+        };
+        let other = UninstallEntry { key: "Other".into(), display_name: "Other".into(), install_location: r"D:\Games\Other".into(), uninstall_string: r#""D:\Games\Other\unins.exe""#.into(), ..Default::default() };
+        let i = installed_with(g.clone(), &[other.clone(), e.clone()]);
+        assert!(i.uninstall.is_some(), "its entry's uninstaller is used");
+        let p = plan_uninstall_with(&i, &[other.clone(), e]).unwrap();
+        assert_eq!(p.app_id, i.id);
+        assert!(matches!(&p.verify, Verify::Removed { app_id } if app_id == &i.id));
+        assert!(matches!(&p.steps[..], [Step::Run { exe, .. }] if exe.to_string_lossy().ends_with("uninstall.exe")));
+        // No entry in its folder: nothing to run.
+        let lone = installed_with(g, &[other.clone()]);
+        assert!(lone.uninstall.is_none());
+        assert!(plan_uninstall_with(&lone, &[other]).is_err());
+        // A launcher with its own address keeps it.
+        let s = installed_with(starfield(None), &[]);
+        assert!(matches!(&plan_uninstall_with(&s, &[]).unwrap().steps[..], [Step::OpenUri { .. }]));
     }
 
     #[test]
