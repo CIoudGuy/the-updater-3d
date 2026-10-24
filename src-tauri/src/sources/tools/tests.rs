@@ -114,6 +114,35 @@ fn godot_stable_from_the_main_repo_and_betas_from_builds() {
 }
 
 #[test]
+fn krita_betas_come_from_its_unstable_folder() {
+    let index = r#"<tr><td valign="top"><a href="5.3.0-prealpha-fast-sketch/"><img src="/icons/folder.gif" alt="[DIR]" /></a></td><td><a href="5.3.0-prealpha-fast-sketch/">5.3.0-prealpha-fast-sketch/</a></td><td align="right">2025-01-10 10:00  </td><td align="right">  - </td><td>&nbsp;</td></tr>
+<tr><td valign="top"><a href="6.0.0-beta1/"><img src="/icons/folder.gif" alt="[DIR]" /></a></td><td><a href="6.0.0-beta1/">6.0.0-beta1/</a></td><td align="right">2026-01-20 10:00  </td><td align="right">  - </td><td>&nbsp;</td></tr>
+<tr><td valign="top"><a href="6.0.0-beta3/"><img src="/icons/folder.gif" alt="[DIR]" /></a></td><td><a href="6.0.0-beta3/">6.0.0-beta3/</a></td><td align="right">2026-03-02 10:00  </td><td align="right">  - </td><td>&nbsp;</td></tr>
+<tr><td valign="top"><a href="6.1.0-rc1/"><img src="/icons/folder.gif" alt="[DIR]" /></a></td><td><a href="6.1.0-rc1/">6.1.0-rc1/</a></td><td align="right">2026-11-02 10:00  </td><td align="right">  - </td><td>&nbsp;</td></tr>"#;
+    // Newest first, the special build left out.
+    assert_eq!(krita_pre_versions(index), vec!["6.1.0-rc1", "6.0.0-beta3", "6.0.0-beta1"]);
+    // Only one newer than the release is offered: 6.0.0's betas are older than 6.0.4.
+    let newer: Vec<String> = krita_pre_versions(index).into_iter().filter(|v| cmp_ver(v, "6.0.4.1").is_gt()).collect();
+    assert_eq!(newer, vec!["6.1.0-rc1"]);
+    // Its installer folder reads like a release's.
+    let folder = r#"<tr><td><a href="krita-x64-6.1.0-rc1-setup.exe">krita-x64-6.1.0-rc1-setup.exe</a></td><td align="right">2026-11-02 10:00  </td><td align="right">165M</td><td>&nbsp;</td></tr>"#;
+    assert_eq!(krita_installer(folder, "6.1.0-rc1").map(|(f, _, _)| f).as_deref(), Some("krita-x64-6.1.0-rc1-setup.exe"));
+}
+
+#[test]
+fn a_unity_hub_beta_is_offered_only_as_the_same_kind_of_setup() {
+    let stable = parse_hub_feed_for("version: 3.22.4\nfiles:\n  - url: 3.22.4/UnityHubSetup-3.22.4-x64.exe\n    sha512: JOUWPEVPvW+ayUWYkyklJp5YS1mTId02NnWyEKOxoMkcbxtX8bg/j/46XZmzX/A33pg7N7IPWavQESIjwjAjcg==\n    size: 193385952\nreleaseDate: 2026-10-21T18:25:03.990Z\n", "x64").unwrap();
+    // Hub 4.0's beta turns Hub into an app package: not offered.
+    let msix = parse_hub_feed_for("version: 4.0.0-beta.3\nfiles:\n  - url: 4.0.0-beta.3/UnityHubSetup-4.0.0-beta.3-x64-msix-converter.exe\n    sha512: 3tf7aX2E0q7aULNUXxTWv8AB17vJ3B6f27UjVAIX89h0RcsqAyDOZz4+qB49vzKtpyOXBj6rUOh9GUzIilV+dA==\n    size: 55137624\n", "x64").unwrap();
+    assert!(!usable_hub_beta(&msix, &stable));
+    // A beta that installs like the release is, when it is newer.
+    let setup = parse_hub_feed_for("version: 3.23.0-beta.1\nfiles:\n  - url: 3.23.0-beta.1/UnityHubSetup-3.23.0-beta.1-x64.exe\n    sha512: JOUWPEVPvW+ayUWYkyklJp5YS1mTId02NnWyEKOxoMkcbxtX8bg/j/46XZmzX/A33pg7N7IPWavQESIjwjAjcg==\n    size: 193385952\n", "x64").unwrap();
+    assert!(usable_hub_beta(&setup, &stable));
+    let older = Rel { version: "3.22.0-beta.2".into(), ..setup.clone() };
+    assert!(!usable_hub_beta(&older, &stable));
+}
+
+#[test]
 fn krita_index_and_folder_are_parsed() {
     let index = r#"<tr><td valign="top"><a href="5.3.4.1/"><img src="/icons/folder.gif" alt="[DIR]" /></a></td><td><a href="5.3.4.1/">5.3.4.1/</a>    </td><td align="right">2026-09-20 10:00  </td><td align="right">  - </td><td>&nbsp;</td></tr>
 <tr><td valign="top"><a href="6.0.4.1/"><img src="/icons/folder.gif" alt="[DIR]" /></a></td><td><a href="6.0.4.1/">6.0.4.1/</a>   </td><td align="right">2026-10-07 07:21  </td><td align="right">  - </td><td>&nbsp;</td></tr>
@@ -752,4 +781,17 @@ fn krita_from_the_microsoft_store_is_listed_and_left_to_the_store() {
     let all = vec![site.clone(), k.clone()];
     assert_eq!(latest(&site, &all, &feed).unwrap().version, "5.3.0");
     assert!(catalog_entries(&feed, &all).iter().find(|e| e.id == "tools:krita").unwrap().installed);
+}
+
+/// Run with `cargo test --lib live_beta_channels -- --ignored --nocapture`: Krita's unstable
+/// folder and Unity Hub's beta channel as they are now.
+#[tokio::test]
+#[ignore]
+async fn live_beta_channels() {
+    let krita = krita_releases(false, 1).await.unwrap();
+    eprintln!("krita: {:?}", krita.iter().map(|r| (r.version.clone(), r.prerelease, r.url.clone())).collect::<Vec<_>>());
+    assert!(krita.iter().any(|r| !r.prerelease), "the release is still listed");
+    let hub = unity_hub_releases().await.unwrap();
+    eprintln!("unity hub: {:?}", hub.iter().filter(|r| !r.url.is_empty()).map(|r| (r.version.clone(), r.prerelease, r.file.clone())).collect::<Vec<_>>());
+    assert!(hub.iter().any(|r| !r.prerelease && !r.url.is_empty()));
 }

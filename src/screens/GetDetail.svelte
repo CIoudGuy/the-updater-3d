@@ -10,6 +10,7 @@
   import Paint from "../components/Paint.svelte";
   import BrushBar from "../components/BrushBar.svelte";
   import Num from "../components/Num.svelte";
+  import OtherBuilds from "../components/OtherBuilds.svelte";
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
   import { call, on, send } from "../lib/api";
@@ -282,6 +283,7 @@
           {#if c.source === "blender"}Installs next to your other Blender versions, nothing is replaced.{:else if c.source === "tools"}FreeCAD, Godot and Unity install next to your other versions. OBS Studio and Krita are updated in place. Your projects and settings stay as they are.{:else if c.source === "adobe"}Installed through Creative Cloud. Your preferences and plugins stay as they are.{:else if c.source === "other"}Installed silently with the publisher's own installer, as the catalog lists it. Your settings stay as they are.{:else}Your settings stay as they are.{/if}
           {#if c.prerelease} Pre-release builds can be unstable. Do not rely on them for important work.{/if}
         </span>
+        {#if c.source === "other"}<OtherBuilds id={c.id} />{/if}
       </aside>
     {/if}
   </div>

@@ -82,6 +82,9 @@ pub struct Release {
     pub silent: bool,
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Intel marks it a beta
+    #[serde(default)]
+    pub beta: bool,
 }
 
 pub fn is_gpu(p: &Present) -> bool {
@@ -138,10 +141,15 @@ fn clean(name: &str) -> String {
 /// The newest non-beta package for this device that has a 64-bit program for this Windows.
 /// `category`: only packages of that kind ("Graphics"); None: any kind.
 pub fn for_device(p: &Present, configs: &[Config], windows11: bool, category: Option<&str>) -> Option<Release> {
+    for_device_with(p, configs, windows11, category, false)
+}
+
+/// `for_device`, Intel's betas included when `beta` is set.
+pub fn for_device_with(p: &Present, configs: &[Config], windows11: bool, category: Option<&str>, beta: bool) -> Option<Release> {
     let os = if windows11 { "windows-11" } else { "windows-10" };
     configs
         .iter()
-        .filter(|c| !c.is_beta)
+        .filter(|c| beta || !c.is_beta)
         .filter_map(|c| {
             let comp = c.components.iter().find(|k| category.is_none_or(|want| k.category.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(want))) && k.version.is_some() && k.detection_values.iter().any(|v| fits(&p.matching_id, v)))?;
             let file = c.files.iter().find(|f| f.url.ends_with(".exe") && f.operating_systems.iter().any(|o| o.starts_with(os) && o.ends_with("-64")))?;
@@ -159,6 +167,7 @@ pub fn for_device(p: &Present, configs: &[Config], windows11: bool, category: Op
                 args: c.install_options.as_deref().map(|o| o.split_whitespace().map(String::from).collect()).unwrap_or_default(),
                 silent: c.allow_silent_installation,
                 notes: super::drivers::html_notes(html),
+                beta: c.is_beta,
             })
         })
         .max_by(|a, b| super::tools::cmp_ver(&a.version, &b.version))
@@ -236,6 +245,17 @@ mod tests {
 
     fn card(id: &str) -> Present {
         Present { matching_id: id.into(), class: "Display".into(), version: "32.0.101.6987".into(), desc: "Intel(R) Arc(TM) A770 Graphics".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_beta_is_offered_only_to_a_card_that_follows_betas() {
+        let list: Vec<Config> = serde_json::from_str(LIST).unwrap();
+        let a770 = card("PCI\\VEN_8086&DEV_56A0&SUBSYS_10208086");
+        assert_eq!(for_device_with(&a770, &list, true, Some("Graphics"), false).map(|r| (r.version, r.beta)), Some(("32.0.101.9150".into(), false)));
+        assert_eq!(for_device_with(&a770, &list, true, Some("Graphics"), true).map(|r| (r.version, r.beta)), Some(("99.0.0.1".into(), true)));
+        // A card with no beta gets the release either way.
+        let igpu = card("PCI\\VEN_8086&DEV_9A49");
+        assert_eq!(for_device_with(&igpu, &list, true, Some("Graphics"), true).map(|r| r.version), Some("32.0.101.7092".into()));
     }
 
     #[test]

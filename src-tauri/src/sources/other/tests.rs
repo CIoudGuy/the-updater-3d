@@ -981,6 +981,57 @@ fn a_github_pre_release_installs_with_the_catalogs_installer_type_and_its_own_ch
 }
 
 #[test]
+fn a_copy_that_is_a_pre_release_follows_pre_releases_until_the_user_chooses() {
+    let (m, stable) = sharex_21();
+    let sha = "bb".repeat(32);
+    let rels = vec![gh_rel("22.1.0-beta.1", true, &[("ShareX-22.1.0-beta.1-setup-x64.exe", Some(&sha))]), gh_rel("22.0.0", true, &[("ShareX-22.0.0-setup-x64.exe", Some(&sha))])];
+    let pres = pre_of(&rels, &m, &stable);
+    // ShareX 22.0.0 here, installed from its GitHub pre-release: the next one is offered.
+    let (offer, copy) = pre_offer(&pres, "22.0.0").unwrap();
+    assert_eq!((offer.version.as_str(), offer.size, copy), ("22.1.0-beta.1", Some(140_000_000), true));
+    // 21.0.0 here: offered only if the user chooses pre-releases.
+    assert!(!pre_offer(&pres, "21.0.0").unwrap().1);
+    // Which copies are looked up when the user has not chosen: only one newer than the catalog.
+    let pkg = Pkg { row: 1, id: "ShareX.ShareX".into(), name: "ShareX".into(), moniker: None, latest: "21.0.0".into(), arp_min: None, arp_max: None, hash: "ab".repeat(32) };
+    let feed = Feed { pkgs: HashMap::from([("sharex.sharex".to_string(), PkgFeed { pkg, versions: vec![], latest: Some(m.clone()) })]), popular: vec![], unfinished: false };
+    let here = |v: &str| installed_from(entry("ShareX_is1", "HKLM64", "ShareX", v, "ShareX Team"), "ShareX.ShareX");
+    assert!(may_follow_pre(&here("22.0.0"), &feed, None));
+    assert!(!may_follow_pre(&here("21.0.0"), &feed, None));
+    assert!(may_follow_pre(&here("21.0.0"), &feed, Some(true)) && !may_follow_pre(&here("22.0.0"), &feed, Some(false)));
+}
+
+#[test]
+fn a_pre_release_file_is_found_when_it_writes_its_version_differently_from_the_catalog() {
+    let (m, stable) = sharex_21();
+    let sha = "cc".repeat(32);
+    // The catalog says "1.4", the file "1.4.0"; the beta's file has its tag in the same place.
+    let m = Manifest { version: "1.4".into(), ..m };
+    let stable = Installer { url: "https://github.com/acme/tool/releases/download/v1.4.0/Tool_1.4.0_x64-setup.exe".into(), ..stable };
+    let rels = vec![gh_rel("2.0.0-beta.1", true, &[("Tool_2.0.0-beta.1_x64-portable.zip", Some(&sha)), ("Tool_2.0.0-beta.1_x64-setup.exe", Some(&sha)), ("Tool_2.0.0-beta.1_arm64-setup.exe", Some(&sha))])];
+    let pres = pre_of(&rels, &m, &stable);
+    assert_eq!(pres.iter().map(|(_, i)| i.url.rsplit('/').next().unwrap_or("")).collect::<Vec<_>>(), vec!["Tool_2.0.0-beta.1_x64-setup.exe"]);
+    // Two files that fit: none is guessed.
+    let two = vec![gh_rel("2.0.0-beta.1", true, &[("Tool_2.0.0_x64-setup.exe", Some(&sha)), ("Tool_2.0.0-beta.1_x64-setup.exe", Some(&sha))])];
+    assert!(pre_of(&two, &m, &stable).is_empty());
+}
+
+#[test]
+fn an_apps_beta_and_nightly_packages_are_its_other_builds() {
+    let idx = test_index();
+    for (id, name) in [("Google.Chrome", "Google Chrome"), ("Google.Chrome.Beta", "Google Chrome Beta"), ("Google.Chrome.Dev", "Google Chrome Dev"), ("Google.Chrome.Canary", "Google Chrome Canary"), ("Google.Chrome.EXE", "Google Chrome (EXE)"), ("Mozilla.Firefox", "Mozilla Firefox"), ("Mozilla.Firefox.Beta.MSIX", "Firefox Beta"), ("Mozilla.Firefox.DeveloperEdition", "Firefox Developer Edition"), ("Mozilla.Firefox.de", "Mozilla Firefox (de)"), ("7zip.7zip", "7-Zip")] {
+        idx.add_test_package(id, name, "1.0", &[], &[], &[], "x");
+    }
+    let names = |id: &str| other_builds(&idx, id).into_iter().map(|(i, _)| i).collect::<Vec<_>>();
+    // The pre-release packages, not the other installer kinds or languages.
+    assert_eq!(names("Google.Chrome"), vec!["Google.Chrome.Beta", "Google.Chrome.Dev", "Google.Chrome.Canary"]);
+    assert_eq!(names("Mozilla.Firefox"), vec!["Mozilla.Firefox.Beta.MSIX", "Mozilla.Firefox.DeveloperEdition"]);
+    // From a beta: the release first, then the others.
+    assert_eq!(names("Google.Chrome.Beta"), vec!["Google.Chrome", "Google.Chrome.Dev", "Google.Chrome.Canary"]);
+    assert_eq!(names("mozilla.firefox.beta.msix"), vec!["Mozilla.Firefox", "Mozilla.Firefox.DeveloperEdition"]);
+    assert!(names("7zip.7zip").is_empty());
+}
+
+#[test]
 fn only_an_installer_from_the_projects_releases_gets_its_pre_releases() {
     let (_, stable) = sharex_21();
     assert_eq!(installer_repo(&stable).as_deref(), Some("ShareX/ShareX"));
@@ -999,4 +1050,13 @@ async fn live_sharex_pre_release() {
     let m = newest_manifest(&list, latest).await.unwrap();
     let pres = pre_releases(&m, &Want::fresh()).await;
     eprintln!("catalog {} | pre-releases {:?}", m.version, pres.iter().map(|(r, i)| (r.version.clone(), i.url.clone(), i.sha256.len())).collect::<Vec<_>>());
+    // Its release text only links the changelog page: the list is that page's section.
+    if let Some((r, _)) = pres.first() {
+        let (lines, page) = release_text_notes(&r.body, &r.version).await;
+        eprintln!("{} notes from {page:?}: {} lines, first {:?}", r.version, lines.len(), lines.first());
+        assert!(lines.len() > 5 && !lines.iter().any(|l| l.eq_ignore_ascii_case("changelog")), "{lines:?}");
+    }
+    // The full version list shows it with its changes.
+    let infos = with_pre(vec![], Some(&m), &Want::fresh(), None, false).await;
+    assert!(infos.first().is_some_and(|v| v.prerelease && v.notes.len() > 5), "{:?}", infos.first());
 }

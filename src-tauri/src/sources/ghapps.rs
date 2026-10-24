@@ -433,6 +433,24 @@ pub fn versions(i: &Installed, feed: &Feed, choice: Option<bool>) -> Vec<Version
         .collect()
 }
 
+/// `versions`, with the change list of a release whose text only links its changelog page read
+/// from that page (see `other::release_text_notes`).
+pub async fn versions_read(i: &Installed, feed: &Feed, choice: Option<bool>) -> Vec<VersionInfo> {
+    let mut list = versions(i, feed, choice);
+    let Some((_, rels)) = feed.get(&i.id) else { return list };
+    let linked: Vec<(usize, String)> = list
+        .iter()
+        .enumerate()
+        .filter_map(|(k, v)| rels.iter().find(|r| r.version == v.version).and_then(|r| crate::notes::linked_changelog(&r.body)).map(|u| (k, u)))
+        .collect();
+    let read = futures_util::future::join_all(linked.iter().map(|(k, u)| other::linked_notes(u, &list[*k].version))).await;
+    for ((k, u), lines) in linked.into_iter().zip(read) {
+        list[k].notes = if lines.is_empty() { vec![other::SEE_NOTES.to_string()] } else { lines };
+        list[k].notes_url = Some(u);
+    }
+    list
+}
+
 /// The plan that installs a release of a program (`version`, else the newest) over the copy here.
 pub fn plan_install(i: &Installed, version: Option<&str>, kind: JobKind, feed: Option<&Feed>) -> Result<Plan> {
     let name = &i.name;

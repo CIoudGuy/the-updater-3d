@@ -126,6 +126,10 @@ pub struct DriverEntry {
     /// What is new in the newest driver
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Its maker publishes beta drivers newer than its release for it: does it follow them?
+    /// None when there are none.
+    #[serde(default)]
+    pub pre_channel: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -165,6 +169,16 @@ pub struct PrefsItem {
     /// Bytes on disk (none for a registry key)
     pub size: Option<u64>,
     pub registry: bool,
+}
+
+/// Another build of an app that the catalog lists as a package of its own (its beta, preview or
+/// nightly), installed next to it as a separate app.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherBuild {
+    /// Its Get apps id: "other:Google.Chrome.Beta"
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

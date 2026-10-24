@@ -1117,6 +1117,38 @@ pub fn text_lines(t: &str) -> Vec<String> {
     lines_of(t, false)
 }
 
+/// The changelog page a release text only points to, as ShareX's does ("**Changelog:**
+/// https://getsharex.com/changelog#v22.0.0" and a table of checksums): a text whose one line is
+/// a label like "Changelog" or "See the release notes" and that links one page. A comparison of
+/// two tags ("Full Changelog: .../compare/v1...v2") and download links are no changelog.
+pub fn linked_changelog(body: &str) -> Option<String> {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    static URL: Lazy<Regex> = Lazy::new(|| Regex::new(r#"https?://[^\s<>()\[\]"'`|*]+"#).unwrap());
+    let label = match text_lines(body).as_slice() {
+        [] => true,
+        [one] => is_notes_label(one),
+        _ => false,
+    };
+    if !label {
+        return None;
+    }
+    let mut urls: Vec<&str> = URL.find_iter(body).map(|m| m.as_str().trim_end_matches(['.', ',', ';', ':'])).filter(|u| !u.contains("/compare/") && !u.contains("/releases/download/")).collect();
+    urls.sort_unstable();
+    urls.dedup();
+    match urls.as_slice() {
+        [one] => Some(one.to_string()),
+        _ => None,
+    }
+}
+
+/// A line that only names the change list ("Changelog", "See the release notes", "What's new").
+fn is_notes_label(line: &str) -> bool {
+    let l = line.trim().trim_end_matches([':', '.']).trim().to_lowercase().replace('\u{2019}', "'");
+    let l = ["see the ", "see ", "read the ", "full ", "the "].iter().fold(l, |l, p| l.strip_prefix(p).map(str::to_string).unwrap_or(l));
+    matches!(l.as_str(), "changelog" | "change log" | "changes" | "release notes" | "notes" | "what's new" | "whats new")
+}
+
 /// Pictures kept in one version's change list.
 const MAX_PICTURES: usize = 6;
 
@@ -1331,6 +1363,39 @@ pub async fn fetch_page(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_release_text_that_only_links_its_changelog_names_that_page() {
+        // ShareX 22.0.0's GitHub release text.
+        let sharex = "**Changelog:** https://getsharex.com/changelog#v22.0.0\r\n\r\n| File | SHA256 |\r\n| --- | --- |\r\n| ShareX-22.0.0-portable-x64.zip | `2D46ED557A052030D26297635739C7EF470D873B9C97E46DC1EB4D19E96F2FC5` |\r\n| ShareX-22.0.0-setup-x64.exe | `AB8339422721F7123AB031C6845323BA7A8F2E1AB25DB849D76032AF6539EFA4` |";
+        assert_eq!(super::linked_changelog(sharex).as_deref(), Some("https://getsharex.com/changelog#v22.0.0"));
+        assert_eq!(super::linked_changelog("See the [release notes](https://example.com/news/2-0).").as_deref(), Some("https://example.com/news/2-0"));
+        assert_eq!(super::linked_changelog("https://example.com/changelog").as_deref(), Some("https://example.com/changelog"));
+        // A change list of its own, a comparison of tags, and two pages to choose from are not.
+        assert_eq!(super::linked_changelog("- Fixed a crash\n- Faster start\n\nChangelog: https://example.com/changelog"), None);
+        assert_eq!(super::linked_changelog("**Full Changelog**: https://github.com/a/b/compare/v1.0...v1.1"), None);
+        assert_eq!(super::linked_changelog("Changelog: https://example.com/a or https://example.com/b"), None);
+        assert_eq!(super::linked_changelog("This release fixes a crash: https://example.com/issue/1"), None);
+    }
+
+    #[test]
+    fn a_changelog_page_gives_the_section_of_its_version() {
+        // The shape of ShareX's changelog page: one section per version, newest first.
+        let page = r#"<h2 id="v22.0.0"><a href="https://github.com/ShareX/ShareX/releases/tag/v22.0.0">ShareX 22.0.0</a> - 2026-10-20</h2>
+<p>The whole interface is new.</p>
+<ul>
+  <li>Screen recording changes:
+    <ul><li>Added native screen recording.</li><li>Added system audio recording.</li></ul>
+  </li>
+  <li>Added a recorder bar.</li>
+</ul>
+<h2 id="v21.0.0"><a href="https://github.com/ShareX/ShareX/releases/tag/v21.0.0">ShareX 21.0.0</a> - 2026-07-03</h2>
+<ul><li>Added "Background remover" tool.</li></ul>"#;
+        let lines = super::page_notes_at("https://getsharex.com/changelog#v22.0.0", page, "22.0.0");
+        assert!(lines.iter().any(|l| l.contains("native screen recording")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("recorder bar")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("Background remover")), "{lines:?}");
+    }
+
     #[test]
     fn screenshots_github_serves_stay_in_the_change_list() {
         let body = "## New\r\n- **Pin windows.** Keep a window on top.\r\n<img width=\"1200\" height=\"700\" alt=\"pin\" src=\"https://github.com/user-attachments/assets/984de630-77a6-4a41-bd4b-87e915a6ec0c\" />\r\n- Dark theme ![shot](https://user-images.githubusercontent.com/1/dark.png)\r\n![badge](https://img.shields.io/badge/build-passing-green) ![ad](https://i.imgur.com/x.png)\r\n";

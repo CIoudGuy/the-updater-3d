@@ -407,6 +407,11 @@ pub fn test_notification(app: AppHandle) {
 }
 
 #[tauri::command]
+pub async fn other_builds(core: C<'_>, id: String) -> Res<Vec<OtherBuild>> {
+    Ok(core.inner().clone().other_builds(&id).await)
+}
+
+#[tauri::command]
 pub async fn catalog_versions(core: C<'_>, id: String) -> Res<Vec<VersionInfo>> {
     let c = core.inner().clone();
     c.catalog_versions(&id).await.map_err(|e| format!("{e:#}"))

@@ -1316,6 +1316,14 @@ const handlers: H = {
     browseIconsSearch(ids);
     return ids.filter((id) => BROWSE_ICONS.has(id)).map((id) => ({ id, iconUrl: BROWSE_ICONS.get(id) ?? null }));
   },
+  other_builds({ id }) {
+    const builds: Record<string, [string, string][]> = {
+      "other:Google.Chrome": [["Google.Chrome.Beta", "Google Chrome Beta"], ["Google.Chrome.Dev", "Google Chrome Dev"], ["Google.Chrome.Canary", "Google Chrome Canary"]],
+      "other:Mozilla.Firefox": [["Mozilla.Firefox.Beta.MSIX", "Firefox Beta"], ["Mozilla.Firefox.DeveloperEdition", "Firefox Developer Edition"]],
+      "other:Microsoft.VisualStudioCode": [["Microsoft.VisualStudioCode.Insiders", "Microsoft Visual Studio Code Insiders"]],
+    };
+    return (builds[id] ?? []).map(([pkg, name]) => ({ id: `other:${pkg}`, name }));
+  },
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network
     refreshedLater(id);
