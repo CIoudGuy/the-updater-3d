@@ -210,8 +210,9 @@ fn intels_own_newer_driver_wins_over_windows_updates_older_one() {
 #[test]
 fn the_chipset_and_the_bios_are_listed() {
     let r = crate::sources::chipset::Release { version: "8.09.28.1124".into(), url: "https://drivers.amd.com/drivers/amd_chipset_software_8.09.28.1124.exe".into(), page: "p".into(), notes_url: "https://www.amd.com/en/resources/support-articles/release-notes/RN-RYZEN-CHIPSET-8-09-28-1124.html".into(), ..Default::default() };
-    let board = crate::sources::board::Board { maker: "Gigabyte Technology Co., Ltd.".into(), product: "B850 GAMING X WIFI6E ICE".into(), bios: "F12a".into(), bios_date: None };
-    let bios = crate::sources::board::bios(board, Some(&[("B850 GAMING X WIFI6E ICE(rev.1.x)".to_string(), "F11".to_string())]));
+    let board = crate::sources::board::Board { maker: "Gigabyte Technology Co., Ltd.".into(), product: "B850 GAMING X WIFI6E ICE".into(), bios: "F12a".into(), ..Default::default() };
+    let answer = crate::sources::board::gigabyte::answer(&board, Some(&[("B850 GAMING X WIFI6E ICE(rev.1.x)".to_string(), "F11".to_string())]));
+    let bios = crate::sources::board::Bios { board, maker: Some(crate::sources::board::Maker::Gigabyte), answer };
     let list = collect(&Inputs { chipset: Some(("8.06.30.112", Some(&r))), bios: Some(&bios), ..with(None, &[]) });
     assert_eq!(list.len(), 2);
     let c = &list[0];
@@ -325,4 +326,82 @@ fn the_install_runs_elevated_and_a_restart_counts_as_done() {
 #[test]
 fn only_a_windows_update_id_is_searched_for() {
     assert!(install("x' or IsInstalled=1 or UpdateID='y").is_err());
+}
+
+fn maker_pkg(id: &str, hw: &[&str], version: &str, install: bool) -> crate::sources::board::MakerDriver {
+    crate::sources::board::MakerDriver {
+        id: id.into(),
+        name: "Realtek Audio Driver".into(),
+        kind: "Audio".into(),
+        version: version.into(),
+        date: Some("2026.09.01".into()),
+        page: Some("https://www.dell.com/support/home/drivers/driversdetails?driverid=abc12".into()),
+        notes: vec!["Fixes audio crackling".into()],
+        hardware_ids: hw.iter().map(|s| s.to_string()).collect(),
+        installed: None,
+        size: Some(300_000_000),
+        install: install.then(|| crate::sources::board::MakerInstall { url: "https://dl.dell.com/FOLDER123/1/Realtek-Audio_ABC12_WIN64_6.0.9927.1_A05.EXE".into(), md5: Some("0123456789abcdef0123456789abcdef".into()), signer: "Dell Inc".into(), args: vec!["/s".into()], ..Default::default() }),
+    }
+}
+
+#[test]
+fn the_pc_makers_newer_driver_is_offered_for_its_device() {
+    let audio = device("HDAUDIO\\FUNC_01&VEN_10EC&DEV_0257&SUBSYS_10280A1F", "Realtek Audio", "Realtek Semiconductor Corp.", "MEDIA", "6.0.9700.1");
+    let feed = Feed::default();
+    let present = [audio];
+    let pkgs = [maker_pkg("ABC12", &["HDAUDIO\\FUNC_01&VEN_10EC&DEV_0257"], "6.0.9927.1", true)];
+    let list = collect(&Inputs { maker: &pkgs, maker_name: "Dell", ..with(Some(&feed), &present) });
+    assert_eq!(list.len(), 1);
+    let e = &list[0].entry;
+    assert_eq!((e.id.as_str(), e.status, e.latest.as_deref(), e.source.as_str(), e.name.as_str()), ("driver:dev:hdaudio\\func_01&ven_10ec&dev_0257&subsys_10280a1f", AppStatus::Update, Some("6.0.9927.1"), "dell", "Realtek Audio"));
+    assert!(matches!(list[0].how, Some(How::Maker(_))));
+    assert_eq!(e.notes, vec!["Fixes audio crackling".to_string()]);
+    // No checksum or silent install: offered from the maker's page instead.
+    let pkgs = [maker_pkg("ABC12", &["HDAUDIO\\FUNC_01&VEN_10EC&DEV_0257"], "6.0.9927.1", false)];
+    let list = collect(&Inputs { maker: &pkgs, maker_name: "Dell", ..with(Some(&feed), &present) });
+    assert!(list[0].how.is_none() && list[0].entry.vendor_url.is_some() && list[0].entry.status == AppStatus::Update);
+    // The installed driver is already that new: nothing changes.
+    let pkgs = [maker_pkg("ABC12", &["HDAUDIO\\FUNC_01&VEN_10EC&DEV_0257"], "6.0.9700.1", true)];
+    let list = collect(&Inputs { maker: &pkgs, maker_name: "Dell", ..with(Some(&feed), &present) });
+    assert_eq!((list[0].entry.status, list[0].entry.source.as_str()), (AppStatus::Current, "device"));
+    // Windows Update offers a newer one than the maker: Windows Update's stays.
+    let mut o = offer("Realtek - MEDIA - 6.0.9950.1", "HDAUDIO\\FUNC_01&VEN_10EC&DEV_0257&SUBSYS_10280A1F", None);
+    o.class = "MEDIA".into();
+    let feed = Feed { offers: vec![o] };
+    let pkgs = [maker_pkg("ABC12", &["HDAUDIO\\FUNC_01&VEN_10EC&DEV_0257"], "6.0.9927.1", true)];
+    let list = collect(&Inputs { maker: &pkgs, maker_name: "Dell", ..with(Some(&feed), &present) });
+    assert_eq!((list[0].entry.source.as_str(), list[0].entry.latest.as_deref()), ("windowsUpdate", Some("6.0.9950.1")));
+}
+
+#[test]
+fn a_makers_tool_with_a_known_installed_version_is_listed() {
+    let mut tool = maker_pkg("TOOL1", &[], "5.2.0", true);
+    tool.name = "Dell Command | Update".into();
+    tool.kind = "Utility".into();
+    tool.installed = Some("5.1.0".into());
+    let unknown = maker_pkg("TOOL2", &[], "1.0", true);
+    let pkgs = [tool, unknown];
+    let list = collect(&Inputs { maker: &pkgs, maker_name: "Dell", ..with(Some(&Feed::default()), &[]) });
+    assert_eq!(list.len(), 1, "a tool whose installed version is not known is left out");
+    assert_eq!((list[0].entry.id.as_str(), list[0].entry.status, list[0].entry.version.as_str()), ("driver:maker:dell:tool1", AppStatus::Update, "5.1.0"));
+}
+
+#[test]
+fn a_makers_package_installs_only_checked_and_signed_from_the_makers_server() {
+    let d = maker_pkg("ABC12", &[], "6.0.9927.1", true);
+    let plan = crate::sources::board::plan_install("driver:x", "Realtek Audio", &d).unwrap();
+    assert!(plan.downloads[0].md5.is_some());
+    assert!(matches!(&plan.steps[0], Step::CheckSigner { signer, .. } if signer == "Dell Inc"));
+    let Step::Run { args, elevated, .. } = &plan.steps[1] else { panic!() };
+    assert!(*elevated && args == &vec!["/s".to_string()]);
+    let mut bad = d.clone();
+    bad.install.as_mut().unwrap().url = "https://evil.example/dl.dell.com/x.exe".into();
+    assert!(crate::sources::board::plan_install("driver:x", "x", &bad).is_err());
+    let mut nosum = d.clone();
+    nosum.install.as_mut().unwrap().md5 = None;
+    assert!(crate::sources::board::plan_install("driver:x", "x", &nosum).is_err());
+    let mut zip = d.clone();
+    zip.install.as_mut().unwrap().inner = Some("..\\evil.exe".into());
+    assert!(crate::sources::board::plan_install("driver:x", "x", &zip).is_err());
+    assert!(hw_match("PCI\\VEN_8086&DEV_A0F0", "pci\\ven_8086&dev_a0f0&subsys_0a1f1028") && !hw_match("PCI\\VEN_8086&DEV_A0F", "PCI\\VEN_8086&DEV_A0F0"));
 }

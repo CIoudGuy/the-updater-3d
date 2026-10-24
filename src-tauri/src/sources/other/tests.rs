@@ -428,8 +428,20 @@ fn uninstall_plan_uses_the_registered_command() {
     assert_eq!(args[0], "/S");
     assert!(*elevated);
     assert!(matches!(plan.verify, Verify::Removed { .. }));
-    let mut none = cur.clone();
-    none.uninstall = None;
+    // No silent command known (WinRAR, Brave, Docker Desktop were seen like this): its own
+    // uninstaller still runs, in its window, instead of the app not being removable here.
+    let mut loud = cur.clone();
+    loud.uninstall = None;
+    let plan = plan_uninstall(&loud).expect("its own uninstaller");
+    let Step::Run { exe, .. } = &plan.steps[0] else { panic!() };
+    assert!(exe.ends_with("uninstall.exe"));
+    assert!(matches!(plan.verify, Verify::Removed { .. }));
+    // An entry that names no uninstaller at all is not removable.
+    let mut none = loud.clone();
+    if let SourceData::Other { entry, .. } = &mut none.data {
+        entry.uninstall_string.clear();
+        entry.quiet_uninstall_string.clear();
+    }
     assert!(plan_uninstall(&none).is_err());
 }
 
@@ -838,4 +850,20 @@ fn a_check_reads_again_only_the_packages_whose_version_list_changed() {
     prev.pkgs.insert("git.git".into(), half);
     assert!(reuse(&read_before(Some(&prev)), &row("Git.Git", "ggg", "2.0")).is_none());
     assert!(reuse(&read_before(None), &now).is_none());
+}
+
+#[test]
+fn a_github_release_page_gives_its_release_text() {
+    // Seen with WinMerge, Notepad++ and PrusaSlicer: the catalog links the release page, and
+    // GitHub's API was out of requests, so only a link showed.
+    let html = r#"<html><body><nav>Sign in</nav><div class="Box-body"><div data-pjax="true" data-test-selector="body-content" data-view-component="true" class="markdown-body my-3"><ul><li><a href="/c">What's Changed</a></li></ul><h2>What's Changed</h2>
+        <ul><li>Fix a crash when comparing large folders (<a href="/x/pull/1">#2715</a>)</li><li>Add Japanese translation updates for the new options</li></ul>
+        <h2>New Contributors</h2><ul><li>@someone made their first contribution in the release</li></ul></div></div>
+        <details><summary>Assets 4</summary><ul><li>WinMerge-2.16.58-x64-Setup.exe 9.1 MB</li></ul></details></body></html>"#;
+    let lines = github_release_body(html);
+    // "New Contributors" is not a change, and a lone "What's Changed" heading says nothing.
+    assert_eq!(lines, vec!["Fix a crash when comparing large folders".to_string(), "Add Japanese translation updates for the new options".to_string()]);
+    assert!(lines.iter().any(|l| l == "Fix a crash when comparing large folders"), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.contains("Setup.exe") || l.contains("Sign in")), "assets and page chrome stay out: {lines:?}");
+    assert!(github_release_body("<html>no release here</html>").is_empty());
 }

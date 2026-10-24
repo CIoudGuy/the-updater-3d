@@ -868,3 +868,87 @@ async fn sandbox_install_data() {
     }
     std::fs::write(out, lines.join("\n")).unwrap();
 }
+
+/// Change lists for the whole starter list: where each newest version's notes come from, and the
+/// apps with none. Nothing is installed.
+/// cargo test --release --test live_probe popular_changelogs -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn popular_changelogs() {
+    use futures_util::StreamExt;
+    use updater_lib::sources::{other, winget};
+    winget::refresh_index(std::time::Duration::from_secs(24 * 3600)).await.expect("index");
+    let idx = winget::Index::open(&winget::index_path()).unwrap();
+    let ids: Vec<String> = other::POPULAR.iter().map(|(id, _)| id.to_string()).filter(|id| !other::handled_package(id) && other::excluded_package(id).is_none()).collect();
+    let idx = &idx;
+    let rows: Vec<(String, String, &'static str, usize, Option<String>)> = futures_util::stream::iter(ids)
+        .map(|id| async move {
+            let Some(p) = idx.by_id(&id) else { return (id, String::new(), "not in catalog", 0, None) };
+            let Ok(v) = winget::versions(&p).await else { return (id, String::new(), "no versions", 0, None) };
+            let Ok(m) = winget::manifest(&v[0]).await else { return (id, String::new(), "no manifest", 0, None) };
+            let (lines, url, src) = other::probe_notes(&m).await;
+            let src = if !lines.is_empty() { src } else if url.is_some() { "link only" } else { "none" };
+            (id, m.version.clone(), src, lines.len(), url)
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut by = std::collections::BTreeMap::<&str, usize>::new();
+    for r in &rows {
+        *by.entry(r.2).or_default() += 1;
+    }
+    println!("popular changelogs: {} apps {by:?}", rows.len());
+    for (id, v, src, _, url) in rows.iter().filter(|r| r.2 == "none" || r.2 == "link only") {
+        println!("  {src:<9} {id:<40} {v:<16} {}", url.as_deref().unwrap_or(""));
+    }
+}
+
+/// One release page read for its notes: `U3D_URL=<release page> cargo test --release --test live_probe one_release_page -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn one_release_page() {
+    let url = std::env::var("U3D_URL").unwrap_or_else(|_| "https://github.com/WinMerge/winmerge/releases/tag/v2.16.58.2".into());
+    let html = updater_lib::notes::fetch_page(&url).await.expect("page");
+    for l in updater_lib::sources::other::github_release_body(&html) {
+        println!("{l}");
+    }
+}
+
+/// Change lists across the whole catalog: an even sample of `U3D_N` packages (400 by default),
+/// where each newest version's notes come from, and for the ones without, where the app is
+/// hosted. `cargo test --release --test live_probe catalog_changelogs -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn catalog_changelogs() {
+    use futures_util::StreamExt;
+    use updater_lib::sources::{other, winget};
+    winget::refresh_index(std::time::Duration::from_secs(24 * 3600)).await.expect("index");
+    let idx = winget::Index::open(&winget::index_path()).unwrap();
+    let all = idx.all();
+    let n: usize = std::env::var("U3D_N").ok().and_then(|v| v.parse().ok()).unwrap_or(400);
+    let step = (all.len() / n).max(1);
+    let sample: Vec<_> = all.iter().step_by(step).take(n).cloned().collect();
+    let host = |u: &Option<String>| u.as_deref().and_then(|u| url::Url::parse(u).ok()).and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_string())).unwrap_or_default();
+    let rows: Vec<(String, &'static str, String)> = futures_util::stream::iter(sample)
+        .map(|p| async move {
+            let Ok(v) = winget::versions(&p).await else { return (p.id.clone(), "no versions", String::new()) };
+            let Ok(m) = winget::manifest(&v[0]).await else { return (p.id.clone(), "no manifest", String::new()) };
+            let (lines, url, src) = other::probe_notes(&m).await;
+            let src = if !lines.is_empty() { src } else if url.is_some() { "link only" } else { "none" };
+            let inst = m.installers.first().map(|i| i.url.clone());
+            let class = if inst.as_deref().is_some_and(|u| u.contains("github.com/")) || m.package_url.as_deref().is_some_and(|u| u.contains("github.com/")) { "github".to_string() } else { format!("inst={} pkg={} notes={}", host(&inst), host(&m.package_url), url.unwrap_or_default()) };
+            (p.id.clone(), src, class)
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut by = std::collections::BTreeMap::<&str, usize>::new();
+    for r in &rows {
+        *by.entry(r.1).or_default() += 1;
+    }
+    let gh = rows.iter().filter(|r| (r.1 == "none" || r.1 == "link only") && r.2 == "github").count();
+    println!("catalog changelogs: {} sampled {by:?}, of the missing {gh} are on GitHub", rows.len());
+    for (id, src, class) in rows.iter().filter(|r| r.1 == "none" || r.1 == "link only") {
+        println!("  {src:<9} {id:<44} {class}");
+    }
+}

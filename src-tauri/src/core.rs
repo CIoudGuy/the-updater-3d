@@ -981,7 +981,7 @@ impl Core {
                 tagline: i.tagline.clone(),
                 group: i.source.group().into(),
                 running: is_running,
-                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
+                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
                 read_only: i.read_only,
                 // Only for copies the Store updates: a sideloaded app package is updated here.
@@ -1100,9 +1100,18 @@ impl Core {
         let intel_f = async { if has_intel { sources::intel::fetch().await.map(Some) } else { Ok(None) } };
         let product = board.as_ref().map(|b| b.product.clone()).unwrap_or_default();
         let chipset_f = async { if chipset_have.is_some() { chipset::latest(&product).await.map(Some) } else { Ok(None) } };
-        let gigabyte = board.as_ref().is_some_and(|b| board::is_gigabyte(&b.maker));
-        let bios_f = async { if gigabyte { board::fetch_gigabyte().await.map(Some) } else { Ok(None) } };
-        let (nv, amd, intel, chip, bios_list) = tokio::join!(nvidia_f, amd_f, intel_f, chipset_f, bios_f);
+        // The BIOS and the drivers the board's or PC's maker lists, at the same time.
+        let bios_board = board.clone();
+        let bios_f = async {
+            match bios_board {
+                Some(b) => {
+                    let (bios, list) = tokio::join!(board::check(b.clone()), board::drivers(&b));
+                    anyhow::Ok(Some((bios, list)))
+                }
+                None => Ok(None),
+            }
+        };
+        let (nv, amd, intel, chip, bios) = tokio::join!(nvidia_f, amd_f, intel_f, chipset_f, bios_f);
         let warn = |what: &str, e: anyhow::Error| log::warn!("{what} drivers: {e:#}");
         let nv = nv.unwrap_or_else(|e| {
             warn("nvidia", e);
@@ -1120,11 +1129,11 @@ impl Core {
             warn("amd chipset", e);
             None
         });
-        let bios_list = bios_list.unwrap_or_else(|e| {
-            warn("gigabyte bios", e);
-            None
-        });
-        let bios = board.map(|b| board::bios(b, bios_list.as_deref()));
+        let (bios, maker_list) = match bios.unwrap_or(None) {
+            Some((b, l)) => (Some(b), l),
+            None => (None, vec![]),
+        };
+        let maker_name = bios.as_ref().and_then(|b| b.maker).map(|m| m.name()).unwrap_or_default();
         let inputs = |wu: Option<&drivers::Feed>| {
             drivers::collect(&drivers::Inputs {
                 wu,
@@ -1134,6 +1143,8 @@ impl Core {
                 intel: intel.as_deref(),
                 chipset: chipset_have.as_deref().map(|h| (h, chip.as_ref())),
                 bios: bios.as_ref(),
+                maker: &maker_list,
+                maker_name,
                 windows11: win11,
             })
         };
