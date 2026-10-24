@@ -1096,7 +1096,7 @@ impl Core {
                 // Only for copies the Store updates: a sideloaded app package is updated here.
                 store_url: i.store.as_ref().filter(|_| i.read_only).map(|s| s.page_url()),
                 channel: i.channel.clone(),
-                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)).or_else(|| if has_update { sources::games::show_uri(i) } else { None }),
+                manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f)).or_else(|| if i.source == Source::Games { sources::games::show_uri(i) } else { None }),
                 github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
                 is_self: false,
                 note,

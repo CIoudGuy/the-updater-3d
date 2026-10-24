@@ -66,6 +66,7 @@ pub fn game_of(dir: &Path, meta: &EaMeta, entry: Option<&UninstallEntry>) -> Opt
         page: None,
         notes: NotesFrom::None,
         icon: None,
+        program: None,
     })
 }
 

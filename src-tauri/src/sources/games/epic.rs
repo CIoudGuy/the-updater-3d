@@ -86,6 +86,7 @@ pub fn game_of(item: &EpicItem) -> Option<Game> {
         page: None,
         notes: NotesFrom::None,
         icon: None,
+        program: None,
     })
 }
 
@@ -131,6 +132,7 @@ pub fn engine_of(e: &EngineInstall) -> Option<Game> {
         page: None,
         notes: NotesFrom::None,
         icon: None,
+        program: None,
     })
 }
 
@@ -165,12 +167,236 @@ pub fn scan_in(epic: &Path) -> Vec<Game> {
 /// Every game and engine the Epic Games Launcher installed on this PC.
 pub fn scan() -> Vec<Game> {
     let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-    scan_in(&base.join("Epic"))
+    let mut out = scan_in(&base.join("Epic"));
+    // The per-user launcher keeps no manifests there: its games are found by their own folders.
+    for g in scan_folders(&crate::winutil::fixed_drives()) {
+        let same = |o: &Game| o.key.eq_ignore_ascii_case(&g.key) || o.install_dir.as_deref().zip(g.install_dir.as_deref()).is_some_and(|(a, b)| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()));
+        if !out.iter().any(same) {
+            out.push(g);
+        }
+    }
+    out
+}
+
+/// What the build manifest in a game's `.egstore` folder says (Epic's own file, written by the
+/// launcher into every game it installs): its app name, its build and the program it starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildMeta {
+    pub app_name: String,
+    pub build: String,
+    pub launch_exe: String,
+}
+
+/// Reads an Unreal `FString` (a signed length; negative means UTF-16) at `*at`.
+fn fstring(b: &[u8], at: &mut usize) -> Option<String> {
+    let n = i32::from_le_bytes(b.get(*at..*at + 4)?.try_into().ok()?);
+    *at += 4;
+    let s = if n < 0 {
+        let len = n.unsigned_abs() as usize * 2;
+        let units: Vec<u16> = b.get(*at..*at + len)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        *at += len;
+        String::from_utf16_lossy(&units)
+    } else {
+        let len = n as usize;
+        let s = String::from_utf8_lossy(b.get(*at..*at + len)?).into_owned();
+        *at += len;
+        s
+    };
+    Some(s.trim_end_matches('\0').to_string())
+}
+
+/// The start of a build manifest: binary (zlib packed, Epic's usual form) or JSON (older builds).
+/// Only its first part is needed, so a cut-off file still gives its name and build. The launch
+/// command that follows (it can hold an id of the account) is not read.
+pub fn build_meta(bytes: &[u8]) -> Option<BuildMeta> {
+    if bytes.first() == Some(&b'{') {
+        let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(bytes)).ok()?;
+        let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+        let m = BuildMeta { app_name: s("AppNameString"), build: s("BuildVersionString"), launch_exe: s("LaunchExeString") };
+        return (!m.app_name.is_empty()).then_some(m);
+    }
+    const MAGIC: u32 = 0x44BE_C00C;
+    if u32::from_le_bytes(bytes.get(0..4)?.try_into().ok()?) != MAGIC {
+        return None;
+    }
+    let header = u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) as usize;
+    let stored = *bytes.get(36)?;
+    let body = bytes.get(header..)?;
+    let data: Vec<u8> = if stored & 1 != 0 {
+        // The meta block is at the start: unpack only that much, from what was read.
+        match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(body, 64 * 1024) {
+            Ok(v) => v,
+            Err(e) => e.output,
+        }
+    } else {
+        body.to_vec()
+    };
+    // Meta: size, data version, feature level, file data flag, app id, then the strings.
+    let mut at = 4 + 1 + 4 + 1 + 4;
+    let app_name = fstring(&data, &mut at)?;
+    let build = fstring(&data, &mut at)?;
+    let launch_exe = fstring(&data, &mut at)?;
+    (!app_name.is_empty()).then_some(BuildMeta { app_name, build, launch_exe })
+}
+
+/// The version people know from a build ("++Fortnite+Release-42.40-CL-59086525-Windows" gives
+/// "42.40"); else the build as written.
+pub fn version_of_build(build: &str) -> String {
+    let b = build.trim();
+    if let Some(i) = b.find("Release-") {
+        let v: String = b[i + 8..].chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        if v.chars().any(|c| c.is_ascii_digit()) {
+            return v.trim_end_matches('.').to_string();
+        }
+    }
+    b.to_string()
+}
+
+/// The game installed in `dir` (a folder with Epic's `.egstore`), from its build manifest.
+pub fn game_of_folder(dir: &Path, meta: &BuildMeta) -> Option<Game> {
+    let name = dir.file_name()?.to_string_lossy().trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let exe = meta.launch_exe.trim();
+    let program = (!exe.is_empty() && !exe.contains("..")).then(|| dir.join(exe.replace('/', "\\"))).filter(|p| p.is_file());
+    Some(Game {
+        launcher: Launcher::Epic,
+        key: meta.app_name.clone(),
+        name,
+        version: version_of_build(&meta.build),
+        update: None,
+        install_dir: Some(dir.to_path_buf()),
+        size: None,
+        updated_at: None,
+        launch_uri: None,
+        show_uri: Some(LIBRARY_URI.to_string()),
+        uninstall_uri: None,
+        page: None,
+        notes: NotesFrom::None,
+        icon: None,
+        program,
+    })
+}
+
+/// The folders games are usually installed in, on each drive.
+const GAME_ROOTS: &[&str] = &["Games", "Epic Games", "EpicGames", r"Program Files\Epic Games", r"Program Files (x86)\Epic Games", "SteamLibrary"];
+
+/// Epic games found by their own folders: every folder in a usual games folder (`GAME_ROOTS`) on
+/// each of `drives` that has Epic's `.egstore` with a build manifest. Two levels at most are
+/// read, never the whole drive.
+pub fn scan_folders(drives: &[PathBuf]) -> Vec<Game> {
+    let mut out = Vec::new();
+    for d in drives {
+        for root in GAME_ROOTS {
+            let Ok(rd) = std::fs::read_dir(d.join(root)) else { continue };
+            for e in rd.flatten().take(500) {
+                let dir = e.path();
+                let Ok(files) = std::fs::read_dir(dir.join(".egstore")) else { continue };
+                let manifest = files.flatten().map(|f| f.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("manifest"))).max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+                let Some(m) = manifest else { continue };
+                let head = read_head(&m, 512 * 1024);
+                if let Some(g) = build_meta(&head).and_then(|meta| game_of_folder(&dir, &meta)) {
+                    out.push(g);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The first `max` bytes of a file.
+fn read_head(p: &Path, max: u64) -> Vec<u8> {
+    use std::io::Read;
+    let mut b = Vec::new();
+    if let Ok(f) = std::fs::File::open(p) {
+        let _ = f.take(max).read_to_end(&mut b);
+    }
+    b
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An Unreal FString as written in a manifest: its length with the end zero, then the text.
+    fn fs(s: &str) -> Vec<u8> {
+        let mut v = ((s.len() + 1) as i32).to_le_bytes().to_vec();
+        v.extend_from_slice(s.as_bytes());
+        v.push(0);
+        v
+    }
+
+    /// A build manifest packed the way the launcher writes it: header, then the zlib packed body
+    /// whose meta block holds the app name, build, program and launch command.
+    fn binary_manifest(app: &str, build: &str, exe: &str, command: &str) -> Vec<u8> {
+        let mut meta = Vec::new();
+        meta.extend_from_slice(&448u32.to_le_bytes());
+        meta.push(2);
+        meta.extend_from_slice(&21u32.to_le_bytes());
+        meta.push(0);
+        meta.extend_from_slice(&0u32.to_le_bytes());
+        for s in [app, build, exe, command] {
+            meta.extend(fs(s));
+        }
+        meta.extend(vec![0u8; 4096]);
+        let packed = miniz_oxide::deflate::compress_to_vec_zlib(&meta, 6);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x44BE_C00Cu32.to_le_bytes());
+        out.extend_from_slice(&41u32.to_le_bytes());
+        out.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        out.extend(vec![0u8; 20]);
+        out.push(1);
+        out.extend_from_slice(&21u32.to_le_bytes());
+        out.extend(packed);
+        out
+    }
+
+    #[test]
+    fn a_games_own_build_manifest_names_it_and_its_build() {
+        let m = binary_manifest("FortniteReleaseBuilds", "++Fortnite+Release-42.40-CL-59086525-Windows", "FortniteGame/Binaries/Win64/FortniteBootstrapper.exe", "-obfuscationid=SOMEID");
+        let meta = build_meta(&m).unwrap();
+        assert_eq!(meta.app_name, "FortniteReleaseBuilds");
+        assert_eq!(meta.build, "++Fortnite+Release-42.40-CL-59086525-Windows");
+        assert_eq!(meta.launch_exe, "FortniteGame/Binaries/Win64/FortniteBootstrapper.exe");
+        // The launch command (it can hold an account id) is not kept.
+        assert!(!format!("{meta:?}").contains("SOMEID"));
+        // A file read only in part still gives them.
+        assert_eq!(build_meta(&m[..m.len().min(200)]).map(|m| m.app_name).as_deref(), Some("FortniteReleaseBuilds"));
+        // The older JSON form, and things that are not a manifest.
+        assert_eq!(build_meta(br#"{"AppNameString":"Sugar","BuildVersionString":"++Prod+2.43","LaunchExeString":"Binaries/Win64/RocketLeague.exe"}"#).map(|m| m.app_name).as_deref(), Some("Sugar"));
+        assert_eq!(build_meta(b"not a manifest"), None);
+        assert_eq!(build_meta(&[]), None);
+    }
+
+    #[test]
+    fn a_build_reads_as_the_version_people_know() {
+        assert_eq!(version_of_build("++Fortnite+Release-42.40-CL-59086525-Windows"), "42.40");
+        assert_eq!(version_of_build("1.2.3"), "1.2.3");
+        assert_eq!(version_of_build("++Prod+CL-123"), "++Prod+CL-123");
+    }
+
+    #[test]
+    fn games_are_found_by_their_folders_on_every_drive() {
+        let root = std::env::temp_dir().join(format!("u3d-epic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let game = root.join("Games").join("Fortnite");
+        std::fs::create_dir_all(game.join(".egstore")).unwrap();
+        std::fs::create_dir_all(game.join(r"FortniteGame\Binaries\Win64")).unwrap();
+        std::fs::write(game.join(r"FortniteGame\Binaries\Win64\FortniteBootstrapper.exe"), b"MZ").unwrap();
+        std::fs::write(game.join(".egstore").join("D433D18D04C83CBC310043BDC5E3087B.manifest"), binary_manifest("FortniteReleaseBuilds", "++Fortnite+Release-42.40-CL-59086525-Windows", "FortniteGame/Binaries/Win64/FortniteBootstrapper.exe", "")).unwrap();
+        // A folder without Epic's store data is not an Epic game.
+        std::fs::create_dir_all(root.join("Games").join("Other Game")).unwrap();
+        let found = scan_folders(&[root.clone()]);
+        assert_eq!(found.len(), 1);
+        let g = &found[0];
+        assert_eq!((g.name.as_str(), g.version.as_str(), g.key.as_str()), ("Fortnite", "42.40", "FortniteReleaseBuilds"));
+        assert_eq!(g.install_dir.as_deref(), Some(game.as_path()));
+        assert_eq!(g.program.as_deref(), Some(game.join(r"FortniteGame\Binaries\Win64\FortniteBootstrapper.exe").as_path()));
+        assert!(g.show_uri.as_deref().is_some_and(|u| own_uri(Launcher::Epic, u)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn item(app: &str, name: &str, main: &str, incomplete: bool, dir: &str) -> String {
         format!(

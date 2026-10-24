@@ -55,6 +55,7 @@ pub fn game_of(r: &Reg, info: Option<&str>, icon: Option<PathBuf>) -> Option<Gam
         page: None,
         notes: NotesFrom::Gog(id),
         icon,
+        program: None,
     })
 }
 

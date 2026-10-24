@@ -235,6 +235,7 @@ pub fn game_of(app: &SteamApp, library: &Path, steam: Option<&Path>) -> Option<G
         page: Some(format!("https://store.steampowered.com/app/{id}/")),
         notes: NotesFrom::SteamNews(id),
         icon: steam.and_then(|s| crate::sources::proglogo::steam_cached_icon(s, id)),
+        program: None,
     })
 }
 
