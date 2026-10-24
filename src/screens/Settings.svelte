@@ -398,7 +398,10 @@
           </SRow>
         {:else if active === "about"}
           <SRow label="Installed version" desc={st.lastCheck ? `Last checked for updates at ${clock(st.lastCheck)}.` : "Not checked for updates yet."}>
-            {#snippet control()}<span class="big">{st.appVersion || "Unknown"}</span>{/snippet}
+            {#snippet control()}
+              <a class="big vlink" href="#/updater" title="Open The Updater 3D's page: every release and what is new">{st.appVersion || "Unknown"}</a>
+              <Btn variant="raised" size="md" title="Every release of The Updater 3D and what is new" onclick={() => router.go("#/updater")}>Version history</Btn>
+            {/snippet}
           </SRow>
           <SRow label={st.selfUpdate ? `Version ${st.selfUpdate} is ready` : "You have the latest version"} desc={st.selfUpdate ? "The app restarts itself to finish the update. Running installs are not interrupted." : "The Updater 3D keeps itself up to date."}>
             {#snippet control()}
@@ -587,6 +590,17 @@
     font-size: 20px;
     font-weight: 600;
     letter-spacing: -0.02em;
+  }
+  .vlink {
+    color: var(--text);
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 4px;
+    transition: text-decoration-color var(--t-fast);
+  }
+  .vlink:hover,
+  .vlink:focus-visible {
+    text-decoration-color: var(--text-3);
   }
   .ccs {
     display: inline-flex;

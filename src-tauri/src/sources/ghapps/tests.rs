@@ -74,8 +74,11 @@ fn a_program_names_its_github_project_in_its_entry() {
     let e = UninstallEntry { help_link: String::new(), ..tidalfast() };
     assert_eq!(repo_of(&e), Some(("cioudguy".into(), "tidalfast".into())));
     // A name that differs a little from the project's.
+    let tool = UninstallEntry { display_name: "PhotoSortr".into(), url_info_about: "https://github.com/someone/PhotoSort".into(), ..Default::default() };
+    assert_eq!(repo_of(&tool), Some(("someone".into(), "PhotoSort".into())));
+    // TidaLunar links the mod it is built on; its own project is a fork.
     let luna = UninstallEntry { display_name: "TidaLunar".into(), url_info_about: "https://github.com/Inrixia/TidaLuna".into(), ..Default::default() };
-    assert_eq!(repo_of(&luna), Some(("Inrixia".into(), "TidaLuna".into())));
+    assert_eq!(repo_of(&luna), Some(("Brskt".into(), "TidaLuna".into())));
 }
 
 #[test]
@@ -100,6 +103,34 @@ fn releases_of_a_sibling_project_are_not_the_programs() {
     assert!(fits("0.4.1", &parse_releases(&json!([release("v0.5.0", false, vec![]), release("v0.4.1", false, vec![])]))));
     assert!(fits("2024.10", &parse_releases(&json!([release("2026.1", false, vec![])]))));
     assert!(!fits("2.0", &parse_releases(&json!([release("v3.0.0", false, vec![])]))));
+}
+
+/// TidaLunar's releases: every normal one named "-alpha", its dev builds flagged as pre-releases.
+fn tidalunar_answer() -> Value {
+    let files = |v: &str| vec![asset(&format!("tidalunar_{v}_x64.exe"), Some(SHA_A)), asset(&format!("tidalunar_{v}_arm64.exe"), Some(SHA_B)), asset(&format!("tidalunar_{v}_win32_x64.zip"), Some(SHA_A))];
+    json!([release("0.0.19-alpha", false, files("0.0.19-alpha")), release("0.0.19-alpha.dev.3", true, files("0.0.19-alpha.dev.3")), release("0.0.18-alpha", false, files("0.0.18-alpha")), release("0.0.18-alpha.dev.4", true, files("0.0.18-alpha.dev.4"))])
+}
+
+#[test]
+fn a_project_that_flags_its_dev_builds_offers_its_normal_releases() {
+    let rels = parse_releases(&tidalunar_answer());
+    // Its normal releases are all named "-alpha": only GitHub's flag tells a dev build.
+    assert_eq!(newest(&rels, "0.0.18-alpha").map(|r| r.version.as_str()), Some("0.0.19-alpha"));
+    assert!(fits("0.0.18-alpha", &rels));
+    let r = newest(&rels, "0.0.18-alpha").unwrap();
+    assert_eq!(installer_for(r, Kind::Nsis, "x64").map(|a| a.name.as_str()), Some("tidalunar_0.0.19-alpha_x64.exe"));
+    let e = UninstallEntry { key: "TidaLunar".into(), hive: "HKCU", display_name: "TidaLunar".into(), display_version: "0.0.18-alpha".into(), url_info_about: "https://github.com/Inrixia/TidaLuna".into(), ..Default::default() };
+    let i = program(&e);
+    let mut f = Feed::default();
+    f.apps.insert(i.id.clone(), Tracked { repo: "Brskt/TidaLuna".into(), kind: Kind::Nsis });
+    f.repos.insert("brskt/tidaluna".into(), rels.clone());
+    let list = versions(&i, &f);
+    // Dev builds older than the newest normal release are left out; the normal ones are not pre-releases.
+    assert_eq!(list.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["0.0.19-alpha", "0.0.18-alpha"]);
+    assert!(list.iter().all(|v| !v.prerelease));
+    assert!(list[0].latest && list[1].installed);
+    // A copy on a dev build moves on to the next normal release too.
+    assert_eq!(newest(&rels, "0.0.19-alpha.dev.3").map(|r| r.version.as_str()), Some("0.0.19-alpha"));
 }
 
 #[test]

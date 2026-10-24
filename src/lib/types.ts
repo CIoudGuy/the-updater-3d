@@ -89,6 +89,17 @@ export interface CatalogEntry {
   pickVersion: boolean;
 }
 
+/** The Updater 3D itself, for its own page. */
+export interface SelfInfo {
+  version: string;
+  installDir: string | null;
+  sizeOnDisk: number | null;
+  /** when this version was installed */
+  updatedAt: string | null;
+  /** its public project, with every release */
+  projectUrl: string;
+}
+
 export interface VersionInfo {
   version: string;
   /** ISO date */

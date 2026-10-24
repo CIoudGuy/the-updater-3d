@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherIcon, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherIcon, PrefsItem, SelfInfo, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 import type { OtherSort } from "./browse";
 
 export interface Commands {
@@ -41,6 +41,10 @@ export interface Commands {
   open_driver_page: { args: { id: string }; ret: void };
   /** Look for a new version of this app only (not for app updates); the newer version or null. */
   check_self_update: { args: {}; ret: string | null };
+  /** The Updater 3D itself, for its own page. */
+  self_info: { args: {}; ret: SelfInfo };
+  /** The Updater 3D's releases, newest first, with their notes. */
+  self_versions: { args: {}; ret: VersionInfo[] };
   /** Restart the PC in a minute to finish installing drivers. */
   restart_pc: { args: {}; ret: void };
   show_in_folder: { args: { appId: string }; ret: void };
@@ -56,6 +60,9 @@ export interface Commands {
    * cards on screen are searched for first and searches for places that scrolled away are
    * dropped. Returns the icons known right now (iconUrl null: none was found). */
   icons_in_view: { args: { visible: string[]; near: string[] }; ret: OtherIcon[] };
+  /** A screenshot in release notes, read from GitHub and kept on this PC: an address the window
+   * can load, or null when it is not one GitHub serves or can not be read. */
+  note_image: { args: { url: string }; ret: string | null };
 
   pause_job: { args: { jobId: string }; ret: void };
   resume_job: { args: { jobId: string }; ret: void };

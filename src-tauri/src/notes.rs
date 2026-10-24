@@ -1117,10 +1117,21 @@ pub fn text_lines(t: &str) -> Vec<String> {
     lines_of(t, false)
 }
 
+/// Pictures kept in one version's change list.
+const MAX_PICTURES: usize = 6;
+
+/// A picture in a change list: a line of its own, "![](<address>)" (see `noteimg`).
+pub fn picture_line(url: &str) -> String {
+    format!("![]({url})")
+}
+
 fn lines_of(t: &str, bullets_only: bool) -> Vec<String> {
     use once_cell::sync::Lazy;
     use regex::Regex;
     static IMG: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap());
+    // The address of a markdown picture and of an HTML one (GitHub writes attached screenshots so).
+    static IMG_SRC: Lazy<Regex> = Lazy::new(|| Regex::new(r#"!\[[^\]]*\]\(\s*<?(https://[^\s)>]+)>?(?:\s+"[^"]*")?\s*\)"#).unwrap());
+    static IMG_TAG: Lazy<Regex> = Lazy::new(|| Regex::new(r#"(?i)<img\b[^>]*?\bsrc\s*=\s*["'](https://[^"']+)["']"#).unwrap());
     static LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
     static URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"\(?<?https?://[^\s)>]+>?\)?").unwrap());
     static NUMBERED: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\d{1,3}[.)]\s+(.*)$").unwrap());
@@ -1160,6 +1171,7 @@ fn lines_of(t: &str, bullets_only: bool) -> Vec<String> {
         NUMBERED.captures(l).map(|c| c[1].to_string())
     };
     let mut out: Vec<String> = Vec::new();
+    let mut pictures = 0;
     // Inside a boilerplate section or a code block: skipped.
     let (mut skipping, mut fence) = (false, false);
     // Sentences some publishers run together with no line break ("the application.Note: It
@@ -1206,6 +1218,14 @@ $2");
         let c = clean(&item);
         if useful(&c) && out.last() != Some(&c) {
             out.push(c);
+        }
+        // Screenshots GitHub serves follow the text they are in, each on a line of its own.
+        for cap in IMG_SRC.captures_iter(l).chain(IMG_TAG.captures_iter(l)) {
+            let line = picture_line(&cap[1]);
+            if pictures < MAX_PICTURES && crate::noteimg::allowed(&cap[1]) && !out.contains(&line) {
+                out.push(line);
+                pictures += 1;
+            }
         }
         if out.len() >= MAX_LINES {
             break;
@@ -1311,6 +1331,25 @@ pub async fn fetch_page(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn screenshots_github_serves_stay_in_the_change_list() {
+        let body = "## New\r\n- **Pin windows.** Keep a window on top.\r\n<img width=\"1200\" height=\"700\" alt=\"pin\" src=\"https://github.com/user-attachments/assets/984de630-77a6-4a41-bd4b-87e915a6ec0c\" />\r\n- Dark theme ![shot](https://user-images.githubusercontent.com/1/dark.png)\r\n![badge](https://img.shields.io/badge/build-passing-green) ![ad](https://i.imgur.com/x.png)\r\n";
+        let lines = super::text_lines(body);
+        assert_eq!(
+            lines,
+            [
+                "Pin windows. Keep a window on top",
+                "![](https://github.com/user-attachments/assets/984de630-77a6-4a41-bd4b-87e915a6ec0c)",
+                "Dark theme",
+                "![](https://user-images.githubusercontent.com/1/dark.png)",
+            ]
+        );
+        // At most a few pictures per version, each once.
+        let many: String = (0..10).map(|i| format!("![a](https://github.com/user-attachments/assets/{i})\n![a](https://github.com/user-attachments/assets/{i})\n")).collect();
+        let lines = super::text_lines(&format!("- A change\n{many}"));
+        assert_eq!(lines.iter().filter(|l| l.starts_with("![](")).count(), 6);
+    }
+
     #[test]
     fn kept_notes_pages_stay_under_the_cap_old_ones_first() {
         use std::sync::Arc;

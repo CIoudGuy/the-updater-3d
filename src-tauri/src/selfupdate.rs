@@ -90,6 +90,65 @@ pub async fn check() -> Result<Option<Release>> {
     }))
 }
 
+/// The app's own public project, where every release and its notes are.
+pub const REPO: &str = "CIoudGuy/the-updater-3d";
+
+/// A release's text without the checksum lines at its end (they are not changes).
+fn changes_of(body: &str) -> &str {
+    body.find("SHA-256 of").map(|i| &body[..i]).unwrap_or(body)
+}
+
+/// The version history of this app: its GitHub releases, newest first, with their notes, and
+/// the release the update feed offers when GitHub does not have it yet. `installed` is this build.
+pub fn history(rels: &[crate::sources::ghapps::Release], offered: Option<&Release>, installed: &str) -> Vec<crate::model::VersionInfo> {
+    use crate::model::VersionInfo;
+    let newest = rels.iter().filter(|r| !r.prerelease).map(|r| r.version.clone()).next();
+    let mut out: Vec<VersionInfo> = rels
+        .iter()
+        .take(20)
+        .map(|r| VersionInfo {
+            version: r.version.clone(),
+            date: r.date.clone(),
+            notes: crate::notes::text_lines(changes_of(&r.body)),
+            notes_url: Some(r.url.clone()).filter(|u| !u.is_empty()),
+            size: r.assets.iter().find(|a| a.name.to_ascii_lowercase().ends_with("-setup.exe")).and_then(|a| a.size),
+            installed: version::cmp(&r.version, installed).is_eq(),
+            latest: false,
+            prerelease: r.prerelease,
+        })
+        .collect();
+    if let Some(o) = offered.filter(|o| !out.iter().any(|v| version::cmp(&v.version, &o.version).is_eq())) {
+        out.insert(0, VersionInfo { version: o.version.clone(), date: None, notes: crate::notes::text_lines(changes_of(&o.notes)), notes_url: None, size: o.size, installed: false, latest: false, prerelease: false });
+    }
+    let top = offered.map(|o| o.version.clone()).or(newest);
+    if let Some(v) = out.iter_mut().find(|v| Some(&v.version) == top.as_ref()) {
+        v.latest = true;
+    }
+    out
+}
+
+/// This app's releases on GitHub (kept for an hour).
+pub async fn releases() -> Vec<crate::sources::ghapps::Release> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
+    let Ok(Ok(f)) = tokio::time::timeout(Duration::from_secs(15), http::get_cached(&url, &[("Accept", "application/vnd.github+json")], Duration::from_secs(3600))).await else { return vec![] };
+    crate::sources::ghapps::parse_releases(&serde_json::from_slice(&f.body).unwrap_or(Value::Null))
+}
+
+/// Where this app is, how big it is and when it was last installed.
+pub fn about() -> crate::model::SelfInfo {
+    let exe = std::env::current_exe().ok();
+    let dir = exe.as_ref().and_then(|e| e.parent().map(|p| p.to_path_buf()));
+    let size = dir.as_ref().map(|d| crate::winutil::dir_size(d)).filter(|s| *s > 0);
+    let updated = exe.as_ref().and_then(|e| std::fs::metadata(e).ok()).and_then(|m| m.modified().ok()).map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    crate::model::SelfInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        install_dir: dir.map(|d| d.display().to_string()),
+        size_on_disk: size,
+        updated_at: updated,
+        project_url: format!("https://github.com/{REPO}"),
+    }
+}
+
 /// Download the installer, verify it, run it silently and start the new version afterwards.
 /// The caller exits the app right after this returns.
 pub async fn install(r: &Release) -> Result<()> {
@@ -108,4 +167,39 @@ pub async fn install(r: &Release) -> Result<()> {
     log::info!("self-update: starting the {} installer", r.version);
     std::process::Command::new(&dest).args(["/S", "/UPDATE", "/R"]).spawn().context("Starting the installer")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rels() -> Vec<crate::sources::ghapps::Release> {
+        let body = |v: &str| format!("- **Programs from GitHub update here.** Version {v}.\n\nSHA-256 of `TheUpdater3D_{v}_x64-setup.exe`:\n`09fad6c41659644d6b2d4bc54800c93384667d7c0b717044baf57ccbea79c28d`\n");
+        let rel = |v: &str| json!({ "tag_name": format!("v{v}"), "draft": false, "prerelease": false, "html_url": format!("https://github.com/{REPO}/releases/tag/v{v}"), "published_at": "2026-10-24T09:30:00Z", "body": body(v), "assets": [{ "name": format!("TheUpdater3D_{v}_x64-setup.exe"), "size": 7685729, "browser_download_url": format!("https://github.com/{REPO}/releases/download/v{v}/TheUpdater3D_{v}_x64-setup.exe") }] });
+        crate::sources::ghapps::parse_releases(&json!([rel("1.1.8"), rel("1.1.7")]))
+    }
+
+    #[test]
+    fn the_apps_own_history_has_each_releases_changes_without_its_checksum() {
+        let list = history(&rels(), None, "1.1.7");
+        assert_eq!(list.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.1.8", "1.1.7"]);
+        assert!(list[0].latest && !list[0].installed);
+        assert!(list[1].installed && !list[1].latest);
+        assert_eq!(list[0].notes, ["Programs from GitHub update here. Version 1.1.8"]);
+        assert_eq!(list[0].size, Some(7685729));
+        assert_eq!(list[0].notes_url.as_deref(), Some("https://github.com/CIoudGuy/the-updater-3d/releases/tag/v1.1.8"));
+    }
+
+    #[test]
+    fn a_version_the_feed_offers_before_github_has_it_comes_first() {
+        let offered = Release { version: "1.1.9".into(), notes: "- **Faster checks.**\n\nSHA-256 of `x`:\n`abc`".into(), url: String::new(), sha256: None, size: Some(1), name: "setup.exe".into() };
+        let list = history(&rels(), Some(&offered), "1.1.8");
+        assert_eq!(list.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.1.9", "1.1.8", "1.1.7"]);
+        assert!(list[0].latest && list[1].installed);
+        assert_eq!(list[0].notes, ["Faster checks"]);
+        // Once GitHub has it, it is listed once.
+        let offered = Release { version: "1.1.8".into(), ..offered };
+        assert_eq!(history(&rels(), Some(&offered), "1.1.7").len(), 2);
+    }
 }

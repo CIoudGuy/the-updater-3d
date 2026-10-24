@@ -35,7 +35,7 @@ pub enum Target {
     Queue,
     /// Home, which has the restart notice.
     Home,
-    /// Settings, About (the update of this app).
+    /// This app's own page (its update and what is new).
     About,
 }
 
@@ -48,7 +48,7 @@ impl Target {
             Target::Installed => "installed".into(),
             Target::Queue => "queue".into(),
             Target::Home => "home".into(),
-            Target::About => "settings/about".into(),
+            Target::About => "updater".into(),
         }
     }
 
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(Target::Installed.route(), "installed");
         assert_eq!(Target::Queue.route(), "queue");
         assert_eq!(Target::Home.route(), "home");
-        assert_eq!(Target::About.route(), "settings/about");
+        assert_eq!(Target::About.route(), "updater");
     }
 
     #[test]

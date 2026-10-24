@@ -6,7 +6,8 @@
   import { I } from "../lib/icons";
   import { send } from "../lib/api";
   import { store, statusColor, statusLabel } from "../lib/store.svelte";
-  import { canRepair, ui } from "../lib/ui.svelte";
+  import { canRepair, isIgnored, ui } from "../lib/ui.svelte";
+  import { latestColumn, listedOnly } from "../lib/view";
   import { openMenuFor, go, retryFor, stateLabel } from "../lib/appview";
   import { askUninstall, openApp, repairApp, updateOne } from "../lib/actions";
   import { bytes, dateShort } from "../lib/format";
@@ -19,8 +20,9 @@
   let menuBtn = $state<HTMLButtonElement>();
   const menuOpen = $derived(ui.popover?.anchor === menuBtn && !!menuBtn);
   const upd = $derived(app.status === "update");
-  const label = $derived(app.source === "programs" ? stateLabel(app, true) : app.status === "update" ? "Update available" : app.status === "current" ? "Up to date" : statusLabel(app.status));
-  const latestShown = $derived(app.source === "programs" ? "" : app.status === "update" ? app.latest : app.status === "missing" ? "" : (app.latest ?? app.version));
+  const off = $derived(isIgnored(app.id));
+  const label = $derived(listedOnly(app) ? stateLabel(app, true) : app.status === "update" ? "Update available" : app.status === "current" ? (off ? "Updates off" : "Up to date") : statusLabel(app.status));
+  const latestShown = $derived(latestColumn(app, off));
 
   function key(e: KeyboardEvent) {
     if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {

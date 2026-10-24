@@ -203,7 +203,7 @@
   {#if store.status.selfUpdate && hs !== "first"}
     <div class="selfup" in:rise>
       <Dab color="#7C93D6" />
-      <span>The Updater 3D {store.status.selfUpdate} is ready.</span>
+      <a class="selflink" href="#/updater" title="See what is new in {store.status.selfUpdate}">The Updater 3D {store.status.selfUpdate} is ready.</a>
       <button class="lnk" disabled={ui.selfUpdating} onclick={updateSelf}>{ui.selfUpdating ? "Downloading, restarts by itself" : "Update and restart"}</button>
     </div>
   {/if}
@@ -518,6 +518,15 @@
   }
   .selfup .lnk:hover {
     text-decoration-color: var(--text);
+  }
+  /* "The Updater 3D 1.1.9 is ready." opens the app's own page */
+  .selflink {
+    color: var(--text-2);
+    transition: color var(--t-fast);
+  }
+  .selflink:hover,
+  .selflink:focus-visible {
+    color: var(--text);
   }
   .statement-wrap {
     position: relative;

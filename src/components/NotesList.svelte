@@ -1,13 +1,17 @@
 <script lang="ts">
   // One version's change list. Lines starting with "# ", "## " or "### " are section headings
-  // (biggest first), every other line is a change. Long lists open in place.
+  // (biggest first), "![](<address>)" is a screenshot GitHub serves, every other line is a change.
+  // Long lists open in place.
   import { DAB } from "../lib/paths";
+  import NoteImage from "./NoteImage.svelte";
 
   let { notes, collapsedAt = 12 }: { notes: string[]; collapsedAt?: number } = $props();
 
-  type Row = { kind: "h"; level: 1 | 2 | 3; text: string } | { kind: "item"; text: string };
+  type Row = { kind: "h"; level: 1 | 2 | 3; text: string } | { kind: "item"; text: string } | { kind: "img"; url: string };
   const rows = $derived<Row[]>(
     notes.map((n) => {
+      const pic = /^!\[\]\((https:\/\/[^\s)]+)\)$/.exec(n);
+      if (pic) return { kind: "img", url: pic[1] };
       const m = /^(#{1,3}) (.+)$/.exec(n);
       return m ? { kind: "h", level: m[1].length as 1 | 2 | 3, text: m[2] } : { kind: "item", text: n };
     }),
@@ -23,6 +27,8 @@
   {#each shown as r, i (i)}
     {#if r.kind === "h"}
       <p class="h h{r.level}" class:first={i === 0}>{r.text}</p>
+    {:else if r.kind === "img"}
+      <NoteImage url={r.url} />
     {:else}
       <p class="it"><svg viewBox="0 0 20 20" width="5" height="5" aria-hidden="true"><path d={DAB} fill="#6E6E6E" /></svg><span>{r.text}</span></p>
     {/if}

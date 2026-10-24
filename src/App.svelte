@@ -67,6 +67,7 @@
     activity: () => import("./screens/Activity.svelte"),
     services: () => import("./screens/Services.svelte"),
     settings: () => import("./screens/Settings.svelte"),
+    self: () => import("./screens/SelfDetail.svelte"),
   };
   let screens = $state<Record<string, Screen>>({});
   const loading: Record<string, Promise<void>> = {};
@@ -359,7 +360,7 @@
         <Lazy />
       {:else if shown.name === "getdetail" && shown.param}
         {#key shown.param}<Lazy id={shown.param} />{/key}
-      {:else if shown.name === "queue" || shown.name === "activity" || shown.name === "services"}
+      {:else if shown.name === "queue" || shown.name === "activity" || shown.name === "services" || shown.name === "self"}
         <Lazy />
       {:else if shown.name === "settings"}
         <Lazy section={shown.param} />
