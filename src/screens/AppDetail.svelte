@@ -13,6 +13,7 @@
   import Toggle from "../components/Toggle.svelte";
   import BrushBar from "../components/BrushBar.svelte";
   import Num from "../components/Num.svelte";
+  import OtherBuilds from "../components/OtherBuilds.svelte";
   import { I } from "../lib/icons";
   import { DAB } from "../lib/paths";
   import { call, on, send } from "../lib/api";
@@ -295,10 +296,11 @@
           <span class="lbl" id="pre-lbl">Updates</span>
           <Segmented options={preOpts} value={preOn ? "pre" : "stable"} onchange={setPre} label="Stable or pre-release updates" />
           <span class="hint">
-            {#if preOn}Betas and release candidates install as updates, like final versions.{:else if versions?.some((v) => v.installed && v.prerelease)}You stay on {app.version} until a newer final version is out, or roll back below.{:else}Only final versions. Pre-releases are listed below, marked.{/if}
+            {#if isDriver}{preOn ? "Beta drivers install as updates." : "Only released drivers."}{:else if preOn}Betas and release candidates install as updates, like final versions.{:else if versions?.some((v) => v.installed && v.prerelease)}You stay on {app.version} until a newer final version is out, or roll back below.{:else}Only final versions. Pre-releases are listed below, marked.{/if}
           </span>
         </div>
         {/if}
+        {#if app.source === "other" && !app.isSelf}<OtherBuilds id={app.id} />{/if}
         {#if !app.readOnly && !listedOnly(app) && !isDriver}
         <div class="blk">
           <label for="ver-pick" class="lbl">Install a version</label>

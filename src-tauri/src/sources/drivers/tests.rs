@@ -187,6 +187,33 @@ fn every_device_with_its_makers_driver_is_listed_once() {
 }
 
 #[test]
+fn an_intel_card_follows_intels_beta_drivers_only_when_chosen() {
+    let card = device("PCI\\VEN_8086&DEV_56A0&SUBSYS_10208086", "Intel(R) Arc(TM) A770 Graphics", "Intel Corporation", "Display", "32.0.101.6987");
+    let configs: Vec<crate::sources::intel::Config> = serde_json::from_str(r#"[
+      {"Id":1,"Version":"32.0.101.9150","Name":"Intel Arc Graphics - Windows","DisplayReleaseDate":"2026-10-02T00:00:00Z","IsBeta":false,
+       "Files":[{"Url":"https://downloadmirror.intel.com/1/gfx_win_101.9150.exe","Size":904501568,"OperatingSystems":["windows-11-24h2-64"]}],
+       "Components":[{"Category":"Graphics","Version":"32.0.101.9150","DetectionValues":["VEN_8086&DEV_56A0"]}]},
+      {"Id":2,"Version":"32.0.101.9198","Name":"Intel Arc Graphics - Windows","DisplayReleaseDate":"2026-10-20T00:00:00Z","IsBeta":true,
+       "Files":[{"Url":"https://downloadmirror.intel.com/2/gfx_win_101.9198.exe","Size":905000000,"OperatingSystems":["windows-11-24h2-64"]}],
+       "Components":[{"Category":"Graphics","Version":"32.0.101.9198","DetectionValues":["VEN_8086&DEV_56A0"]}]}]"#).unwrap();
+    let present = [card];
+    let id = "driver:intel:pci\\ven_8086&dev_56a0&subsys_10208086".to_string();
+    // Not chosen: the release, and the choice is offered (stable for now).
+    let list = collect(&Inputs { intel: Some(&configs), ..with(None, &present) });
+    assert_eq!((list[0].entry.id.as_str(), list[0].entry.latest.as_deref(), list[0].entry.pre_channel), (id.as_str(), Some("32.0.101.9150"), Some(false)));
+    // Chosen: the beta, named so.
+    let choice: std::collections::BTreeMap<String, bool> = [(id.clone(), true)].into();
+    let list = collect(&Inputs { intel: Some(&configs), pre: Some(&choice), ..with(None, &present) });
+    assert_eq!((list[0].entry.latest.as_deref(), list[0].entry.pre_channel), (Some("32.0.101.9198"), Some(true)));
+    assert!(list[0].entry.note.as_deref().is_some_and(|n| n.contains("(beta)")), "{:?}", list[0].entry.note);
+    assert!(matches!(&list[0].how, Some(How::Intel(r)) if r.beta));
+    // No beta out: no choice to make.
+    let release_only: Vec<crate::sources::intel::Config> = configs.into_iter().filter(|c| !c.is_beta).collect();
+    let list = collect(&Inputs { intel: Some(&release_only), ..with(None, &present) });
+    assert_eq!(list[0].entry.pre_channel, None);
+}
+
+#[test]
 fn intels_own_newer_driver_wins_over_windows_updates_older_one() {
     let bt = device("USB\\VID_8087&PID_0029&REV_0001", "Intel(R) Wireless Bluetooth(R)", "Intel Corporation", "Bluetooth", "23.60.0.1");
     let configs: Vec<crate::sources::intel::Config> = serde_json::from_str(r#"[{"Id":1,"Version":"24.70.0","Name":"Intel Wireless Bluetooth","DisplayReleaseDate":"2026-09-08T00:00:00Z","IsBeta":false,

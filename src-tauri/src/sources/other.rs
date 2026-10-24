@@ -2200,6 +2200,41 @@ fn github_raw(url: &str) -> Option<String> {
 /// A change list and the page with the full notes.
 type Notes = (Vec<String>, Option<String>);
 
+/// The change list of version `ver` on a changelog page with a section per version (a file on
+/// GitHub is read raw).
+async fn changelog_notes(url: &str, ver: &str) -> Vec<String> {
+    let src = if github_repo(url).is_some() { github_raw(url) } else { Some(url.to_string()) };
+    let Some(src) = src else { return vec![] };
+    // Kept on disk for a while: every listed version reads the same page.
+    let Some(body) = notes::page(&src).await else { return vec![] };
+    // Built by script: read as the browser shows it (see `render`).
+    crate::render::page_notes(&src, &body, ver).await
+}
+
+/// The change list of version `ver` on the page a release text only links (a GitHub or
+/// Codeberg release page for its text, any other page for its section about the version).
+pub async fn linked_notes(url: &str, ver: &str) -> Vec<String> {
+    let read = async {
+        let lines = release_page_notes(url).await;
+        if lines.is_empty() {
+            changelog_notes(url, ver).await
+        } else {
+            lines
+        }
+    };
+    tokio::time::timeout(NOTES_WAIT, read).await.unwrap_or_default()
+}
+
+/// A GitHub release's change list and the page with its notes: its own text, or when that only
+/// links a changelog page (ShareX's "Changelog: https://getsharex.com/changelog#v22.0.0"), that
+/// page's section for the version and the page.
+pub async fn release_text_notes(body: &str, ver: &str) -> Notes {
+    match notes::linked_changelog(body) {
+        Some(u) => (linked_notes(&u, ver).await, Some(u)),
+        None => (notes::text_lines(body), None),
+    }
+}
+
 static NOTES_CACHE: Lazy<Mutex<HashMap<String, Notes>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Forget change lists kept for open pages (they are saved on disk too).
@@ -2251,22 +2286,15 @@ async fn notes_detail(m: &Manifest, gh: &Gh) -> (Vec<String>, Option<String>, &'
         }
     }
     if let Some(u) = m.release_notes_url.as_ref().or(gh.page.as_ref()).or(known.as_ref()) {
-        let src = if github_repo(u).is_some() { github_raw(u) } else { Some(u.clone()) };
-        if let Some(src) = src {
-            // Kept on disk for a while: every listed version reads the same page.
-            if let Some(body) = notes::page(&src).await {
-                // Built by script: read as the browser shows it (see `render`).
-                let lines = crate::render::page_notes(&src, &body, ver).await;
-                if !lines.is_empty() {
-                    return (lines, link, "page");
-                }
-            }
+        let lines = changelog_notes(u, ver).await;
+        if !lines.is_empty() {
+            return (lines, link, "page");
         }
     }
-    // 3. The GitHub release.
+    // 3. The GitHub release (or the changelog page its text only links).
     if let Some(rel) = find_release(gh.get().await, ver, tag.as_deref()) {
-        let lines = notes::text_lines(&rel.body);
-        let url = Some(rel.url.clone()).filter(|u| !u.is_empty());
+        let (lines, page) = release_text_notes(&rel.body, ver).await;
+        let url = page.or_else(|| Some(rel.url.clone()).filter(|u| !u.is_empty()));
         if !lines.is_empty() {
             return (lines, url, "github");
         }
@@ -2422,10 +2450,60 @@ pub fn pre_installer(stable: &Installer, stable_ver: &str, rel: &super::ghapps::
     let name = percent_decode(last);
     let bare = |v: &str| v.trim().trim_start_matches(['v', 'V']).to_string();
     let (sv, rv) = (bare(stable_ver), bare(&rel.version));
-    let want = if !sv.is_empty() && name.contains(&sv) { name.replace(&sv, &rv) } else { name };
-    let a = rel.assets.iter().find(|a| a.name.eq_ignore_ascii_case(&want))?;
+    let want = if !sv.is_empty() && name.contains(&sv) { name.replace(&sv, &rv) } else { name.clone() };
+    // Else the one file named like it with another version in that place: the file can write
+    // the version differently from the catalog ("Tool_1.4.0_x64-setup.exe" for version "1.4").
+    let a = rel.assets.iter().find(|a| a.name.eq_ignore_ascii_case(&want)).or_else(|| {
+        let shape = version_shape(&name);
+        if shape == name {
+            return None;
+        }
+        let mut same = rel.assets.iter().filter(|a| version_shape(&a.name).eq_ignore_ascii_case(&shape));
+        match (same.next(), same.next()) {
+            (Some(a), None) => Some(a),
+            _ => None,
+        }
+    })?;
     let sha256 = a.sha256.clone()?;
     Some(Installer { url: a.url.clone(), sha256, product_code: None, arp: vec![], release_date: rel.date.clone(), ..stable.clone() })
+}
+
+/// A file name with each version in it written as one mark, pre-release tags included:
+/// "ShareX-21.0.0-setup-x64.exe" and "ShareX-22.0.0-beta.1-setup-x64.exe" are both
+/// "ShareX-<v>-setup-x64.exe".
+fn version_shape(name: &str) -> String {
+    static VER: Lazy<regex::Regex> = Lazy::new(|| regex::Regex::new(r"(?i)v?\d+(?:[._]\d+)+(?:[-._]?(?:(?:alpha|beta|rc|pre|preview|dev|nightly|canary)(?:[._-]?\d+)?|[ab]\d+))?").unwrap());
+    VER.replace_all(name, "<v>").into_owned()
+}
+
+/// What a package's pre-release builds are called when the catalog lists them as packages of
+/// their own ("Google.Chrome.Beta" next to "Google.Chrome").
+const BUILD_SUFFIXES: &[&str] = &["Beta", "Preview", "Insiders", "Insider", "Dev", "Development", "DeveloperEdition", "Canary", "Nightly", "Alpha", "EAP", "PreRelease", "Snapshot", "PTB", "RC", "EarlyAccess"];
+
+/// The other builds of a package (id, name): its pre-release packages, newest kind of build
+/// last; for one of those, the release package first and the other pre-release ones. A build the
+/// catalog has only as an app package ("Mozilla.Firefox.Beta.MSIX") counts too.
+pub fn other_builds(idx: &Index, id: &str) -> Vec<(String, String)> {
+    let strip = |s: &str, suf: &str| (s.len() > suf.len() && s[s.len() - suf.len()..].eq_ignore_ascii_case(suf)).then(|| s[..s.len() - suf.len()].to_string());
+    let base = BUILD_SUFFIXES.iter().find_map(|s| strip(id, &format!(".{s}")).or_else(|| strip(id, &format!(".{s}.MSIX")))).filter(|b| idx.by_id(b).is_some()).unwrap_or_else(|| id.to_string());
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut add = |p: Pkg| {
+        if !p.id.eq_ignore_ascii_case(id) && !out.iter().any(|(o, _)| o.eq_ignore_ascii_case(&p.id)) {
+            out.push((p.id, p.name));
+        }
+    };
+    if !base.eq_ignore_ascii_case(id) {
+        if let Some(p) = idx.by_id(&base) {
+            add(p);
+        }
+    }
+    for s in BUILD_SUFFIXES {
+        let want = format!("{base}.{s}");
+        if let Some(p) = idx.by_id(&want).or_else(|| idx.by_id(&format!("{want}.MSIX"))) {
+            add(p);
+        }
+    }
+    out
 }
 
 /// The project whose releases the catalog's installer is downloaded from: only then are its
@@ -2453,13 +2531,32 @@ pub async fn pre_releases(m: &Manifest, w: &Want) -> Vec<(super::ghapps::Release
     pre_of(&rels, m, stable)
 }
 
-/// The newest pre-release of each installed app that follows pre-releases (app id -> version).
-pub async fn newest_pre(apps: &[Installed], feed: &Feed) -> HashMap<String, String> {
+/// What an app's GitHub pre-releases `pres` (newest first) offer it: the newest, with its
+/// download size, and whether the copy at `installed` is one of them (then it follows them until
+/// the user chooses).
+pub fn pre_offer(pres: &[(super::ghapps::Release, Installer)], installed: &str) -> Option<(Latest, bool)> {
+    let (r, inst) = pres.first()?;
+    let size = r.assets.iter().find(|a| a.url == inst.url).and_then(|a| a.size);
+    let copy_is_pre = pres.iter().any(|(p, _)| version::cmp(&p.version, installed).is_eq());
+    Some((Latest { version: r.version.clone(), size, note: None }, copy_is_pre))
+}
+
+/// An installed app whose GitHub pre-releases are looked up: the user chose them, or has not
+/// chosen and the copy is newer than the catalog's newest version (it may be one).
+pub fn may_follow_pre(i: &Installed, feed: &Feed, choice: Option<bool>) -> bool {
+    match choice {
+        Some(c) => c,
+        None => feed.get(pkg_of(i)).and_then(|pf| pf.latest.as_ref()).is_some_and(|m| is_newer(&i.version, &m.version)),
+    }
+}
+
+/// The newest pre-release of each installed app in `apps` (app id -> offer, see `pre_offer`).
+pub async fn newest_pre(apps: &[Installed], feed: &Feed) -> HashMap<String, (Latest, bool)> {
     let mut out = HashMap::new();
     for i in apps {
         let Some(m) = feed.get(pkg_of(i)).and_then(|pf| pf.latest.as_ref()) else { continue };
-        if let Some((r, _)) = pre_releases(m, &Want::for_installed(i)).await.into_iter().next() {
-            out.insert(i.id.clone(), r.version);
+        if let Some(o) = pre_offer(&pre_releases(m, &Want::for_installed(i)).await, &i.version) {
+            out.insert(i.id.clone(), o);
         }
     }
     out
@@ -2482,14 +2579,16 @@ async fn with_pre(list: Vec<VersionInfo>, base: Option<&Manifest>, w: &Want, ins
     if pres.is_empty() {
         return list;
     }
+    let notes = futures_util::future::join_all(pres.iter().map(|(r, _)| release_text_notes(&r.body, &r.version))).await;
     let mut out: Vec<VersionInfo> = pres
         .iter()
+        .zip(notes)
         .enumerate()
-        .map(|(k, (r, i))| VersionInfo {
+        .map(|(k, ((r, i), (lines, page)))| VersionInfo {
             version: r.version.clone(),
             date: r.date.clone(),
-            notes: crate::notes::text_lines(&r.body),
-            notes_url: Some(r.url.clone()).filter(|u| !u.is_empty()),
+            notes: if lines.is_empty() { vec![SEE_NOTES.to_string()] } else { lines },
+            notes_url: page.or_else(|| Some(r.url.clone()).filter(|u| !u.is_empty())),
             size: r.assets.iter().find(|a| a.url == i.url).and_then(|a| a.size),
             installed: installed.is_some_and(|v| version::cmp(v, &r.version).is_eq()),
             latest: follows && k == 0,

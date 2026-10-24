@@ -342,6 +342,7 @@ pub fn entry(b: &Bios) -> DriverEntry {
         vendor_url: super::drivers::safe_link(page),
         note: Some(note),
         notes,
+        pre_channel: None,
     }
 }
 

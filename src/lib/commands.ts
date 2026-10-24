@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherIcon, PrefsItem, SelfInfo, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherBuild, OtherIcon, PrefsItem, SelfInfo, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 import type { OtherSort } from "./browse";
 
 export interface Commands {
@@ -53,6 +53,8 @@ export interface Commands {
   get_catalog_entry: { args: { id: string }; ret: CatalogEntry | null };
   /** Versions that can be installed for a catalog entry (newest first). */
   catalog_versions: { args: { id: string }; ret: VersionInfo[] };
+  /** An Other app's or catalog package's beta, preview and nightly packages (apps of their own). */
+  other_builds: { args: { id: string }; ret: OtherBuild[] };
   /** A page of the whole winget catalog (Other apps on only): a search through it or null, a
    * category and first letter ("A" to "Z", "#") or null for all, and an order. */
   browse_other_apps: { args: { query: string | null; category: string | null; letter: string | null; sort: OtherSort; offset: number; limit: number }; ret: BrowsePage };

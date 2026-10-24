@@ -342,7 +342,7 @@ pub fn short_maker(m: &str) -> String {
 }
 
 fn base_entry(id: String, name: String, kind: String, maker: String, source: &str, version: String) -> DriverEntry {
-    DriverEntry { id, name, kind, maker, source: source.into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![] }
+    DriverEntry { id, name, kind, maker, source: source.into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None }
 }
 
 /// NVIDIA's answer for one card: its matching id, product id ("" when NVIDIA does not list it)
@@ -364,6 +364,21 @@ pub struct Inputs<'a> {
     pub maker: &'a [super::board::MakerDriver],
     pub maker_name: &'a str,
     pub windows11: bool,
+    /// The user's choice of beta drivers (entry id -> follows them)
+    pub pre: Option<&'a std::collections::BTreeMap<String, bool>>,
+}
+
+/// Intel's driver for a device listed under `id`, and whether that entry follows Intel's betas:
+/// the newest release, or the newest beta when the user chose betas for it. The choice is there
+/// (Some) when a beta newer than the release is out, or the user follows them.
+fn intel_pick(inp: &Inputs, p: &Present, cat: Option<&str>, id: &str) -> (Option<super::intel::Release>, Option<bool>) {
+    let Some(list) = inp.intel else { return (None, None) };
+    let choice = inp.pre.and_then(|m| m.get(id).copied());
+    let release = super::intel::for_device_with(p, list, inp.windows11, cat, false);
+    let beta = super::intel::for_device_with(p, list, inp.windows11, cat, true).filter(|b| b.beta && release.as_ref().is_none_or(|r| super::tools::cmp_ver(&b.version, &r.version).is_gt()));
+    let follows = (beta.is_some() || choice == Some(true)).then(|| choice.unwrap_or(false));
+    let pick = if choice == Some(true) { beta.or(release) } else { release };
+    (pick, follows)
 }
 
 /// Does a hardware id from a maker's list name this installed device? The same id, or one
@@ -376,7 +391,6 @@ pub fn hw_match(listed: &str, installed: &str) -> bool {
 /// Everything listed under Drivers, one entry per device.
 pub fn collect(inp: &Inputs) -> Vec<Found> {
     let present = inp.present;
-    let intel_for = |p: &Present, cat: Option<&str>| inp.intel.and_then(|list| super::intel::for_device(p, list, inp.windows11, cat));
     // A maker's own driver covers these devices: Windows Update's is not listed for them.
     let mut maker_has: Vec<String> = Vec::new();
     let mut out: Vec<Found> = Vec::new();
@@ -428,13 +442,14 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
             e.note = Some(format!("Adrenalin Edition {} from AMD", r.version));
             maker_has.push(low.clone());
             out.push(Found { entry: e, how: newer.then(|| How::Amd(r.clone())) });
-        } else if let (true, Some(r)) = (super::intel::is_gpu(p), intel_for(p, Some("Graphics"))) {
+        } else if let Some((Some(r), follows)) = super::intel::is_gpu(p).then(|| intel_pick(inp, p, Some("Graphics"), &format!("driver:intel:{low}"))) {
             let id = format!("driver:intel:{low}");
             if out.iter().any(|f| f.entry.id == id) {
                 continue;
             }
             let mut e = base_entry(id, p.desc.clone(), "Graphics".into(), "Intel".into(), "intel", p.version.clone());
             intel_entry(&mut e, &r, &p.version);
+            e.pre_channel = follows;
             let how = (e.status == AppStatus::Update).then_some(How::Intel(r));
             maker_has.push(low.clone());
             out.push(Found { entry: e, how });
@@ -465,7 +480,9 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
         let maker = short_maker(&p.provider);
         let mut e = base_entry(format!("driver:dev:{low}"), p.desc.clone(), kind_of(&p.class), maker.clone(), "device", p.version.clone());
         e.date = p.date.clone();
-        let how = match intel_for(p, None) {
+        let (pick, follows) = intel_pick(inp, p, None, &e.id);
+        e.pre_channel = follows;
+        let how = match pick {
             Some(r) => {
                 e.source = "intel".into();
                 e.maker = "Intel".into();
@@ -635,7 +652,8 @@ fn intel_entry(e: &mut DriverEntry, r: &super::intel::Release, have: &str) {
     e.date = r.date.clone();
     e.notes_url = safe_link(r.notes_url.clone());
     e.notes = r.notes.clone();
-    e.note = Some(if newer && !r.silent { format!("{} from Intel. Intel's installer opens: click through it to finish.", r.name) } else { format!("{} from Intel", r.name) });
+    let name = if r.beta { format!("{} (beta)", r.name) } else { r.name.clone() };
+    e.note = Some(if newer && !r.silent { format!("{name} from Intel. Intel's installer opens: click through it to finish.") } else { format!("{name} from Intel") });
 }
 
 /// The version Windows has now for a driver entry, read fresh: the AMD chipset drivers from

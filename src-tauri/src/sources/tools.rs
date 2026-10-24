@@ -31,9 +31,13 @@ pub const MARKER: &str = ".the-updater-3d.json";
 
 const KRITA_STABLE: &str = "https://download.kde.org/stable/krita/";
 const KRITA_ATTIC: &str = "https://download.kde.org/Attic/krita/";
+/// Krita's betas and release candidates
+const KRITA_UNSTABLE: &str = "https://download.kde.org/unstable/krita/";
 const UNITY_API: &str = "https://services.api.unity.com/unity/editor/release/v1/releases";
 /// Unity Hub's update feed (electron-builder): newest version, installer, size and SHA-512.
 const HUB_FEED: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/latest.yml";
+/// Unity Hub's beta channel
+const HUB_BETA: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/beta.yml";
 const HUB_FILES: &str = "https://public-cdn.cloud.unity3d.com/hub/prod/";
 const HUB_NOTES: &str = "https://unity.com/unity-hub/release-notes";
 /// Epic's download link for the new launcher (it answers with a redirect to the versioned file).
@@ -387,6 +391,25 @@ pub fn krita_versions(html: &str) -> Vec<String> {
     v
 }
 
+/// Beta and release candidate folders of Krita's unstable index ("6.1.0-beta1/"), newest first.
+/// Special builds ("5.3.0-prealpha-fast-sketch/") are not releases.
+pub fn krita_pre_versions(html: &str) -> Vec<String> {
+    let re = Regex::new(r"^(\d+(?:\.\d+){1,3}-(?:alpha|beta|rc)\d*)/$").unwrap();
+    let mut v: Vec<String> = index_rows(html).into_iter().filter_map(|(n, _, _)| re.captures(&n).map(|c| c[1].to_string())).collect();
+    v.sort_by(|a, b| cmp_ver(b, a));
+    v.dedup();
+    v
+}
+
+/// The newest Krita beta or release candidate of a version newer than the release `after`.
+async fn krita_pre(after: &str) -> Option<Rel> {
+    let index = http::get_cached(KRITA_UNSTABLE, &[], Duration::from_secs(30 * 60)).await.ok()?;
+    let ver = krita_pre_versions(&String::from_utf8_lossy(&index.body)).into_iter().find(|v| cmp_ver(v, after).is_gt())?;
+    let mut r = krita_folder(&ver, KRITA_UNSTABLE).await?;
+    r.prerelease = true;
+    Some(r)
+}
+
 /// The Windows installer of one Krita release folder: file name, date and rounded size.
 pub fn krita_installer(html: &str, ver: &str) -> Option<(String, Option<String>, Option<u64>)> {
     let name = format!("krita-x64-{ver}-setup.exe");
@@ -424,6 +447,10 @@ pub async fn krita_releases(attic: bool, want: usize) -> Result<Vec<Rel>> {
     out.truncate(want);
     if out.is_empty() {
         bail!("No Krita release found on download.kde.org");
+    }
+    // A beta of the next version goes first, marked.
+    if let Some(pre) = krita_pre(&out[0].version).await {
+        out.insert(0, pre);
     }
     Ok(out)
 }
@@ -612,11 +639,24 @@ fn parse_hub_feed_for(yml: &str, native: &str) -> Option<Rel> {
     Some(Rel { version, date, url: format!("{HUB_FILES}{url}"), file, sha512: Some(sha512?), size, notes_url: Some(HUB_NOTES.into()), ..Default::default() })
 }
 
+/// Is a build from Unity Hub's beta channel offered next to the release `stable`? When it is
+/// newer and comes as the same kind of setup program. A beta that turns Hub into an app package
+/// (4.0's "UnityHubSetup-4.0.0-beta.3-x64-msix-converter.exe") changes how Hub is installed,
+/// so it is not.
+fn usable_hub_beta(beta: &Rel, stable: &Rel) -> bool {
+    cmp_ver(&beta.version, &stable.version).is_gt() && !beta.file.to_ascii_lowercase().contains("msix")
+}
+
 /// Unity Hub releases: the newest one installable (it is the only one with a published checksum),
-/// every version with its change list from the release notes page.
+/// every version with its change list from the release notes page, and a newer beta from its
+/// beta channel, marked.
 async fn unity_hub_releases() -> Result<Vec<Rel>> {
-    let (feed, page) = tokio::join!(text_of_fresh(HUB_FEED, 30 * 60), text_of_fresh(HUB_NOTES, 6 * 3600));
+    let (feed, beta, page) = tokio::join!(text_of_fresh(HUB_FEED, 30 * 60), text_of_fresh(HUB_BETA, 30 * 60), text_of_fresh(HUB_NOTES, 6 * 3600));
     let mut newest = parse_hub_feed(&feed.ok_or_else(|| anyhow!("Unity Hub's update feed did not answer"))?).ok_or_else(|| anyhow!("Unity Hub's update feed changed its format"))?;
+    let beta = beta.as_deref().and_then(parse_hub_feed).filter(|b| usable_hub_beta(b, &newest)).map(|mut b| {
+        b.prerelease = true;
+        b
+    });
     let mut out: Vec<Rel> = Vec::new();
     for (ver, date, lines) in page.as_deref().map(notes::unity_hub).unwrap_or_default() {
         if ver == newest.version {
@@ -629,6 +669,7 @@ async fn unity_hub_releases() -> Result<Vec<Rel>> {
         out.push(Rel { version: ver, date, notes: lines, notes_url: Some(HUB_NOTES.into()), ..Default::default() });
     }
     out.insert(0, newest);
+    out.extend(beta);
     sort_newest_first(&mut out);
     Ok(out)
 }
@@ -1169,7 +1210,7 @@ fn with_fallback_notes(key: &str, list: &mut [Rel]) {
     for r in list.iter_mut() {
         if r.notes.is_empty() {
             r.notes.push(match key {
-                "krita" => "No change list is published for this release".to_string(),
+                "krita" if !r.prerelease => "No change list is published for this release".to_string(),
                 "epic" => "Epic does not publish a change list for the launcher preview".to_string(),
                 _ => format!("{} release. See the full notes for the changes", if r.prerelease { "Pre-release" } else { "Maintenance" }),
             });

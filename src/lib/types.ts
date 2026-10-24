@@ -104,6 +104,13 @@ export interface SelfInfo {
   projectUrl: string;
 }
 
+/** Another build of an app that the catalog lists as its own package (its beta, preview or nightly). */
+export interface OtherBuild {
+  /** Its Get apps id: "other:Google.Chrome.Beta" */
+  id: string;
+  name: string;
+}
+
 export interface VersionInfo {
   version: string;
   /** ISO date */

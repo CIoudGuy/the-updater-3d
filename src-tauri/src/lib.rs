@@ -200,6 +200,7 @@ pub fn run() {
             commands::install_self_update,
             commands::test_notification,
             commands::catalog_versions,
+            commands::other_builds,
             commands::browse_other_apps,
             commands::icons_in_view,
             commands::note_image,
