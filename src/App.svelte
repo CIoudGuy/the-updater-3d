@@ -10,6 +10,7 @@
   import Skeleton from "./components/Skeleton.svelte";
   import Btn from "./components/Btn.svelte";
   import { router, type Route } from "./lib/router.svelte";
+  import { landing } from "./lib/route";
   import { store } from "./lib/store.svelte";
   import { canRepair, ui } from "./lib/ui.svelte";
   import { send, windowApi } from "./lib/api";
@@ -131,10 +132,13 @@
     let off = () => {};
     const go = (route: string) => {
       // the tray popup has no dialogs: it asks the main window to run "Update all", which opens the low disk dialog here
-      if (route === "update-all") {
-        router.go("home");
-        updateAll();
-      } else router.go(route.replace(/^#?\/?/, ""));
+      const to = landing(route);
+      if (to.filter) {
+        ui.filter = to.filter;
+        ui.group = "all";
+      }
+      router.go(to.path);
+      if (to.updateAll) updateAll();
     };
     // The backend keeps the route until it is read once, so a window that is still being built
     // when the tray asks (its events are not subscribed yet) still gets it.

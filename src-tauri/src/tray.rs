@@ -5,7 +5,7 @@ use crate::model::AppStatus;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindowBuilder};
 
 const POPUP_W: f64 = 360.0;
 const POPUP_H: f64 = 480.0;
@@ -66,6 +66,19 @@ pub fn app_like(w: &tauri::WebviewWindow) {
             let _ = s.SetAreDefaultContextMenusEnabled(false);
         }
     });
+}
+
+/// Show the main window, on a screen when one is asked for (the tray, a clicked notification).
+/// The route is kept until the window reads it: a window built just now has not subscribed to
+/// events yet, and "Update all" from the tray must not get lost then.
+pub fn open_route(app: &AppHandle, route: Option<String>) {
+    if let (Some(r), Some(core)) = (&route, app.try_state::<Arc<Core>>()) {
+        *core.pending_route.lock() = Some(r.clone());
+    }
+    show_main(app);
+    if let Some(r) = route {
+        let _ = app.emit("navigate", r);
+    }
 }
 
 pub fn show_main(app: &AppHandle) {
