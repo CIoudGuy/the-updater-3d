@@ -181,6 +181,7 @@ pub fn run() {
             commands::test_notification,
             commands::catalog_versions,
             commands::browse_other_apps,
+            commands::icons_in_view,
             commands::quit_app,
             commands::leftover_scan,
             commands::leftover_delete,

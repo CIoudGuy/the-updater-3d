@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --test src/lib/batch.test.ts src/lib/blocked.test.ts src/lib/format.version.test.ts src/lib/applike.test.ts src/lib/view.test.ts src/lib/jobs.test.ts src/lib/keys.test.ts src/lib/load.test.ts src/lib/format.test.ts src/lib/browse.test.ts src/lib/iconlook.test.ts",
+    "test": "node --test src/lib/batch.test.ts src/lib/blocked.test.ts src/lib/format.version.test.ts src/lib/applike.test.ts src/lib/view.test.ts src/lib/jobs.test.ts src/lib/keys.test.ts src/lib/load.test.ts src/lib/format.test.ts src/lib/browse.test.ts src/lib/iconlook.test.ts src/lib/markstate.test.ts",
     "tauri": "tauri"
   },
   "dependencies": {

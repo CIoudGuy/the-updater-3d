@@ -105,17 +105,67 @@ export function patchEntries<T extends Slot>(list: T[], patches: OtherDetail[]):
   return changed ? out : null;
 }
 
-/** Cards whose icon was found: a new list when any changed, else null. Nothing moves. */
+/** Cards whose icon was found, or whose search is over without one: a new list when any changed,
+ * else null. Nothing moves. */
 export function patchIcons<T extends Slot>(list: T[], icons: OtherIcon[]): T[] | null {
   const by = new Map(icons.map((i) => [i.id, i.iconUrl]));
   let changed = false;
   const out = list.map((e) => {
-    const u = e && by.get(e.id);
-    if (!e || !u || e.iconUrl === u) return e;
+    if (!e || !by.has(e.id)) return e;
+    const u = by.get(e.id) ?? null;
+    if (u) {
+      if (e.iconUrl === u && !e.iconMiss) return e;
+      changed = true;
+      return { ...e, iconUrl: u, iconMiss: false } as T;
+    }
+    // a card keeps an icon it has; "none found" only marks the ones without
+    if (e.iconUrl || e.iconMiss) return e;
     changed = true;
-    return { ...e, iconUrl: u } as T;
+    return { ...e, iconMiss: true } as T;
   });
   return changed ? out : null;
+}
+
+/** The cards behind the screen come after all the ones the list is moving towards. */
+const BEHIND = 1000;
+
+/** Screens of cards beyond the kept ones that are looked at the way the list is going. */
+export const LOOK_SCREENS = 2;
+
+/** The places whose icons are worth searching for: the kept ones and `LOOK_SCREENS` screens more
+ * the way the list is going (`dir` 1 down, -1 up), as [from, to). */
+export function lookRange(r: { from: number; to: number; keepFrom: number; keepTo: number }, dir: number, length: number): { from: number; to: number } {
+  const screen = Math.max(0, r.to - r.from) * LOOK_SCREENS;
+  return { from: Math.max(0, dir < 0 ? r.keepFrom - screen : r.keepFrom), to: Math.min(length, dir < 0 ? r.keepTo : r.keepTo + screen) };
+}
+
+/**
+ * The cards whose icons the backend should look for, as package ids: `visible` are the ones on
+ * screen (left to right, top to bottom), `near` the other loaded ones in the look range: the ones
+ * the list is moving towards, the closest first, and then the ones behind. Cards that have an
+ * icon, or were searched without success, are left out.
+ */
+export function iconsWanted(list: Slot[], r: { from: number; to: number; keepFrom: number; keepTo: number }, dir: number, columns: number): { visible: string[]; near: string[] } {
+  const need = (e: Slot): e is CatalogEntry => !!e && !e.iconUrl && !e.iconMiss && e.id.startsWith("other:");
+  const visible: string[] = [];
+  for (let i = r.from; i < Math.min(r.to, list.length); i++) {
+    const e = list[i];
+    if (need(e)) visible.push(e.id);
+  }
+  const look = lookRange(r, dir, list.length);
+  const cols = Math.max(1, columns);
+  const around: { rank: number; id: string }[] = [];
+  for (let i = look.from; i < look.to; i++) {
+    const e = list[i];
+    if ((i >= r.from && i < r.to) || !need(e)) continue;
+    const below = i >= r.to;
+    const rows = below ? Math.floor((i - r.to) / cols) : Math.floor((r.from - 1 - i) / cols);
+    const towards = dir >= 0 ? below : !below;
+    around.push({ rank: towards ? rows : BEHIND + rows, id: e.id });
+  }
+  // a stable sort: cards of one row stay in reading order
+  around.sort((a, b) => a.rank - b.rank);
+  return { visible, near: around.map((x) => x.id) };
 }
 
 /** Put a loaded page in its places. The list takes the length the backend gave (`total`); places
