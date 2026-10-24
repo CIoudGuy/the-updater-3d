@@ -3546,6 +3546,49 @@ impl Core {
     }
 
     /// Download, wait for the app to close, install, verify.
+    /// Wait until none of `block`'s programs run (the ones in these folders, with these names, or
+    /// holding these files): the job shows Blocked with their names, and "Close and continue"
+    /// closes them. false: the job was canceled.
+    async fn wait_closed(self: &Arc<Self>, id: &str, ctl: &watch::Receiver<Control>, block: (Vec<PathBuf>, Vec<String>, Vec<PathBuf>)) -> bool {
+        self.with_job(id, |j| j.block = block.clone());
+        loop {
+            if *ctl.borrow() == Control::Cancel {
+                return false;
+            }
+            // Listing processes is slow, blocking work: keep it off the async threads.
+            let (dirs, bnames, files) = block.clone();
+            let b = tauri::async_runtime::spawn_blocking(move || blockers(&procs::list(), &dirs, &bnames, &files)).await.unwrap_or_default();
+            if b.is_empty() {
+                break;
+            }
+            let mut names: Vec<String> = b.iter().map(|p| procs::friendly(&p.name)).collect();
+            names.sort();
+            names.dedup();
+            let changed = self.with_job(id, |j| {
+                let was = j.job.state != JobState::Blocked;
+                j.job.state = JobState::Blocked;
+                j.job.blocked_by = names.clone();
+                j.job.step = format!("Waiting for {} to close", names.join(", "));
+                if !j.job.detail.starts_with("Could not close") {
+                    j.job.detail = "Downloaded and checked. It installs once that is closed".into();
+                }
+                was
+            });
+            if changed == Some(true) {
+                let me = self.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || me.emit_apps()).await;
+            }
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+        }
+        self.set_job(id, |j| {
+            j.state = JobState::Installing;
+            j.blocked_by.clear();
+            j.detail.clear();
+        });
+        self.with_job(id, |j| j.block = Default::default());
+        true
+    }
+
     async fn execute(self: &Arc<Self>, id: &str, plan: &Plan) -> Result<Outcome> {
         let ctl = self.with_job(id, |j| j.ctl.subscribe()).ok_or_else(|| anyhow!("job vanished"))?;
         // The copy as it was, to tell what the install changed.
@@ -3680,45 +3723,10 @@ impl Core {
 
         // ---- the app must be closed
         let block = (plan.block_dirs.clone(), plan.block_names.clone(), plan.block_files());
-        self.with_job(id, |j| j.block = block.clone());
-        loop {
-            if *ctl.borrow() == Control::Cancel {
-                return Ok(Outcome::Canceled);
-            }
-            // Listing processes is slow, blocking work: keep it off the async threads.
-            let (dirs, bnames, files) = block.clone();
-            let b = tauri::async_runtime::spawn_blocking(move || blockers(&procs::list(), &dirs, &bnames, &files)).await.unwrap_or_default();
-            if b.is_empty() {
-                break;
-            }
-            let mut names: Vec<String> = b.iter().map(|p| procs::friendly(&p.name)).collect();
-            names.sort();
-            names.dedup();
-            let changed = self.with_job(id, |j| {
-                let was = j.job.state != JobState::Blocked;
-                j.job.state = JobState::Blocked;
-                j.job.blocked_by = names.clone();
-                j.job.step = format!("Waiting for {} to close", names.join(", "));
-                if !j.job.detail.starts_with("Could not close") {
-                    j.job.detail = "Downloaded and checked. It installs once that is closed".into();
-                }
-                was
-            });
-            if changed == Some(true) {
-                let me = self.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || me.emit_apps()).await;
-            }
-            tokio::time::sleep(Duration::from_millis(1200)).await;
+        if !self.wait_closed(id, &ctl, block).await {
+            return Ok(Outcome::Canceled);
         }
-        self.set_job(id, |j| {
-            j.state = JobState::Installing;
-            j.blocked_by.clear();
-            j.detail.clear();
-        });
-        self.with_job(id, |j| {
-            j.block = Default::default();
-            j.phase = Phase::Running;
-        });
+        self.with_job(id, |j| j.phase = Phase::Running);
         // Saved before anything runs: after a crash from here on, the installer is not run
         // again by itself.
         self.save_queue();
@@ -3870,6 +3878,26 @@ impl Core {
                 });
                 res = self.elevator.run_with(step.clone(), silent, checks.clone(), self.window_open()).await;
             }
+            // An Inno Setup installer that found the app running (a copy from elsewhere: Steam's,
+            // a portable one) stops before it changes anything: wait for that app to close, as
+            // before an install, and run the installer again.
+            let mut running_tries = 0;
+            while let Some(app) = res.as_ref().ok().filter(|r| !r.ok).and_then(|_| step_log(step)).and_then(|l| log_tail(&l)).and_then(|t| inno_found_running(&t)) {
+                let names = {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || procs::running_as(&procs::list_fresh(), &app)).await.unwrap_or_default()
+                };
+                if names.is_empty() || running_tries >= 3 {
+                    let log = step_log(step).map(|l| l.display().to_string()).unwrap_or_default();
+                    return Err(anyhow!("RUNNING|{app}|{log}"));
+                }
+                running_tries += 1;
+                if !self.wait_closed(id, &ctl, (vec![], names, vec![])).await {
+                    return Ok(Outcome::Canceled);
+                }
+                self.set_job(id, |j| j.step = label.clone());
+                res = self.elevator.run_with(step.clone(), silent, checks.clone(), self.window_open()).await;
+            }
             let res = match res {
                 // A program already ran: the job can not wait and start over, so it fails.
                 Err(e) if ran_program && crate::elevate::admin_unavailable(&e) => return Err(anyhow!("{e:#}")),
@@ -3882,11 +3910,7 @@ impl Core {
                 }
             }
             if !res.ok {
-                let log = match step {
-                    sources::Step::Run { log, .. } => log.clone(),
-                    _ => None,
-                };
-                return Err(anyhow!("{}", step_failure(&res, step.label(), log.as_deref())));
+                return Err(anyhow!("{}", step_failure(&res, step.label(), step_log(step).as_deref())));
             }
         }
 
@@ -4421,6 +4445,29 @@ struct StepFailure {
     log: Option<String>,
 }
 
+/// The app an Inno Setup installer found running, from its log. Its "close all instances of it"
+/// box answers Cancel when the install is silent, and the installer stops before it changed
+/// anything ("Setup has detected that ShareX is currently running"). Also an uninstaller's.
+pub fn inno_found_running(log: &str) -> Option<String> {
+    let at = log.find("Defaulting to Cancel for suppressed message box")?;
+    let rest = &log[at..];
+    let start = rest.find(" has detected that ")? + " has detected that ".len();
+    let end = start + rest[start..].find(" is currently running")?;
+    let name = rest[start..end].trim();
+    (!name.is_empty() && name.len() <= 80 && !name.contains('\n')).then(|| name.to_string())
+}
+
+/// The end of an installer's log (the reason it stopped is at the end).
+fn log_tail(p: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(16 * 1024))).ok()?;
+    let mut b = Vec::new();
+    f.read_to_end(&mut b).ok()?;
+    Some(String::from_utf8_lossy(&b).into_owned())
+}
+
 fn step_failure(res: &crate::elevate::StepResult, label: &str, log: Option<&std::path::Path>) -> String {
     let f = StepFailure {
         code: res.code.map(|c| c.to_string()).unwrap_or_default(),
@@ -4432,8 +4479,27 @@ fn step_failure(res: &crate::elevate::StepResult, label: &str, log: Option<&std:
     format!("STEP|{}", serde_json::to_string(&f).unwrap_or_default())
 }
 
+/// The log a step's installer writes, when it writes one.
+fn step_log(step: &sources::Step) -> Option<PathBuf> {
+    match step {
+        sources::Step::Run { log, .. } => log.clone(),
+        _ => None,
+    }
+}
+
 /// Turn an internal error string into the UI's code / message / detail.
 fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) {
+    if let Some(rest) = text.strip_prefix("RUNNING|") {
+        let (app, log) = rest.split_once('|').unwrap_or((rest, ""));
+        let msg = format!("{app} is running, and its installer will not go on while it is. Close {app} (also a copy from Steam or a portable one), then use Retry.");
+        let log = Some(log.trim().to_string()).filter(|l| !l.is_empty());
+        let mut detail = msg.clone();
+        if let Some(l) = &log {
+            detail += &format!("\nLog: {l}");
+        }
+        detail += &format!("\nNothing else was changed. {} is still as it was.", plan.name);
+        return ("Close it first".into(), msg, detail, log);
+    }
     if let Some(rest) = text.strip_prefix("LOWDISK|") {
         return ("Low disk space".into(), rest.to_string(), rest.to_string(), None);
     }
@@ -4618,6 +4684,42 @@ fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u6
 #[cfg(test)]
 mod tests {
     use super::{update_notice, with_download_size};
+
+    #[test]
+    fn an_installer_that_found_the_app_running_names_it() {
+        // ShareX 21.0.0's Inno Setup log on this PC, with ShareX running from Steam's folder.
+        let log = r"2026-10-24 16:18:22.012   Created protected temporary directory: C:\Users\x\AppData\Local\Temp\is-9ERD256333.tmp
+2026-10-24 16:18:22.042   Defaulting to Cancel for suppressed message box (OK/Cancel):
+                          Setup has detected that ShareX is currently running.
+                          
+                          Please close all instances of it now, then click OK to continue, or Cancel to exit.
+2026-10-24 16:18:22.042   Got EAbort exception.
+2026-10-24 16:18:22.042   Deinitializing Setup.
+";
+        assert_eq!(super::inno_found_running(log).as_deref(), Some("ShareX"));
+        let un = "Defaulting to Cancel for suppressed message box (OK/Cancel):
+   Uninstall has detected that Notepad++ is currently running.
+";
+        assert_eq!(super::inno_found_running(un).as_deref(), Some("Notepad++"));
+        // The same words without the silent box, or another box: not this case.
+        assert_eq!(super::inno_found_running("Setup has detected that ShareX is currently running."), None);
+        assert_eq!(super::inno_found_running("Defaulting to Cancel for suppressed message box (OK/Cancel):
+  This program requires Windows 11.
+"), None);
+    }
+
+    #[test]
+    fn an_app_that_keeps_running_fails_with_what_to_do() {
+        use crate::model::JobKind;
+        use crate::sources::{Plan, Verify};
+        let plan = Plan { app_id: "other:ShareX.ShareX".into(), kind: JobKind::Install, name: "ShareX".into(), to_version: "21.0.0".into(), downloads: vec![], steps: vec![], block_dirs: vec![], block_names: vec![], verify: Verify::None, fallback: None, cleanup: vec![] };
+        let (code, msg, detail, log) = super::explain(r"RUNNING|ShareX|C:\logs\other-ShareX.ShareX-21.0.0.log", &plan);
+        assert_eq!(code, "Close it first");
+        assert!(msg.starts_with("ShareX is running") && msg.contains("Close ShareX") && msg.contains("Retry"), "{msg}");
+        assert!(!msg.contains("exit code"));
+        assert_eq!(log.as_deref(), Some(r"C:\logs\other-ShareX.ShareX-21.0.0.log"));
+        assert!(detail.contains("Nothing else was changed"));
+    }
 
     #[test]
     fn the_game_sign_ins_and_icons_left_on_this_pc_go() {

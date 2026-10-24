@@ -109,6 +109,30 @@ pub fn using_files(files: &[PathBuf]) -> Vec<u32> {
     }
 }
 
+/// The running programs (exe names, lowercase) that are the app `app` names, wherever they run
+/// from: "ShareX" is ShareX.exe in Steam's folder as much as in Program Files. A program whose
+/// name is the app's, or starts with it ("Discord" and DiscordPTB.exe); never this app itself.
+pub fn running_as(procs: &[Proc], app: &str) -> Vec<String> {
+    let plain = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let want = plain(app);
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let me = std::process::id();
+    let mut out: Vec<String> = procs
+        .iter()
+        .filter(|p| p.pid != me)
+        .filter(|p| {
+            let stem = plain(p.name.trim_end_matches(".exe").trim_end_matches(".EXE"));
+            stem == want || (want.len() >= 4 && stem.starts_with(&want))
+        })
+        .map(|p| p.name.to_ascii_lowercase())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Friendly name for a blocking process: "Photoshop" from "Photoshop.exe".
 pub fn friendly(name: &str) -> String {
     name.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()
@@ -167,6 +191,24 @@ mod live {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_app_is_found_running_by_its_name_wherever_it_runs() {
+        let p = |pid: u32, name: &str, exe: &str| super::Proc { pid, name: name.into(), exe: Some(exe.into()), cpu: 0.0, memory: 0 };
+        let list = vec![
+            p(10, "ShareX.exe", r"C:\Program Files (x86)\Steam\steamapps\common\ShareX\ShareX.exe"),
+            p(11, "sharex.exe", r"D:\Portable\ShareX\sharex.exe"),
+            p(12, "DiscordPTB.exe", r"C:\Users\x\AppData\Local\DiscordPTB\DiscordPTB.exe"),
+            p(13, "explorer.exe", r"C:\Windows\explorer.exe"),
+            p(14, "ShareXHelper.exe", r"C:\x\ShareXHelper.exe"),
+        ];
+        assert_eq!(super::running_as(&list, "ShareX"), vec!["sharex.exe".to_string(), "sharexhelper.exe".to_string()]);
+        assert_eq!(super::running_as(&list, "Discord"), vec!["discordptb.exe".to_string()]);
+        // A short name only matches the whole name ("Go" is not GOG Galaxy).
+        assert!(super::running_as(&[p(20, "GoogleDrive.exe", r"C:\g.exe")], "Go").is_empty());
+        assert!(super::running_as(&list, "OBS Studio").is_empty());
+        assert!(super::running_as(&list, "  ").is_empty());
+    }
+
     #[test]
     fn a_program_holding_a_file_open_is_found() {
         let dir = std::env::temp_dir().join(format!("u3d-rm-{}", std::process::id()));
