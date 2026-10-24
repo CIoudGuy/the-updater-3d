@@ -83,6 +83,8 @@ features = [
   "Win32_Security_Cryptography_Sip",
   "ApplicationModel",
   "Management_Deployment",
+  "Data_Xml_Dom",
+  "UI_Notifications",
 ]
 
 [profile.release]
