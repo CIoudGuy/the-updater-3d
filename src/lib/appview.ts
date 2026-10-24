@@ -5,7 +5,7 @@ import { jobStatus } from "./jobs";
 import { router, appHref } from "./router.svelte";
 import { statusLabel, store } from "./store.svelte";
 import type { AppEntry } from "./types";
-import { menuItemsFor, ui } from "./ui.svelte";
+import { isIgnored, menuItemsFor, ui } from "./ui.svelte";
 import { runAppMenu } from "./actions";
 import { listedOnly } from "./view";
 
@@ -50,7 +50,8 @@ export function subline(app: AppEntry): string {
     case "unknown":
       return "Latest version unknown";
     default:
-      return "Up to date";
+      // An app whose updates are off: its newer version shows only on its own page.
+      return isIgnored(app.id) ? "Updates off" : "Up to date";
   }
 }
 export function subColor(app: AppEntry): string {

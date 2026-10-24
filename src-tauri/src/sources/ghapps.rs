@@ -114,8 +114,18 @@ fn pages_repo(url: &str) -> Option<(String, String)> {
     Some((owner, repo.to_string()))
 }
 
+/// Programs whose entry links another project than the one that builds them: their name (as
+/// `norm` writes it, without a version) and their own project. TidaLunar's entry links TidaLuna,
+/// the mod it is built on; it comes from the Brskt/TidaLuna fork.
+const KNOWN: &[(&str, &str)] = &[("tidalunar", "Brskt/TidaLuna")];
+
 /// The GitHub project ("owner", "repo") an uninstall entry names as its own.
 pub fn repo_of(e: &UninstallEntry) -> Option<(String, String)> {
+    let name = norm(&base_name(&e.display_name));
+    if let Some((_, repo)) = KNOWN.iter().find(|(n, _)| *n == name) {
+        let (o, r) = repo.split_once('/')?;
+        return Some((o.to_string(), r.to_string()));
+    }
     let links = [&e.url_info_about, &e.help_link, &e.url_update_info];
     let on_github = links.iter().filter_map(|u| other::github_repo(u.trim()));
     let on_pages = links.iter().filter_map(|u| pages_repo(u));
@@ -167,8 +177,33 @@ pub fn parse_releases(v: &Value) -> Vec<Release> {
     out
 }
 
-fn pre(r: &Release) -> bool {
-    r.prerelease || is_pre(&r.version)
+/// Does the project name its normal releases like pre-releases ("0.0.19-alpha") and mark its
+/// real pre-releases with GitHub's flag only (TidaLunar's dev builds)?
+fn flag_only(rels: &[Release]) -> bool {
+    let normal: Vec<&Release> = rels.iter().filter(|r| !r.prerelease).take(3).collect();
+    !normal.is_empty() && normal.iter().all(|r| is_pre(&r.version))
+}
+
+/// Is this release a pre-release of its project: flagged so, or named so when the project's normal
+/// releases are not.
+fn pre(rels: &[Release], r: &Release) -> bool {
+    r.prerelease || (!flag_only(rels) && is_pre(&r.version))
+}
+
+/// Is this release the installed version? The same text, or the same number for a normal
+/// release ("1.1.0" and "1.1.0.0"; "0.0.18-alpha.dev.4" reads like "0.0.18-alpha" but is not it).
+fn is_version(r: &Release, installed: &str) -> bool {
+    r.version.eq_ignore_ascii_case(installed.trim()) || (!r.prerelease && cmp_ver(&r.version, installed).is_eq())
+}
+
+/// Is the installed copy a pre-release? Named so, unless the project names its normal releases
+/// so too; then only when it is one of the flagged ones.
+fn pre_copy(rels: &[Release], installed: &str) -> bool {
+    if flag_only(rels) {
+        rels.iter().any(|r| r.prerelease && is_version(r, installed))
+    } else {
+        is_pre(installed)
+    }
 }
 
 /// The releases numbered like the project numbers them now, in the same order: an old tag
@@ -183,18 +218,22 @@ fn in_line(rels: &[Release]) -> Vec<&Release> {
 /// The newest release the installed copy may move to: a pre-release only for a copy that is a
 /// pre-release itself.
 pub fn newest<'a>(rels: &'a [Release], installed: &str) -> Option<&'a Release> {
-    let pre_ok = is_pre(installed);
-    in_line(rels).into_iter().filter(|r| pre_ok || !pre(r)).max_by(|a, b| cmp_ver(&a.version, &b.version))
+    let pre_ok = pre_copy(rels, installed);
+    in_line(rels)
+        .into_iter()
+        .filter(|r| pre_ok || !pre(rels, r))
+        // A dev build that reads like its release ("0.0.19-alpha.dev.3" next to "0.0.19-alpha") is not newer.
+        .max_by(|a, b| cmp_ver(&a.version, &b.version).then((!a.prerelease).cmp(&!b.prerelease)))
 }
 
 /// The processor a file is built for, when its name says.
 fn arch_in(name: &str) -> Option<&'static str> {
     let low = name.to_ascii_lowercase();
-    let words: Vec<&str> = low.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').collect();
+    let words: Vec<&str> = low.split(|c: char| !c.is_ascii_alphanumeric()).collect();
     let has = |w: &[&str]| words.iter().any(|x| w.contains(x));
     if has(&["arm64", "aarch64"]) {
         Some("arm64")
-    } else if has(&["x86_64", "x64", "amd64", "win64", "64bit"]) {
+    } else if low.contains("x86_64") || low.contains("x86-64") || has(&["x64", "amd64", "win64", "64bit"]) {
         Some("x64")
     } else if has(&["x86", "i386", "i686", "win32", "ia32", "32bit"]) {
         Some("x86")
@@ -323,11 +362,11 @@ pub fn can_roll_back(i: &Installed, feed: &Feed) -> bool {
 pub fn versions(i: &Installed, feed: &Feed) -> Vec<VersionInfo> {
     let Some((t, rels)) = feed.get(&i.id) else { return vec![] };
     let top = newest(rels, &i.version).map(|r| r.version.clone());
-    let stable = in_line(rels).into_iter().find(|r| !pre(r)).map(|r| r.version.clone());
+    let stable = in_line(rels).into_iter().find(|r| !pre(rels, r)).map(|r| r.version.clone());
     let machine = other::machine_arch();
     in_line(rels)
         .into_iter()
-        .filter(|r| !pre(r) || stable.as_ref().is_none_or(|s| cmp_ver(&r.version, s).is_gt()) || cmp_ver(&r.version, &i.version).is_eq())
+        .filter(|r| !pre(rels, r) || stable.as_ref().is_none_or(|s| cmp_ver(&r.version, s).is_gt()) || is_version(r, &i.version))
         .take(15)
         .map(|r| VersionInfo {
             version: r.version.clone(),
@@ -335,9 +374,9 @@ pub fn versions(i: &Installed, feed: &Feed) -> Vec<VersionInfo> {
             notes: crate::notes::text_lines(&r.body),
             notes_url: Some(r.url.clone()).filter(|u| !u.is_empty()),
             size: installer_for(r, t.kind, machine).and_then(|a| a.size),
-            installed: cmp_ver(&r.version, &i.version).is_eq(),
+            installed: is_version(r, &i.version),
             latest: top.as_ref() == Some(&r.version),
-            prerelease: pre(r),
+            prerelease: pre(rels, r),
         })
         .collect()
 }

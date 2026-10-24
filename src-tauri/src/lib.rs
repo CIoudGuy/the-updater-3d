@@ -6,6 +6,7 @@ pub mod http;
 pub mod install_detail;
 pub mod machine;
 pub mod model;
+pub mod noteimg;
 pub mod notes;
 pub mod notice;
 pub mod paths;
@@ -200,6 +201,9 @@ pub fn run() {
             commands::catalog_versions,
             commands::browse_other_apps,
             commands::icons_in_view,
+            commands::note_image,
+            commands::self_info,
+            commands::self_versions,
             commands::quit_app,
             commands::leftover_scan,
             commands::leftover_delete,

@@ -1177,6 +1177,12 @@ const handlers: H = {
   open_store_page: () => {},
   open_driver_page: () => {},
   check_self_update: () => (MODE === "selfupdate" ? "1.2.0" : null),
+  self_info: () => ({ version: "1.1.8", installDir: String.raw`C:\Users\Alex\AppData\Local\The Updater 3D`, sizeOnDisk: 31 * MB, updatedAt: iso(2 * DAY), projectUrl: "https://github.com/CIoudGuy/the-updater-3d" }),
+  self_versions: () => [
+    ...(MODE === "selfupdate" ? [{ version: "1.2.0", date: null, notes: ["Faster checks", "Release notes show the screenshots GitHub releases include"], notesUrl: null, size: 7 * MB, installed: false, latest: true, prerelease: false }] : []),
+    { version: "1.1.8", date: iso(2 * DAY), notes: ["## New", "Programs from GitHub update here", "Icons for everything"], notesUrl: "https://github.com/CIoudGuy/the-updater-3d/releases/tag/v1.1.8", size: 7 * MB, installed: true, latest: MODE !== "selfupdate", prerelease: false },
+    { version: "1.1.7", date: iso(3 * DAY), notes: ["Drivers, with your apps", "BIOS check"], notesUrl: "https://github.com/CIoudGuy/the-updater-3d/releases/tag/v1.1.7", size: 7 * MB, installed: false, latest: false, prerelease: false },
+  ],
   restart_pc: () => {},
   show_in_folder: () => {},
   get_versions: ({ appId }) => {
@@ -1275,6 +1281,7 @@ const handlers: H = {
     browseDetailsLater(entries);
     return { total: all.length, entries, packages: 15724, categories, dated: all.filter((x) => dated(x.e)).length };
   },
+  note_image: () => null,
   async icons_in_view({ visible, near }) {
     const ids = [...visible, ...near];
     browseIconsSearch(ids);

@@ -1,7 +1,7 @@
 // node --test src/lib/view.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, latestColumn, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
 
 test("a source filter whose last app is gone falls back to all", () => {
   assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");
@@ -14,6 +14,15 @@ test("an Other program that names its GitHub project is updated like Other apps"
   assert.equal(listedOnly({ source: "programs" }), true);
   assert.equal(listedOnly({ source: "programs", github: "CIoudGuy/tidalfast" }), false);
   assert.equal(listedOnly({ source: "other", github: null }), false);
+});
+
+test("an app whose updates are off shows the version it has, not the newer one", () => {
+  const app = { source: "other", status: "current", latest: "2.0", version: "1.0" };
+  assert.equal(latestColumn(app, true), "1.0");
+  assert.equal(latestColumn(app, false), "2.0");
+  assert.equal(latestColumn({ ...app, status: "update" }, false), "2.0");
+  assert.equal(latestColumn({ ...app, source: "programs", github: null }, false), "");
+  assert.equal(latestColumn({ ...app, source: "programs", github: "o/r", status: "update" }, false), "2.0");
 });
 
 test("a search that only the Updates filter hides says so and offers to show all", () => {

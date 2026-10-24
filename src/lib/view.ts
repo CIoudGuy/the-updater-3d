@@ -13,6 +13,14 @@ export function listedOnly(app: { source: string; github?: string | null }): boo
   return app.source === "programs" && !app.github;
 }
 
+/** The version in the Installed list's Latest column. An app whose updates are turned off shows the
+ * version it has: its newer version shows only on its own page. */
+export function latestColumn(app: { source: string; status: string; latest: string | null; version: string; github?: string | null }, updatesOff: boolean): string {
+  if (listedOnly(app) || app.status === "missing") return "";
+  if (app.status === "update") return app.latest ?? "";
+  return updatesOff ? app.version : (app.latest ?? app.version);
+}
+
 /** A source filter that points at a source with no apps left falls back to "all". */
 export function groupOrAll<T extends string>(group: T | "all", present: readonly T[]): T | "all" {
   return group !== "all" && present.includes(group as T) ? group : "all";

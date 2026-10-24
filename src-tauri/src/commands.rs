@@ -429,6 +429,27 @@ pub async fn icons_in_view(core: C<'_>, visible: Vec<String>, near: Vec<String>)
     Ok(core.inner().icons_in_view(visible, near).await)
 }
 
+/// The Updater 3D itself, for its own page: where it is, its size and its project.
+#[tauri::command]
+pub async fn self_info() -> Res<SelfInfo> {
+    tauri::async_runtime::spawn_blocking(crate::selfupdate::about).await.map_err(err)
+}
+
+/// The Updater 3D's version history with each release's notes.
+#[tauri::command]
+pub async fn self_versions(core: C<'_>) -> Res<Vec<VersionInfo>> {
+    let offered = core.inner().self_release.lock().clone();
+    let rels = crate::selfupdate::releases().await;
+    Ok(crate::selfupdate::history(&rels, offered.as_ref(), env!("CARGO_PKG_VERSION")))
+}
+
+/// A picture in release notes (a GitHub screenshot): read and kept on this PC, as an address the
+/// window can load. None when it is not one GitHub serves or can not be read.
+#[tauri::command]
+pub async fn note_image(url: String) -> Res<Option<String>> {
+    Ok(crate::noteimg::get(&url).await.map(|p| paths::asset_url(&p)))
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);

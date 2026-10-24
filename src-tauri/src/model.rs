@@ -413,6 +413,19 @@ pub struct DiskInfo {
     pub total: u64,
 }
 
+/// The Updater 3D itself, for its own page.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelfInfo {
+    pub version: String,
+    pub install_dir: Option<String>,
+    pub size_on_disk: Option<u64>,
+    /// When this version was installed (its program file was written)
+    pub updated_at: Option<String>,
+    /// Its public project, with every release
+    pub project_url: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
