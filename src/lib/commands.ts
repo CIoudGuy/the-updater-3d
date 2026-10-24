@@ -1,6 +1,6 @@
 // Every backend command. Names match #[tauri::command] functions in src-tauri/src/commands.rs.
 // Arguments are passed as camelCase keys.
-import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
+import type { ActivityEntry, BackupInfo, BrowsePage, CatalogEntry, LeftoverResult, LeftoverScan, OtherIcon, PrefsItem, ServiceInfo, Settings, Snapshot, VersionInfo } from "./types";
 import type { OtherSort } from "./browse";
 
 export interface Commands {
@@ -52,6 +52,10 @@ export interface Commands {
   /** A page of the whole winget catalog (Other apps on only): a search through it or null, a
    * category and first letter ("A" to "Z", "#") or null for all, and an order. */
   browse_other_apps: { args: { query: string | null; category: string | null; letter: string | null; sort: OtherSort; offset: number; limit: number }; ret: BrowsePage };
+  /** The Other apps cards on screen and the ones kept around them (their ids): the icons of the
+   * cards on screen are searched for first and searches for places that scrolled away are
+   * dropped. Returns the icons known right now (iconUrl null: none was found). */
+  icons_in_view: { args: { visible: string[]; near: string[] }; ret: OtherIcon[] };
 
   pause_job: { args: { jobId: string }; ret: void };
   resume_job: { args: { jobId: string }; ret: void };

@@ -429,6 +429,14 @@ pub async fn browse_other_apps(core: C<'_>, query: Option<String>, category: Opt
     c.browse_other(crate::sources::browse::Request { query, category, letter, sort, offset, limit }).await.map_err(|e| format!("{e:#}"))
 }
 
+/// The Other apps cards on screen (`visible`, in order) and the ones kept around them (`near`):
+/// their icons are searched for first, searches for places that scrolled away are dropped, and
+/// the icons known now come back at once.
+#[tauri::command]
+pub async fn icons_in_view(core: C<'_>, visible: Vec<String>, near: Vec<String>) -> Res<Vec<crate::core::IconFound>> {
+    Ok(core.inner().icons_in_view(visible, near).await)
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);

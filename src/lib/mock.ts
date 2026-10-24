@@ -209,11 +209,11 @@ function seedApps(): AppEntry[] {
     }),
     app({
       id: "prog:hklm32:contoso tablet driver", source: "programs", group: "Other programs", name: "Contoso Tablet Driver", code: "Ct", fg: "#EDEDED", bg: "#2B3436",
-      version: "3.4.1", sizeOnDisk: 48 * MB, installDir: "C:\\Program Files (x86)\\Contoso\\Tablet", updatedAt: iso(400 * DAY), tagline: "Contoso Ltd.",
+      version: "3.4.1", sizeOnDisk: 48 * MB, installDir: "C:\\Program Files (x86)\\Contoso\\Tablet", updatedAt: iso(400 * DAY), tagline: "Contoso Ltd.", iconMiss: true,
     }),
     app({
       id: "prog:hkcu:oldtool", source: "programs", group: "Other programs", name: "Old Tool", code: "OT", fg: "#EDEDED", bg: "#2F2B36",
-      version: "1.2", status: "missing", installDir: null, updatedAt: iso(900 * DAY), tagline: "Its uninstaller C:\\Program Files\\Old Tool\\uninst.exe is missing",
+      version: "1.2", status: "missing", installDir: null, updatedAt: iso(900 * DAY), iconMiss: true, tagline: "Its uninstaller C:\\Program Files\\Old Tool\\uninst.exe is missing",
       note: "Its uninstaller is missing. Remove from list cleans up what is left.", canRollback: false,
     }),
     ...DRIVERS.map((d) => app({ ...d, source: "drivers", group: "Drivers", canUninstall: false, canRollback: false })),
@@ -386,27 +386,31 @@ function browseDetailsLater(entries: CatalogEntry[]) {
     );
   }, 700);
 }
-/** Icons the backend found for browsed entries so far. */
-const BROWSE_ICONS = new Map<string, string>();
-/** Icons are found a moment after a page is shown, some later than others; a few apps have none. */
-function browseIconsLater(entries: CatalogEntry[]) {
-  for (const e of entries) {
-    if (BROWSE_ICONS.has(e.id)) continue;
-    const h = [...e.id].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
-    if (h % 9 === 0) continue;
+/** Icons the backend found for browsed entries so far (null: it searched and found none). */
+const BROWSE_ICONS = new Map<string, string | null>();
+/** Icons being searched for. */
+const BROWSE_ASKED = new Set<string>();
+/** The cards on screen are searched for a moment after the window says so; some icons take
+ * longer than others and a few apps have none. */
+function browseIconsSearch(ids: string[]) {
+  for (const id of ids) {
+    if (BROWSE_ICONS.has(id) || BROWSE_ASKED.has(id)) continue;
+    const e = BROWSE.find((x) => x.id === id);
+    if (!e) continue;
+    BROWSE_ASKED.add(id);
+    const h = [...id].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
     // one in six is a dark logo on a transparent background, like Spotify's
     const dark = h % 6 === 1;
     const fill = dark ? "#121212" : e.fg;
-    const url = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="${fill}"/><circle cx="24" cy="24" r="8" fill="${dark ? "#2a2a2a" : "white"}" fill-opacity=".85"/></svg>`)}`;
-    BROWSE_ICONS.set(e.id, "");
+    const url = h % 9 === 0 ? null : `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="${fill}"/><circle cx="24" cy="24" r="8" fill="${dark ? "#2a2a2a" : "white"}" fill-opacity=".85"/></svg>`)}`;
     setTimeout(() => {
-      BROWSE_ICONS.set(e.id, url);
-      iconBatch.push({ id: e.id, iconUrl: url });
-      if (!iconTimer) iconTimer = setTimeout(flushIcons, 150);
+      BROWSE_ICONS.set(id, url);
+      iconBatch.push({ id, iconUrl: url });
+      if (!iconTimer) iconTimer = setTimeout(flushIcons, 80);
     }, 250 + (h % 1400));
   }
 }
-let iconBatch: { id: string; iconUrl: string }[] = [];
+let iconBatch: { id: string; iconUrl: string | null }[] = [];
 let iconTimer: ReturnType<typeof setTimeout> | undefined;
 function flushIcons() {
   iconTimer = undefined;
@@ -418,6 +422,7 @@ function flushIcons() {
 function browseShown(e: Browsed): CatalogEntry {
   const { category: _, popular: _p, date: _d, ...x } = e;
   x.iconUrl = BROWSE_ICONS.get(e.id) || null;
+  x.iconMiss = BROWSE_ICONS.get(e.id) === null;
   const installed = apps.some((a) => a.id === e.id);
   if (BROWSE_KNOWN.has(e.id)) return { ...x, description: x.description ?? longer(x.tagline), installed };
   return { ...x, tagline: e.id.slice(6), description: null, blocked: null, installed };
@@ -1262,8 +1267,12 @@ const handlers: H = {
     else if (sort === "updated") all = [...all].sort((x, y) => (dated(y.e) ?? "").localeCompare(dated(x.e) ?? ""));
     const entries = all.slice(offset, offset + limit).map((x) => browseShown(x.e));
     browseDetailsLater(entries);
-    browseIconsLater(entries);
     return { total: all.length, entries, packages: 15724, categories, dated: all.filter((x) => dated(x.e)).length };
+  },
+  async icons_in_view({ visible, near }) {
+    const ids = [...visible, ...near];
+    browseIconsSearch(ids);
+    return ids.filter((id) => BROWSE_ICONS.has(id)).map((id) => ({ id, iconUrl: BROWSE_ICONS.get(id) ?? null }));
   },
   async catalog_versions({ id }) {
     await new Promise((r) => setTimeout(r, 420)); // the real list comes over the network

@@ -1,7 +1,7 @@
 // node --test src/lib/browse.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { blockedTitle, catalogNote, datedNote, STORE_ONLY, storeOnly, LETTERS, matchRank, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, windowRows } from "./browse.ts";
+import { blockedTitle, catalogNote, datedNote, iconsWanted, lookRange, STORE_ONLY, storeOnly, LETTERS, matchRank, mergeEntries, pagesToLoad, patchEntries, patchIcons, placePage, rankEntries, sameKey, sortOptions, windowRows } from "./browse.ts";
 import type { CatalogEntry } from "./types.ts";
 
 const e = (id: string, extra: Partial<CatalogEntry> = {}): CatalogEntry => ({
@@ -61,6 +61,60 @@ test("found icons patch their cards and nothing else", () => {
   assert.equal(out[1], null);
   assert.equal(out[2]?.iconUrl, "b.png");
   assert.equal(patchIcons(out, [{ id: "other:B", iconUrl: "b.png" }]), null);
+});
+
+test("a search that ended without an icon marks the card, and never takes away an icon it has", () => {
+  const list = [e("other:A"), e("other:B", { iconUrl: "b.png" }), e("other:C")];
+  const out = patchIcons(list, [{ id: "other:A", iconUrl: null }, { id: "other:B", iconUrl: null }])!;
+  assert.equal(out[0]?.iconMiss, true);
+  assert.equal(out[1]?.iconUrl, "b.png");
+  assert.notEqual(out[1]?.iconMiss, true);
+  assert.equal(out[2], list[2]);
+  assert.equal(patchIcons(out, [{ id: "other:A", iconUrl: null }]), null);
+  // an icon found later wins over the mark
+  const later = patchIcons(out, [{ id: "other:A", iconUrl: "a.png" }])!;
+  assert.deepEqual([later[0]?.iconUrl, later[0]?.iconMiss], ["a.png", false]);
+});
+
+const R = { from: 40, to: 56, keepFrom: 8, keepTo: 88 };
+const ids = (n: number) => Array.from({ length: n }, (_, i) => e(`other:P${String(i).padStart(3, "0")}`));
+
+test("icons are wanted for the cards on screen first, then the ones the list is moving towards, then those behind", () => {
+  const list = ids(200);
+  const down = iconsWanted(list, R, 1, 4);
+  assert.deepEqual(down.visible, list.slice(40, 56).map((x) => x!.id));
+  // the rows below, nearest first, in reading order: the way the list is moving
+  assert.deepEqual(down.near.slice(0, 8), [56, 57, 58, 59, 60, 61, 62, 63].map((i) => list[i]!.id));
+  // the rows above only after all of them (the look range ends 32 cards below the kept ones)
+  const above = down.near.indexOf(list[36]!.id);
+  assert.deepEqual(down.near.slice(above - 1, above + 4), [119, 36, 37, 38, 39].map((i) => list[i]!.id));
+  const up = iconsWanted(list, R, -1, 4);
+  assert.deepEqual(up.near.slice(0, 8), [36, 37, 38, 39, 32, 33, 34, 35].map((i) => list[i]!.id));
+});
+
+test("the cards looked at reach two screens past the kept ones, only the way the list is going", () => {
+  const list = ids(300);
+  assert.deepEqual(lookRange(R, 1, list.length), { from: 8, to: 88 + 32 });
+  assert.deepEqual(lookRange(R, -1, list.length), { from: 0, to: 88 });
+  assert.deepEqual(lookRange(R, 1, 100), { from: 8, to: 100 });
+  const w = iconsWanted(list, R, 1, 4);
+  assert.equal(w.near.includes(list[119]!.id), true);
+  assert.equal(w.near.includes(list[120]!.id), false);
+  assert.equal(w.near.includes(list[7]!.id), false);
+});
+
+test("cards that have an icon, were searched without one, or are not loaded yet are not asked for", () => {
+  const list = ids(100);
+  list[41] = e("other:P041", { iconUrl: "x.png" });
+  list[42] = e("other:P042", { iconMiss: true });
+  list[43] = null;
+  list[57] = e("other:P057", { iconUrl: "y.png" });
+  const w = iconsWanted(list, R, 1, 4);
+  assert.equal(w.visible.length, 13);
+  assert.equal(w.visible.some((id) => ["other:P041", "other:P042"].includes(id)), false);
+  assert.equal(w.near.includes("other:P057"), false);
+  // nothing is asked for when everything has been dealt with
+  assert.deepEqual(iconsWanted([], R, 1, 4), { visible: [], near: [] });
 });
 
 test("the grid keeps the rows in view and a margin around them, from fixed row heights", () => {

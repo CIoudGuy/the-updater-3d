@@ -572,6 +572,7 @@ pub fn catalog_entries(cat: &Catalog, installed: &[Installed]) -> Vec<CatalogEnt
                 fg,
                 bg,
                 icon_url: p.icon.clone(),
+                icon_miss: false,
                 version: p.version.clone(),
                 size: p.size,
                 tagline: about.as_ref().map(|a| a.0.clone()).or_else(|| p.tagline.clone()),
