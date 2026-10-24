@@ -255,6 +255,9 @@
           <SRow label="Other apps" desc="Every other app on this PC from Microsoft's winget catalog, updated with its publisher's own installer.">
             {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}
           </SRow>
+          <SRow label="Drivers" desc="Graphics, network, audio, Bluetooth and chipset drivers from NVIDIA, AMD, Intel and Windows Update, and the BIOS version of Gigabyte boards.">
+            {#snippet control()}<Toggle checked={s.sources.drivers !== false} label="Drivers" onchange={(v) => store.patchSettings({ sources: { ...s.sources, drivers: v } })} />{/snippet}
+          </SRow>
           <SRow label="Show installed apps in Get apps" desc="Get apps also lists apps you already have, marked Installed. Search always finds them." id="show-installed">
             {#snippet control()}<Toggle checked={s.showInstalledInGetApps} labelledby="show-installed" onchange={(v) => store.patchSettings({ showInstalledInGetApps: v })} />{/snippet}
           </SRow>

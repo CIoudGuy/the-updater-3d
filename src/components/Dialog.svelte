@@ -42,7 +42,8 @@
   }
 </script>
 
-<div class="scrim" role="presentation" transition:fade|global={{ duration: reduced() ? 0 : 100 }} onpointerdown={onclose}></div>
+<!-- A click outside does not close it (so it cannot be dismissed unread): only its buttons and Esc do. -->
+<div class="scrim" role="presentation" transition:fade|global={{ duration: reduced() ? 0 : 100 }} onpointerdown={(e) => { e.preventDefault(); root?.focus({ preventScroll: true }); }}></div>
 <div class="wrap">
   <div
     class="dlg"

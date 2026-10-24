@@ -7,5 +7,9 @@ fn main() {
     if args.iter().any(|a| a == "--worker" || a == "--worker-task") {
         std::process::exit(updater_lib::elevate::worker_main(&args));
     }
+    // ...and as the elevated driver installer (Windows Update installs only for admins).
+    if args.iter().any(|a| a == updater_lib::sources::drivers::INSTALL_FLAG) {
+        std::process::exit(updater_lib::sources::drivers::install_main(&args));
+    }
     updater_lib::run();
 }

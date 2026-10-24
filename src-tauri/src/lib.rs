@@ -186,6 +186,8 @@ pub fn run() {
             commands::leftover_delete,
             commands::leftover_restore,
             commands::leftover_backups,
+            commands::open_driver_page,
+            commands::restart_pc,
         ])
         .build(tauri::generate_context!())
         .expect("error while building The Updater 3D")

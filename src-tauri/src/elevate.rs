@@ -701,6 +701,7 @@ impl Elevator {
         if !step.elevated() || winutil::is_elevated() {
             let s2 = step.clone();
             let p2 = procs.clone();
+            let again_checks = checks.clone();
             let run = move || {
                 execute_checked_with(&s2, &checks, &|names| {
                     if let Some(p) = &p2 {
@@ -708,10 +709,14 @@ impl Elevator {
                     }
                 })
             };
-            return match tokio::time::timeout(limit, tokio::task::spawn_blocking(run)).await {
-                Ok(r) => Ok(r?),
-                Err(_) => Err(timed_out(&step, limit)),
+            let r = match tokio::time::timeout(limit, tokio::task::spawn_blocking(run)).await {
+                Ok(r) => r?,
+                Err(_) => return Err(timed_out(&step, limit)),
             };
+            if let Some(again) = admin_retry(&step, &r) {
+                return Box::pin(self.run_watched(again, silent, again_checks, may_prompt, procs)).await;
+            }
+            return Ok(r);
         }
         let mut guard = self.conn.lock().await;
         for attempt in 0..2 {
@@ -779,6 +784,22 @@ impl Elevator {
 
     pub async fn disconnect(&self) {
         *self.conn.lock().await = None;
+    }
+}
+
+/// An app package Windows would only install or remove with admin rights (one with a Windows
+/// service in it, like WSL: 0x80073D28): the same step again, in the admin helper.
+pub fn admin_retry(step: &Step, r: &StepResult) -> Option<Step> {
+    let admin = !r.ok && (r.message.contains("0x80073D28") || r.message.contains("Administrator privileges required"));
+    match step {
+        Step::AddPackage { elevated: false, .. } | Step::RemovePackage { elevated: false, .. } if admin => {
+            let mut s = step.clone();
+            if let Step::AddPackage { elevated, .. } | Step::RemovePackage { elevated, .. } = &mut s {
+                *elevated = true;
+            }
+            Some(s)
+        }
+        _ => None,
     }
 }
 
@@ -994,6 +1015,22 @@ mod tests {
         assert_eq!(file_checks(&run("msiexec.exe", &["/i", r"C:\d\app.msi", "/qn"], true), &downloads), vec![FileCheck { path: r"C:\d\app.msi".into(), sha256: "bb".into() }]);
         assert!(file_checks(&run(r"C:\d\nosum.exe", &[], true), &downloads).is_empty());
         assert!(file_checks(&run(r"C:\d\setup.exe", &[], false), &downloads).is_empty());
+    }
+
+    #[test]
+    fn a_package_with_a_service_is_installed_again_with_admin_rights() {
+        // Seen updating WSL 2.7.3 to 2.7.13 without admin rights.
+        let wsl = "Windows could not install the package: MicrosoftCorporationII.WindowsSubsystemForLinux_2.7.13.0_x64__8wekyb3d8bbwe(0,0): error 0x80073D28: Cannot register the package. Administrator privileges required to install packaged service (0x80073D28)";
+        let fail = |m: &str| StepResult { ok: false, code: None, message: m.into(), output: String::new() };
+        let add = Step::AddPackage { path: r"C:\d\wsl.msix".into(), family: "MicrosoftCorporationII.WindowsSubsystemForLinux_8wekyb3d8bbwe".into(), signature_sha256: None, update: true, any_version: false, elevated: false, label: "Updating".into() };
+        let again = admin_retry(&add, &fail(wsl)).expect("tried again with admin rights");
+        assert!(again.elevated() && matches!(again, Step::AddPackage { update: true, .. }));
+        // Only once, and only for that error.
+        assert!(admin_retry(&again, &fail(wsl)).is_none());
+        assert!(admin_retry(&add, &fail("Windows could not install the package: 0x80073CF3")).is_none());
+        assert!(admin_retry(&add, &StepResult { ok: true, code: None, message: String::new(), output: String::new() }).is_none());
+        let remove = Step::RemovePackage { family: "A_x".into(), elevated: false, label: "Uninstalling".into() };
+        assert!(admin_retry(&remove, &fail(wsl)).is_some_and(|s| s.elevated()));
     }
 
     #[test]

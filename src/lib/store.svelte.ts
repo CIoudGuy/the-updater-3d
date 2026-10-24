@@ -28,7 +28,7 @@ const defaultSettings: Settings = {
   blenderKeepPatchVersions: false,
   craftPrereleases: false,
   showInstalledInGetApps: false,
-  sources: { adobe: true, craft: true, blender: true, tools: true, other: true },
+  sources: { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true },
   parallelDownloads: 3,
   silentElevation: true,
   uiZoom: 1,
@@ -78,7 +78,7 @@ function syncList<T extends { id: string }>(cur: T[], next: T[]): T[] {
   return cur;
 }
 
-export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps", "Other apps", "Other programs"] as const;
+export const GROUPS = ["Adobe", "Craft apps", "Blender", "More apps", "Other apps", "Drivers", "Other programs"] as const;
 
 /** Shown wherever Other apps are listed. */
 
@@ -103,7 +103,8 @@ class Store {
   now = $state(Date.now());
 
   // ---- derived ----
-  updates = $derived(this.apps.filter((a) => a.status === "update"));
+  /** Updates that install here (a BIOS is updated from its maker's page) */
+  updates = $derived(this.apps.filter((a) => a.status === "update" && !a.manualUrl));
   updatesBytes = $derived(this.updates.reduce((n, a) => n + (a.updateSize ?? 0), 0));
   missing = $derived(this.apps.filter((a) => a.status === "missing"));
   openJobs = $derived(this.jobs.filter((j) => isOpenState(j.state)));

@@ -111,6 +111,12 @@ export function updateApps(ids: string[]) {
   guard(list.map(upd), () => void send("update_apps", { appIds: list.map((a) => a.id) }), "update");
 }
 export function updateOne(id: string) {
+  // A BIOS is updated from its maker's page.
+  const a = store.apps.find((x) => x.id === id);
+  if (a?.manualUrl && a.status === "update") {
+    void send("open_driver_page", { id });
+    return;
+  }
   updateApps([id]);
 }
 export function updateAll() {
@@ -143,6 +149,8 @@ export function askUninstall(id: string) {
   ui.openDialog({ type: "uninstall", appId: id });
 }
 export function openApp(id: string) {
+  // A driver has nothing to open.
+  if (id.startsWith("driver:")) return;
   void send("open_app", { appId: id });
 }
 export function openStorePage(id: string) {

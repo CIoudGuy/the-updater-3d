@@ -3,10 +3,16 @@
 
 pub mod about;
 pub mod adobe;
+pub mod amd;
 pub mod blender;
+pub mod board;
 pub mod browse;
+pub mod chipset;
 pub mod craft;
+pub mod drivers;
+pub mod nvidia;
 pub mod icons;
+pub mod intel;
 pub mod msix;
 pub mod msstore;
 pub mod locate;
@@ -147,9 +153,25 @@ pub enum Step {
     /// checking that it is package family `family` with a trusted signature (and the signature
     /// file `signature_sha256`, when the catalog gives one). `update`: Windows closes the app if
     /// it still runs; `any_version`: an older version may replace a newer one (a roll back).
-    AddPackage { path: PathBuf, family: String, signature_sha256: Option<String>, update: bool, any_version: bool, label: String },
+    /// `elevated`: in the admin helper (same user), for a package with a Windows service in it,
+    /// which Windows only installs with admin rights (WSL); see `admin_retry`.
+    AddPackage {
+        path: PathBuf,
+        family: String,
+        signature_sha256: Option<String>,
+        update: bool,
+        any_version: bool,
+        #[serde(default)]
+        elevated: bool,
+        label: String,
+    },
     /// Remove this user's packages of the family with Windows' package manager.
-    RemovePackage { family: String, label: String },
+    RemovePackage {
+        family: String,
+        #[serde(default)]
+        elevated: bool,
+        label: String,
+    },
     /// Delete one thing an uninstalled program left behind (`uninstall::remove::apply`, which
     /// checks again that it is safe to delete).
     Leftover { target: crate::uninstall::Target, elevated: bool, label: String },
@@ -175,7 +197,7 @@ impl Step {
     }
     pub fn elevated(&self) -> bool {
         match self {
-            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } | Step::Leftover { elevated, .. } => *elevated,
+            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } | Step::Leftover { elevated, .. } | Step::AddPackage { elevated, .. } | Step::RemovePackage { elevated, .. } => *elevated,
             _ => false,
         }
     }
@@ -220,6 +242,15 @@ impl Plan {
         self.steps.iter().any(|s| matches!(s, Step::Run { .. } | Step::OpenUri { .. } | Step::AddPackage { .. } | Step::RemovePackage { .. }))
     }
 
+    /// Files other programs may have loaded that the installer will not replace while they do:
+    /// the programs using them must close first, like the app itself.
+    pub fn block_files(&self) -> Vec<PathBuf> {
+        match self.app_id.as_str() {
+            "tools:obs" => self.block_dirs.first().map(|d| tools::obs_in_use_files(d)).unwrap_or_default(),
+            _ => vec![],
+        }
+    }
+
     /// What the plan writes to: the app and the folders it unpacks into or deletes, lowercase.
     /// Two jobs that share one of these never run their steps at the same time.
     pub fn write_keys(&self) -> Vec<String> {
@@ -236,6 +267,15 @@ impl Plan {
         v.dedup();
         v
     }
+}
+
+/// A step whose label starts with this opens an installer the user must click through.
+pub const WAITING_FOR_YOU: &str = "Waiting for you";
+
+/// Installer exit codes that mean "installed, restart to finish": Windows Installer's (also ours
+/// for Windows Update drivers) and, for NVIDIA's package, 1.
+pub fn restart_code(app_id: &str, code: u32) -> bool {
+    code == 3010 || code == 1641 || (code == 1 && app_id.starts_with("driver:nvidia:"))
 }
 
 /// Brand marks for apps that have no icon yet.
@@ -304,6 +344,18 @@ mod plan_tests {
         Plan { app_id: app_id.into(), kind: JobKind::Update, name: "X".into(), to_version: "1".into(), downloads: vec![], steps, block_dirs: vec![], block_names: vec![], verify: Verify::None, fallback: None, cleanup: vec![] }
     }
 
+    #[test]
+    fn obs_waits_for_the_apps_that_have_its_capture_hook_or_virtual_camera_loaded() {
+        // OBS 32.2.2 to 33.0.0 stopped with exit code 6: its files were in use by other apps.
+        let mut p = plan("tools:obs", vec![run(r"C:\dl\OBS-Studio-33.0.0-Windows-x64-Installer.exe")]);
+        p.block_dirs = vec![r"C:\Program Files\obs-studio".into()];
+        let files = p.block_files();
+        assert!(files.contains(&PathBuf::from(r"C:\Program Files\obs-studio\data\obs-plugins\win-capture\graphics-hook64.dll")), "{files:?}");
+        assert!(files.contains(&PathBuf::from(r"C:\Program Files\obs-studio\data\obs-plugins\win-dshow\obs-virtualcam-module64.dll")));
+        assert!(files.iter().any(|f| f.ends_with(r"obs-studio-hook\graphics-hook64.dll")));
+        assert!(plan("tools:krita", vec![]).block_files().is_empty());
+    }
+
     fn run(exe: &str) -> Step {
         Step::Run { exe: exe.into(), args: vec![], cwd: None, ok_codes: vec![0], elevated: true, label: "Installing".into(), log: None }
     }
@@ -327,8 +379,8 @@ mod plan_tests {
         assert!(plan("x", vec![run("C:/dl/setup.exe")]).runs_installer());
         assert!(plan("x", vec![Step::OpenUri { uri: "unityhub://6000.3.27f1".into(), label: "Hub".into() }]).runs_installer());
         // Windows' package manager installs one package at a time too.
-        assert!(plan("x", vec![Step::AddPackage { path: "C:/dl/a.msix".into(), family: "A_x".into(), signature_sha256: None, update: false, any_version: false, label: "Installing".into() }]).runs_installer());
-        assert!(plan("x", vec![Step::RemovePackage { family: "A_x".into(), label: "Uninstalling".into() }]).runs_installer());
+        assert!(plan("x", vec![Step::AddPackage { path: "C:/dl/a.msix".into(), family: "A_x".into(), signature_sha256: None, update: false, any_version: false, elevated: false, label: "Installing".into() }]).runs_installer());
+        assert!(plan("x", vec![Step::RemovePackage { family: "A_x".into(), elevated: false, label: "Uninstalling".into() }]).runs_installer());
         // An uninstall runs the vendor's uninstaller.
         assert!(plan("x", vec![run("C:/Program Files/App/uninstall.exe"), Step::RemoveDir { path: "C:/Program Files/App".into(), elevated: true, label: "Rest".into() }]).runs_installer());
         assert!(!plan("x", vec![]).runs_installer());

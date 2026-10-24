@@ -702,6 +702,31 @@ pub fn close_process_windows(pid: u32) {
     }
 }
 
+/// Does the process have a visible top-level window (something a WM_CLOSE can close)?
+pub fn has_windows(pid: u32) -> bool {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible};
+    struct Ask {
+        pid: u32,
+        found: bool,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let ask = unsafe { &mut *(lp.0 as *mut Ask) };
+        let mut owner = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        if owner == ask.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            ask.found = true;
+            return false.into();
+        }
+        true.into()
+    }
+    let mut ask = Ask { pid, found: false };
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut ask as *mut Ask as isize));
+    }
+    ask.found
+}
+
 /// End a process at once.
 pub fn kill_process(pid: u32) {
     use windows::Win32::Foundation::CloseHandle;

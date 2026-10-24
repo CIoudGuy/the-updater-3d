@@ -2,7 +2,7 @@
 // Field names are camelCase on both sides (serde rename_all = "camelCase").
 
 /** "programs": any other program in Windows' list of installed programs (uninstall only). */
-export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs";
+export type Source = "adobe" | "craft" | "blender" | "tools" | "other" | "programs" | "drivers";
 
 export type AppStatus =
   | "current" // installed and up to date
@@ -49,6 +49,8 @@ export interface AppEntry {
   readOnly: boolean;
   /** A Microsoft Store copy: its page in the Store app ("ms-windows-store://pdp/?PFN=..."). */
   storeUrl: string | null;
+  /** Updated from its maker's own page, not here (a BIOS, or a card whose maker was not reached): the page to open */
+  manualUrl?: string | null;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */
@@ -272,7 +274,7 @@ export interface Settings {
   showInstalledInGetApps: boolean;
   /** Which sources are enabled */
   /** `other`: every other app, matched from the public winget catalog (off by default) */
-  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean };
+  sources: { adobe: boolean; craft: boolean; blender: boolean; tools: boolean; other: boolean; drivers?: boolean };
   /** Number of parallel downloads */
   parallelDownloads: number;
   /** One UAC prompt ever instead of one per batch (registers an elevated task) */
@@ -312,6 +314,8 @@ export interface Status {
   machine?: string;
   /** How much the app does at once on this PC */
   machineTier?: "low" | "normal" | "high";
+  /** a driver installed since the app started needs a restart to finish */
+  restartNeeded?: boolean;
 }
 
 export interface Snapshot {

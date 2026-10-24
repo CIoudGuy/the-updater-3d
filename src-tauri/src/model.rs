@@ -15,6 +15,8 @@ pub enum Source {
     Other,
     /// Any other program in Windows' list of installed programs (uninstall only).
     Programs,
+    /// Device drivers, the chipset and the BIOS.
+    Drivers,
 }
 
 impl Source {
@@ -26,6 +28,7 @@ impl Source {
             Source::Tools => "More apps",
             Source::Other => "Other apps",
             Source::Programs => "Other programs",
+            Source::Drivers => "Drivers",
         }
     }
 }
@@ -71,9 +74,43 @@ pub struct AppEntry {
     /// A Microsoft Store copy: its page in the Store app.
     #[serde(default)]
     pub store_url: Option<String>,
+    /// Updated from its maker's own page, not here (a BIOS): the page to open
+    #[serde(default)]
+    pub manual_url: Option<String>,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,
+}
+
+/// One driver as the driver check found it. The apps list shows it as an `AppEntry` (group
+/// "Drivers").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriverEntry {
+    /// "driver:nvidia:<product id>", "driver:dev:<hardware id>", "driver:amd-chipset", "driver:bios"
+    pub id: String,
+    /// The device: "NVIDIA GeForce RTX 4070"
+    pub name: String,
+    /// What kind of device: "Graphics", "Network", "Bluetooth", "Audio", "Chipset", "BIOS"
+    pub kind: String,
+    pub maker: String,
+    /// Where the newest driver comes from: "nvidia", "amd", "intel" (the maker's own driver),
+    /// "windowsUpdate", "device" (installed, nothing newer offered), "vendor" (the maker's own
+    /// updater has it) or "gigabyte" (a BIOS)
+    pub source: String,
+    pub version: String,
+    pub latest: Option<String>,
+    pub status: AppStatus,
+    pub size: Option<u64>,
+    /// Date of the newest driver, "2026.10.21"
+    pub date: Option<String>,
+    pub notes_url: Option<String>,
+    /// The maker's own page to get it from (a BIOS, or a card whose maker was not reached)
+    pub vendor_url: Option<String>,
+    pub note: Option<String>,
+    /// What is new in the newest driver
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -278,6 +315,9 @@ pub struct Sources {
     /// Every other app, matched from the winget catalog. On by default.
     #[serde(default = "yes")]
     pub other: bool,
+    /// Drivers, the chipset and the BIOS. On by default.
+    #[serde(default = "yes")]
+    pub drivers: bool,
 }
 
 fn yes() -> bool {
@@ -343,7 +383,7 @@ impl Default for Settings {
             blender_keep_patch_versions: false,
             craft_prereleases: false,
             show_installed_in_get_apps: false,
-            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true },
+            sources: Sources { adobe: true, craft: true, blender: true, tools: true, other: true, drivers: true },
             parallel_downloads: 2,
             silent_elevation: true,
             ui_zoom: 1.0,
@@ -379,6 +419,9 @@ pub struct Status {
     pub machine: String,
     #[serde(default)]
     pub machine_tier: crate::machine::Tier,
+    /// A driver installed since the app started needs a restart to finish
+    #[serde(default)]
+    pub restart_needed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

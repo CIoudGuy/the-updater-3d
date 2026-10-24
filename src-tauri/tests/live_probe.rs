@@ -26,7 +26,7 @@ async fn detects_installed_apps_and_finds_latest_versions() {
             updater_lib::model::Source::Craft => craft::latest(i, &feed),
             updater_lib::model::Source::Blender => blender::latest(i, &all, &bfeed),
             updater_lib::model::Source::Tools => tools::latest(i, &all, &tfeed),
-            updater_lib::model::Source::Other | updater_lib::model::Source::Programs => None,
+            updater_lib::model::Source::Other | updater_lib::model::Source::Programs | updater_lib::model::Source::Drivers => None,
         };
         let l = latest.as_ref().map(|l| l.version.clone()).unwrap_or_else(|| "?".into());
         let mark = if latest.as_ref().is_some_and(|l| version::newer(&l.version, &i.version)) { "UPDATE" } else { "" };
