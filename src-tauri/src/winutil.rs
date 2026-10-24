@@ -46,6 +46,9 @@ pub struct UninstallEntry {
     pub display_icon: String,
     pub install_date: String,
     pub url_update_info: String,
+    /// The program's home page (`URLInfoAbout`) and help page (`HelpLink`)
+    pub url_info_about: String,
+    pub help_link: String,
     pub estimated_size_kb: u64,
     pub windows_installer: bool,
     /// Hidden from Add/Remove Programs (`SystemComponent` = 1): parts of other products.
@@ -91,6 +94,8 @@ pub fn uninstall_entries() -> Vec<UninstallEntry> {
                 display_icon: s("DisplayIcon"),
                 install_date: s("InstallDate"),
                 url_update_info: s("URLUpdateInfo"),
+                url_info_about: s("URLInfoAbout"),
+                help_link: s("HelpLink"),
                 estimated_size_kb: size as u64,
                 windows_installer: msi == 1,
                 system_component: system == 1,

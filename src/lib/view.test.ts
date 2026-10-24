@@ -1,12 +1,19 @@
 // node --test src/lib/view.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, isEmptyLibrary, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
 
 test("a source filter whose last app is gone falls back to all", () => {
   assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");
   assert.equal(groupOrAll("Adobe", ["Adobe", "Craft apps"]), "Adobe");
   assert.equal(groupOrAll("all", []), "all");
+});
+
+test("an Other program that names its GitHub project is updated like Other apps", () => {
+  assert.equal(listedOnly({ source: "programs", github: null }), true);
+  assert.equal(listedOnly({ source: "programs" }), true);
+  assert.equal(listedOnly({ source: "programs", github: "CIoudGuy/tidalfast" }), false);
+  assert.equal(listedOnly({ source: "other", github: null }), false);
 });
 
 test("a search that only the Updates filter hides says so and offers to show all", () => {

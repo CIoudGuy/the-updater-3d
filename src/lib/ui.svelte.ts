@@ -3,6 +3,7 @@ import type { AppEntry, CatalogEntry } from "./types";
 import type { BrowseState, OtherSort } from "./browse";
 import { focusAfterLeave } from "./keys";
 import { store } from "./store.svelte";
+import { listedOnly } from "./view";
 
 export interface PopItem {
   id: string;
@@ -192,7 +193,7 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
     items.push(skip);
     return items;
   }
-  if (app.source === "programs") {
+  if (listedOnly(app)) {
     // No catalog: no notes or other versions. A broken one is removed from the list instead.
     if (app.installDir && app.status !== "missing") items.push({ id: "folder", label: "Show in folder", icon: "folder", key: "F" });
     if (items.length) items.push({ id: "sep", label: "", divider: true });

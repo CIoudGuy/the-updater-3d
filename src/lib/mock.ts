@@ -207,6 +207,12 @@ function seedApps(): AppEntry[] {
       id: "prog:hklm64:megasync", source: "programs", group: "Other programs", name: "MEGAsync", code: "ME", fg: "#EDEDED", bg: "#36302B",
       version: "6.7.0.3", sizeOnDisk: 312 * MB, installDir: "C:\\Users\\Alex\\AppData\\Local\\MEGAsync", updatedAt: iso(70 * DAY), tagline: "Mega Limited",
     }),
+    // An Other program that names its GitHub project: updated from its releases.
+    app({
+      id: "prog:hkcu:{2bc3c20f-7cc4-4bd0-a51c-0a5415b0189b}_is1", source: "programs", group: "Other apps", name: "Lumen Player", code: "Lu", fg: "#EDEDED", bg: "#2B3630",
+      version: "1.0.2", latest: "1.1.0", status: "update", updateSize: 14 * MB, sizeOnDisk: 43 * MB, installDir: "C:\\Users\\Alex\\AppData\\Local\\Programs\\Lumen", updatedAt: iso(9 * DAY),
+      tagline: "Lumen contributors", github: "lumen-app/lumen",
+    }),
     app({
       id: "prog:hklm32:contoso tablet driver", source: "programs", group: "Other programs", name: "Contoso Tablet Driver", code: "Ct", fg: "#EDEDED", bg: "#2B3436",
       version: "3.4.1", sizeOnDisk: 48 * MB, installDir: "C:\\Program Files (x86)\\Contoso\\Tablet", updatedAt: iso(400 * DAY), tagline: "Contoso Ltd.",

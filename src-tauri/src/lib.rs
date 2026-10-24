@@ -147,6 +147,8 @@ pub fn run() {
                 if core.settings.read().close_to_tray || busy {
                     // Close the window for real so its web view frees its memory; the checker keeps running.
                     let _ = api;
+                    // Closing must not look like quitting: say that it still runs, and where it is.
+                    core.tell_still_running(busy);
                 } else {
                     app.exit(0);
                 }
