@@ -1035,7 +1035,7 @@ fn a_pre_release_file_is_found_when_it_writes_its_version_differently_from_the_c
 #[test]
 fn an_apps_beta_and_nightly_packages_are_its_other_builds() {
     let idx = test_index();
-    for (id, name) in [("Google.Chrome", "Google Chrome"), ("Google.Chrome.Beta", "Google Chrome Beta"), ("Google.Chrome.Dev", "Google Chrome Dev"), ("Google.Chrome.Canary", "Google Chrome Canary"), ("Google.Chrome.EXE", "Google Chrome (EXE)"), ("Mozilla.Firefox", "Mozilla Firefox"), ("Mozilla.Firefox.Beta.MSIX", "Firefox Beta"), ("Mozilla.Firefox.DeveloperEdition", "Firefox Developer Edition"), ("Mozilla.Firefox.de", "Mozilla Firefox (de)"), ("7zip.7zip", "7-Zip")] {
+    for (id, name) in [("Google.Chrome", "Google Chrome"), ("Google.Chrome.Beta", "Google Chrome Beta"), ("Google.Chrome.Dev", "Google Chrome Dev"), ("Google.Chrome.Canary", "Google Chrome Canary"), ("Google.Chrome.EXE", "Google Chrome (EXE)"), ("Google.Chrome.Beta.EXE", "Google Chrome Beta (EXE)"), ("Google.Chrome.Dev.EXE", "Google Chrome Dev (EXE)"), ("Microsoft.DotNet.SDK.10", "Microsoft .NET SDK 10.0"), ("Microsoft.DotNet.SDK.Preview", "Microsoft .NET SDK Preview"), ("Mozilla.Firefox", "Mozilla Firefox"), ("Mozilla.Firefox.Beta.MSIX", "Firefox Beta"), ("Mozilla.Firefox.DeveloperEdition", "Firefox Developer Edition"), ("Mozilla.Firefox.de", "Mozilla Firefox (de)"), ("7zip.7zip", "7-Zip")] {
         idx.add_test_package(id, name, "1.0", &[], &[], &[], "x");
     }
     let names = |id: &str| other_builds(&idx, id).into_iter().map(|(i, _)| i).collect::<Vec<_>>();
@@ -1046,6 +1046,38 @@ fn an_apps_beta_and_nightly_packages_are_its_other_builds() {
     assert_eq!(names("Google.Chrome.Beta"), vec!["Google.Chrome", "Google.Chrome.Dev", "Google.Chrome.Canary"]);
     assert_eq!(names("mozilla.firefox.beta.msix"), vec!["Mozilla.Firefox", "Mozilla.Firefox.DeveloperEdition"]);
     assert!(names("7zip.7zip").is_empty());
+    // Chrome installed from its EXE package: the EXE builds where there are, else the other.
+    assert_eq!(names("Google.Chrome.EXE"), vec!["Google.Chrome.Beta.EXE", "Google.Chrome.Dev.EXE", "Google.Chrome.Canary"]);
+    assert_eq!(names("Google.Chrome.Beta.EXE"), vec!["Google.Chrome.EXE", "Google.Chrome.Dev.EXE", "Google.Chrome.Canary"]);
+    // A package of one version line: its line's preview.
+    assert_eq!(names("Microsoft.DotNet.SDK.10"), vec!["Microsoft.DotNet.SDK.Preview"]);
+}
+
+#[test]
+fn warps_beta_is_the_newest_on_its_beta_track_written_as_the_catalog_writes_versions() {
+    let feed = r#"{"title":"Cloudflare WARP Windows Beta","items":[
+        {"releaseNotes":"This release includes the following highlights:\n\n- Added automatic endpoint selection","version":"2026.9.1555.1","releaseDate":"2026-10-22T13:08:10.754Z","packageURL":"https://downloads.cloudflareclient.com/v1/download/windows/version/2026.9.1555.1","packageSize":62844928},
+        {"releaseNotes":"older","version":"2026.8.2033.1","packageURL":"https://downloads.cloudflareclient.com/v1/download/windows/version/2026.8.2033.1"}]}"#;
+    let (v, url, size, date, notes) = warp_beta(feed, "26.8.2115.0").unwrap();
+    assert_eq!((v.as_str(), size, date.as_deref()), ("26.9.1555.1", Some(62844928), Some("2026-10-22T13:08:10.754Z")));
+    assert!(url.ends_with("/version/2026.9.1555.1") && notes.contains("endpoint selection"));
+    // The beta is newer than the release; the next release (its builds are numbered higher) is newer than the beta.
+    assert!(is_newer(&v, "26.8.2115.0") && is_newer("26.9.1600.0", &v));
+    // A catalog that writes the full year keeps it; a download from elsewhere is refused.
+    assert_eq!(warp_beta(feed, "2026.8.2115.0").unwrap().0, "2026.9.1555.1");
+    assert!(warp_beta(&feed.replace("downloads.cloudflareclient.com", "example.com"), "26.8.2115.0").is_none());
+}
+
+#[test]
+fn tailscales_unstable_build_is_the_same_installer_from_its_unstable_list() {
+    let list = r#"{"Version":"1.105.78","MSIsVersion":"1.105.78","MSIs":{"amd64":"tailscale-setup-1.105.78-amd64.msi","arm64":"tailscale-setup-1.105.78-arm64.msi","x86":"tailscale-setup-1.105.78-x86.msi"},"ExesVersion":"1.105.78","Exes":["tailscale-setup-1.105.78.exe","tailscale-setup-full-1.105.78.exe"]}"#;
+    assert_eq!(tailscale_unstable(list, "tailscale-setup-1.104.2-amd64.msi", "1.104.2"), Some(("1.105.78".into(), "tailscale-setup-1.105.78-amd64.msi".into())));
+    assert_eq!(tailscale_unstable(list, "tailscale-setup-full-1.104.2.exe", "1.104.2"), Some(("1.105.78".into(), "tailscale-setup-full-1.105.78.exe".into())));
+    // An installer the list does not have, or a name without the version: nothing.
+    assert_eq!(tailscale_unstable(list, "tailscale-setup-1.104.2-riscv.msi", "1.104.2"), None);
+    assert_eq!(tailscale_unstable(list, "tailscale-setup.msi", "1.104.2"), None);
+    // The next final release is newer than an unstable build.
+    assert!(is_newer("1.106.0", "1.105.78"));
 }
 
 #[test]
@@ -1129,4 +1161,36 @@ async fn live_sharex_pre_release() {
     // The full version list shows it with its changes.
     let infos = with_pre(vec![], Some(&m), &Want::fresh(), None, false).await;
     assert!(infos.first().is_some_and(|v| v.prerelease && v.notes.len() > 5), "{:?}", infos.first());
+}
+
+/// Run with `cargo test --lib live_beta_coverage -- --ignored --nocapture`: for every Other app on
+/// this PC, where its betas would come from (its GitHub project, sibling beta packages, a
+/// publisher's site), read only. GitHub is not asked (its hourly limit is small).
+#[tokio::test]
+#[ignore]
+async fn live_beta_coverage() {
+    let path = winget::refresh_index(Duration::from_secs(24 * 3600)).await.unwrap();
+    let idx = Index::open(&path).unwrap();
+    let apps = scan(&winutil::uninstall_entries(), &[], None);
+    let feed = fetch(&apps, None).await.unwrap();
+    let mut rows = Vec::new();
+    for i in apps.iter().filter(|i| !i.read_only) {
+        let pkg = pkg_of(i);
+        let m = feed.get(pkg).and_then(|pf| pf.latest.clone());
+        let repo = m.as_ref().and_then(|m| choose(m, &Want::for_installed(i)).ok().and_then(|s| pre_repo(m, s)));
+        let builds: Vec<String> = other_builds(&idx, pkg).into_iter().map(|(id, _)| id).collect();
+        let site = SITE_BETAS.iter().any(|s| s.pkg.eq_ignore_ascii_case(pkg));
+        let how = match (&repo, builds.is_empty(), site) {
+            (_, _, true) => "site".to_string(),
+            (Some(r), _, _) => format!("github {r}"),
+            (None, false, _) => format!("packages {}", builds.join(",")),
+            _ => "NONE".to_string(),
+        };
+        rows.push(format!("{how:<60} {pkg} {}", i.version));
+    }
+    rows.sort();
+    for r in &rows {
+        eprintln!("{r}");
+    }
+    eprintln!("{} apps, {} not covered", rows.len(), rows.iter().filter(|r| r.starts_with("NONE")).count());
 }

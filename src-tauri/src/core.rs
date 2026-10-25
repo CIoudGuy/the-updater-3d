@@ -3659,8 +3659,9 @@ impl Core {
                     self.notify(&title, body, notice::finished_target(kind, &app_id));
                 }
                 self.toast("ok", title, Some(app_id.clone()));
-                // Back on an older version: the settings it had before the update can be put back.
-                if kind == JobKind::Rollback {
+                // Back on an older version (rolled back, or installed again after an uninstall): the
+                // settings it had before the update can be put back.
+                if matches!(kind, JobKind::Rollback | JobKind::Install) {
                     let (aid, ver) = (app_id.clone(), to.clone());
                     let saved = tauri::async_runtime::spawn_blocking(move || crate::snapshots::for_version(&crate::snapshots::root(), &aid, &ver)).await.ok().flatten();
                     if let Some(s) = saved {
@@ -4724,6 +4725,9 @@ fn explain(text: &str, plan: &Plan) -> (String, String, String, Option<String>) 
         let friendly = match code {
             "1618" => "Another installation is already running. Try again when it is done.".to_string(),
             "1603" => "Windows Installer hit a fatal error. The log has the details.".to_string(),
+            // Windows Installer will not put an older version over a newer one (Tailscale back from
+            // its unstable track): the way back is a new install of the older version.
+            "1638" if plan.kind == JobKind::Rollback => format!("{}'s installer does not put an older version over a newer one. Uninstall {}, then install {} from Get apps: its settings from before are saved, and Activity can put them back.", plan.name, plan.name, plan.to_version),
             "1638" => "Another version of this app is already installed.".to_string(),
             "1602" | "1223" => "The installer was canceled.".to_string(),
             "1612" | "1620" => "The installer package could not be opened. Clear the download cache and try again.".to_string(),
@@ -5395,6 +5399,17 @@ mod job_fix_tests {
         // Exit code 6 means nothing special for other apps.
         let other = Plan { app_id: "tools:krita".into(), ..plan };
         assert!(explain(&step_failure(&res, "Installing Krita", None), &other).1.contains("exit code 6"));
+    }
+
+    #[test]
+    fn a_rollback_refused_by_windows_installer_says_how_to_go_back() {
+        let plan = Plan { app_id: "other:Tailscale.Tailscale".into(), kind: JobKind::Rollback, name: "Tailscale".into(), to_version: "1.104.2".into(), downloads: vec![], steps: vec![], block_dirs: vec![], block_names: vec![], verify: Verify::None, fallback: None, cleanup: vec![] };
+        let res = StepResult { ok: false, code: Some(1638), message: "Exit code 1638".into(), output: String::new() };
+        let (_, msg, _, _) = explain(&step_failure(&res, "Installing Tailscale", None), &plan);
+        assert!(msg.contains("Uninstall Tailscale, then install 1.104.2 from Get apps"), "{msg}");
+        // Not a rollback: as before.
+        let update = Plan { kind: JobKind::Update, ..plan };
+        assert_eq!(explain(&step_failure(&res, "Installing Tailscale", None), &update).1, "Another version of this app is already installed.");
     }
 
     #[test]

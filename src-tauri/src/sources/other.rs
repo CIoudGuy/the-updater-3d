@@ -2510,16 +2510,67 @@ fn shown_version(e: &winutil::UninstallEntry, pf: Option<&PkgFeed>) -> String {
 
 // ---------------------------------------------------------------- betas on a publisher's own site
 
-/// Publishers whose betas are only on their own site, signed (no checksum published): the page
-/// that lists them, the signer Windows must report, and the change list.
+/// How a publisher's page lists its betas.
+enum Reader {
+    /// rarlab.com's download page (see `winrar_betas`); signed, no checksums
+    WinRar,
+    /// Tailscale's unstable track (see `tailscale_unstable`), a SHA-256 file next to each
+    Tailscale,
+    /// Cloudflare WARP's beta track (see `warp_beta`); signed, no checksums
+    Warp,
+}
+
+/// Publishers whose betas are only on their own site: the page that lists them, the signer
+/// Windows must report when there is no checksum, and the change list.
 struct SiteBetas {
     pkg: &'static str,
     page: &'static str,
-    signer: &'static str,
+    signer: Option<&'static str>,
     notes: &'static str,
+    reader: Reader,
 }
 
-const SITE_BETAS: &[SiteBetas] = &[SiteBetas { pkg: "RARLab.WinRAR", page: "https://www.rarlab.com/download.htm", signer: "win.rar GmbH", notes: "https://www.rarlab.com/rarnew.htm" }];
+const SITE_BETAS: &[SiteBetas] = &[
+    SiteBetas { pkg: "RARLab.WinRAR", page: "https://www.rarlab.com/download.htm", signer: Some("win.rar GmbH"), notes: "https://www.rarlab.com/rarnew.htm", reader: Reader::WinRar },
+    SiteBetas { pkg: "Tailscale.Tailscale", page: "https://pkgs.tailscale.com/unstable/?mode=json", signer: None, notes: "https://tailscale.com/changelog", reader: Reader::Tailscale },
+    SiteBetas { pkg: "Cloudflare.Warp", page: "https://downloads.cloudflareclient.com/v1/update/json/windows/beta", signer: Some("Cloudflare, Inc."), notes: "https://developers.cloudflare.com/warp-client/", reader: Reader::Warp },
+];
+
+/// The newest build on Cloudflare WARP's beta track: (version as the catalog and Windows write
+/// it, download, size, date, release notes). The track says "2026.9.1555.1" where the catalog
+/// (whose newest is `catalog_ver`) and Windows say "26.9.1555.1".
+pub fn warp_beta(json: &str, catalog_ver: &str) -> Option<(String, String, Option<u64>, Option<String>, String)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let it = v["items"].as_array()?.iter().max_by(|a, b| super::tools::cmp_ver(a["version"].as_str().unwrap_or(""), b["version"].as_str().unwrap_or("")))?;
+    let ver = it["version"].as_str()?;
+    let url = it["packageURL"].as_str().filter(|u| u.starts_with("https://downloads.cloudflareclient.com/"))?;
+    let short_year = catalog_ver.split('.').next().is_some_and(|y| y.len() == 2);
+    let ver = match ver.strip_prefix("20") {
+        Some(rest) if short_year => rest.to_string(),
+        _ => ver.to_string(),
+    };
+    let found = (ver, url.to_string(), it["packageSize"].as_u64(), it["releaseDate"].as_str().map(String::from), it["releaseNotes"].as_str().unwrap_or("").to_string());
+    Some(found)
+}
+
+/// Tailscale's unstable build of the catalog's installer `stable_file` (version `stable_ver`),
+/// from its unstable list: the same file with the unstable version, when the list has it
+/// (version, file).
+pub fn tailscale_unstable(json: &str, stable_file: &str, stable_ver: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let sv = stable_ver.trim().trim_start_matches(['v', 'V']);
+    if sv.is_empty() || !stable_file.contains(sv) {
+        return None;
+    }
+    let msis: Vec<&str> = v["MSIs"].as_object().map(|o| o.values().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+    let exes: Vec<&str> = v["Exes"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+    let found = [(msis, v["MSIsVersion"].as_str()), (exes, v["ExesVersion"].as_str())].into_iter().find_map(|(files, ver)| {
+        let ver = ver?;
+        let want = stable_file.replace(sv, ver);
+        files.iter().find(|f| f.eq_ignore_ascii_case(&want)).map(|f| (ver.to_string(), f.to_string()))
+    });
+    found
+}
 
 /// WinRAR's betas on its download page for the catalog's installer `stable_file`, newest first:
 /// (version as the app reads it, as WinRAR names it, file). The same build and language as the
@@ -2546,6 +2597,26 @@ pub fn winrar_betas(page: &str, stable_file: &str) -> Vec<(String, String, Strin
 async fn site_pre_releases(m: &Manifest, stable: &Installer) -> Vec<(super::ghapps::Release, Installer)> {
     let Some(site) = SITE_BETAS.iter().find(|s| s.pkg.eq_ignore_ascii_case(&m.id)) else { return vec![] };
     let file = stable.url.split(['?', '#']).next().and_then(|u| u.rsplit('/').next()).unwrap_or_default();
+    if let Reader::Tailscale = site.reader {
+        let Ok(list) = http::get_cached(site.page, &[], Duration::from_secs(30 * 60)).await else { return vec![] };
+        let Some((version, f)) = tailscale_unstable(&String::from_utf8_lossy(&list.body), file, &m.version).filter(|(v, _)| is_newer(v, &m.version)) else { return vec![] };
+        let url = format!("https://pkgs.tailscale.com/unstable/{f}");
+        // Its checksum file: "<sha256>  <file>".
+        let Ok(sum) = http::get_cached(&format!("{url}.sha256"), &[], Duration::from_secs(30 * 60)).await else { return vec![] };
+        let Some(sha) = String::from_utf8_lossy(&sum.body).split_whitespace().next().filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())).map(|s| s.to_ascii_lowercase()) else { return vec![] };
+        let asset = super::ghapps::Asset { name: f.clone(), url: url.clone(), size: None, sha256: Some(sha.clone()) };
+        let rel = super::ghapps::Release { tag: version.clone(), version, body: String::new(), url: site.notes.into(), date: None, prerelease: true, assets: vec![asset] };
+        let inst = Installer { url, sha256: sha, signer: None, product_code: None, arp: vec![], release_date: None, ..stable.clone() };
+        return vec![(rel, inst)];
+    }
+    if let Reader::Warp = site.reader {
+        let Ok(feed) = http::get_cached(site.page, &[], Duration::from_secs(30 * 60)).await else { return vec![] };
+        let Some((version, url, size, date, body)) = warp_beta(&String::from_utf8_lossy(&feed.body), &m.version).filter(|(v, ..)| is_newer(v, &m.version)) else { return vec![] };
+        let asset = super::ghapps::Asset { name: format!("Cloudflare_WARP_{version}.msi"), url: url.clone(), size, sha256: None };
+        let rel = super::ghapps::Release { tag: version.clone(), version, body, url: site.notes.into(), date, prerelease: true, assets: vec![asset] };
+        let inst = Installer { url, sha256: String::new(), signer: site.signer.map(String::from), product_code: None, arp: vec![], release_date: None, ..stable.clone() };
+        return vec![(rel, inst)];
+    }
     let Some(page) = notes::page(site.page).await else { return vec![] };
     let base = site.page.rsplit_once('/').map(|(b, _)| b).unwrap_or(site.page);
     let mut out = Vec::new();
@@ -2555,7 +2626,7 @@ async fn site_pre_releases(m: &Manifest, stable: &Installer) -> Vec<(super::ghap
         let body = lines.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n");
         let asset = super::ghapps::Asset { name: f.clone(), url: url.clone(), size: None, sha256: None };
         let rel = super::ghapps::Release { tag: label, version, body, url: site.notes.into(), date: None, prerelease: true, assets: vec![asset] };
-        let inst = Installer { url, sha256: String::new(), signer: Some(site.signer.into()), product_code: None, arp: vec![], release_date: None, ..stable.clone() };
+        let inst = Installer { url, sha256: String::new(), signer: site.signer.map(String::from), product_code: None, arp: vec![], release_date: None, ..stable.clone() };
         out.push((rel, inst));
     }
     out
@@ -2565,27 +2636,36 @@ async fn site_pre_releases(m: &Manifest, stable: &Installer) -> Vec<(super::ghap
 /// their own ("Google.Chrome.Beta" next to "Google.Chrome").
 const BUILD_SUFFIXES: &[&str] = &["Beta", "Preview", "Insiders", "Insider", "Dev", "Development", "DeveloperEdition", "Canary", "Nightly", "Alpha", "EAP", "PreRelease", "Snapshot", "PTB", "RC", "EarlyAccess"];
 
-/// The other builds of a package (id, name): its pre-release packages, newest kind of build
-/// last; for one of those, the release package first and the other pre-release ones. A build the
-/// catalog has only as an app package ("Mozilla.Firefox.Beta.MSIX") counts too.
+/// The other builds of a package (id, name): its pre-release packages; for one of those, the
+/// release package first and the other pre-release ones. A package named with its installer kind
+/// ("Google.Chrome.EXE") gets the builds of that kind where there are ("Google.Chrome.Beta.EXE"),
+/// one of a version line ("Microsoft.DotNet.SDK.10") the line's ("Microsoft.DotNet.SDK.Preview"),
+/// and a build the catalog has only as an app package ("Mozilla.Firefox.Beta.MSIX") counts too.
 pub fn other_builds(idx: &Index, id: &str) -> Vec<(String, String)> {
+    const KINDS: &[&str] = &["EXE", "MSIX", "MSI", "AppX"];
     let strip = |s: &str, suf: &str| (s.len() > suf.len() && s[s.len() - suf.len()..].eq_ignore_ascii_case(suf)).then(|| s[..s.len() - suf.len()].to_string());
-    let base = BUILD_SUFFIXES.iter().find_map(|s| strip(id, &format!(".{s}")).or_else(|| strip(id, &format!(".{s}.MSIX")))).filter(|b| idx.by_id(b).is_some()).unwrap_or_else(|| id.to_string());
+    let (core, kind) = KINDS.iter().find_map(|k| strip(id, &format!(".{k}")).map(|c| (c, Some(*k)))).unwrap_or_else(|| (id.to_string(), None));
+    let find = |name: &str| kind.and_then(|k| idx.by_id(&format!("{name}.{k}"))).or_else(|| idx.by_id(name)).or_else(|| idx.by_id(&format!("{name}.MSIX")));
+    // One of the builds itself: the release is the package without the build's name.
+    let release = BUILD_SUFFIXES.iter().find_map(|s| strip(&core, &format!(".{s}"))).filter(|b| find(b).is_some());
+    let base = release.clone().unwrap_or_else(|| core.clone());
     let mut out: Vec<(String, String)> = Vec::new();
     let mut add = |p: Pkg| {
         if !p.id.eq_ignore_ascii_case(id) && !out.iter().any(|(o, _)| o.eq_ignore_ascii_case(&p.id)) {
             out.push((p.id, p.name));
         }
     };
-    if !base.eq_ignore_ascii_case(id) {
-        if let Some(p) = idx.by_id(&base) {
+    if release.is_some() {
+        if let Some(p) = find(&base) {
             add(p);
         }
     }
-    for s in BUILD_SUFFIXES {
-        let want = format!("{base}.{s}");
-        if let Some(p) = idx.by_id(&want).or_else(|| idx.by_id(&format!("{want}.MSIX"))) {
-            add(p);
+    let line = base.rsplit_once('.').filter(|(_, last)| !last.is_empty() && last.chars().all(|c| c.is_ascii_digit() || c == '_')).map(|(p, _)| p.to_string());
+    for b in std::iter::once(base.clone()).chain(line) {
+        for s in BUILD_SUFFIXES {
+            if let Some(p) = find(&format!("{b}.{s}")) {
+                add(p);
+            }
         }
     }
     out

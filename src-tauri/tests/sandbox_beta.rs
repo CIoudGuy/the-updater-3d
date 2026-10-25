@@ -27,6 +27,7 @@ async fn run(plan: &Plan) {
         let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
         let out = download::fetch(d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await.expect("download");
         assert!(matches!(out, Outcome::Done), "download did not finish");
+        println!("  downloaded and checked");
     }
     for s in &plan.steps {
         let r = tokio::task::spawn_blocking({
@@ -247,4 +248,66 @@ async fn winrars_site_beta_installs_reads_as_a_beta_and_rolls_back() {
     assert_eq!(back.version, here.version);
     // Not uninstalled here: WinRAR's uninstaller opens its own window, which needs a desktop.
     println!("WINRAR CHECK PASSED");
+}
+
+/// `run`, reporting a failed download or step instead of stopping the test.
+async fn try_run(plan: &Plan) -> Result<(), String> {
+    for d in &plan.downloads {
+        let (_tx, rx) = tokio::sync::watch::channel(Control::Run);
+        download::fetch(d, Arc::new(Progress::new()), Arc::new(Throttle::new()), rx).await.map_err(|e| format!("download: {e:#}"))?;
+    }
+    for s in &plan.steps {
+        let s = s.clone();
+        let r = tokio::task::spawn_blocking(move || elevate::execute(&s)).await.unwrap();
+        if !r.ok {
+            return Err(format!("step: code {:?} {}", r.code, r.message));
+        }
+    }
+    Ok(())
+}
+
+/// A beta from a publisher's own site, installed over the catalog's version and read back as
+/// the offered version, then a rollback tried (its result printed).
+async fn site_beta_cycle(id: &str, pkg: &str) {
+    let find = || other::scan(&winutil::uninstall_entries(), &[], None).into_iter().find(|i| i.id == id);
+    run(&other::plan_install(id, None, JobKind::Install, None, None).await.unwrap()).await;
+    let here = find().unwrap_or_else(|| panic!("{pkg} installed"));
+    let base = other::read_package(pkg).await.and_then(|p| p.latest).unwrap();
+    println!("{pkg}: installed {} (catalog {})", here.version, base.version);
+    let pres = other::pre_releases(&base, &other::Want::for_installed(&here)).await;
+    let (offer, copy) = other::pre_offer(&pres, &here.version).unwrap_or_else(|| panic!("{pkg}: a beta is offered"));
+    println!("  offered {} ({:?} bytes) from {}, sha {}, signer {:?}", offer.version, offer.size, pres[0].1.url, !pres[0].1.sha256.is_empty(), pres[0].1.signer);
+    assert!(!copy);
+    run(&other::plan_install(id, Some(&offer.version), JobKind::Update, Some(&here), None).await.unwrap()).await;
+    let beta = find().unwrap();
+    println!("  now {} ({})", beta.version, beta.name);
+    assert_eq!(beta.version, offer.version, "{pkg}: the beta reads as offered");
+    let back = try_run(&other::plan_install(id, Some(&here.version), JobKind::Rollback, Some(&beta), None).await.unwrap()).await;
+    println!("  rollback: {back:?}, now {:?}", find().map(|i| i.version));
+}
+
+/// Tailscale's unstable track, checked by its SHA-256 files.
+#[tokio::test]
+#[ignore]
+async fn site_beta_tailscale() {
+    if !in_windows_sandbox() {
+        println!("not in Windows Sandbox: nothing installed");
+        return;
+    }
+    winget::refresh_index(Duration::from_secs(3600)).await.expect("catalog index");
+    site_beta_cycle("other:Tailscale.Tailscale", "Tailscale.Tailscale").await;
+    println!("TAILSCALE CHECK PASSED");
+}
+
+/// Cloudflare WARP's beta track, checked by Cloudflare's signature.
+#[tokio::test]
+#[ignore]
+async fn site_beta_warp() {
+    if !in_windows_sandbox() {
+        println!("not in Windows Sandbox: nothing installed");
+        return;
+    }
+    winget::refresh_index(Duration::from_secs(3600)).await.expect("catalog index");
+    site_beta_cycle("other:Cloudflare.Warp", "Cloudflare.Warp").await;
+    println!("WARP CHECK PASSED");
 }
