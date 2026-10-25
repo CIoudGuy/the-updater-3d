@@ -309,7 +309,7 @@ fn a_browsers_web_app_has_no_folder_and_the_browser_is_never_left_over() {
     // Not the browser's program or folder.
     assert_eq!(crate::sources::locate::locate(&e, &[], &crate::sources::locate::Hints::default()), (None, None));
     let i = programs::make(&e, None, None, &|_| true, None);
-    assert_eq!(i.tagline.as_deref(), Some("Thorium (web app)"));
+    assert_eq!(i.tagline.as_deref(), Some("Web app in Thorium"));
     // Even if a folder were known: one that still holds the program the uninstall ran is not left over.
     let s = Subject { name: "Paper Planner".into(), install_dir: Some(bin.clone()), runner: Some(bin.join("thorium.exe")), ..Default::default() };
     assert!(leftovers::scan(&s, &env_for(&fx, &key), &[]).iter().all(|i| i.kind != Kind::Folder));

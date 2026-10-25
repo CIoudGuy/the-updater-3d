@@ -196,6 +196,55 @@ pub fn file_version(path: &Path) -> Option<String> {
     }
 }
 
+/// What a program file says about itself in its version resource.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VersionText {
+    pub product_name: String,
+    pub company: String,
+    pub description: String,
+    pub product_version: String,
+}
+
+/// The name, maker, description and product version a program file carries (the first
+/// language it has them in).
+pub fn version_text(path: &Path) -> Option<VersionText> {
+    use windows::Win32::Storage::FileSystem::*;
+    unsafe {
+        let wide = HSTRING::from(path.as_os_str());
+        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
+        if size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), Some(0), size, buf.as_mut_ptr() as *mut _).ok()?;
+        let query = |q: &str| -> Option<(*mut core::ffi::c_void, u32)> {
+            let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+            let mut len: u32 = 0;
+            let h = HSTRING::from(q);
+            (VerQueryValueW(buf.as_ptr() as *const _, PCWSTR(h.as_ptr()), &mut ptr, &mut len).as_bool() && !ptr.is_null()).then_some((ptr, len))
+        };
+        // Languages and code pages the strings are in; US English in Unicode when none is listed.
+        let mut tables = Vec::new();
+        if let Some((ptr, len)) = query("\\VarFileInfo\\Translation") {
+            let pairs = std::slice::from_raw_parts(ptr as *const u16, (len as usize) / 2);
+            for p in pairs.chunks_exact(2) {
+                tables.push(format!("{:04x}{:04x}", p[0], p[1]));
+            }
+        }
+        tables.extend(["040904b0".to_string(), "040904e4".to_string()]);
+        let text = |table: &str, name: &str| -> String {
+            match query(&format!("\\StringFileInfo\\{table}\\{name}")) {
+                Some((ptr, len)) if len > 0 => {
+                    let s = std::slice::from_raw_parts(ptr as *const u16, len as usize);
+                    String::from_utf16_lossy(s).trim_end_matches('\0').trim().to_string()
+                }
+                _ => String::new(),
+            }
+        };
+        tables.iter().map(|t| VersionText { product_name: text(t, "ProductName"), company: text(t, "CompanyName"), description: text(t, "FileDescription"), product_version: text(t, "ProductVersion") }).find(|v| !v.product_name.is_empty() || !v.description.is_empty())
+    }
+}
+
 /// (free bytes available to the user, total bytes) of the volume holding `path`.
 pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;

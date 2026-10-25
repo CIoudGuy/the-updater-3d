@@ -21,6 +21,7 @@ pub mod locate;
 pub mod makers;
 pub mod proglogo;
 pub mod other;
+pub mod portable;
 pub mod tools;
 pub mod winget;
 
@@ -179,6 +180,10 @@ pub enum Step {
     /// Delete one thing an uninstalled program left behind (`uninstall::remove::apply`, which
     /// checks again that it is safe to delete).
     Leftover { target: crate::uninstall::Target, elevated: bool, label: String },
+    /// Update a portable copy in place from its portable zip (`portable::replace`): `program` is
+    /// the copy's program file, `nested` the program's path in the zip when the catalog names it.
+    /// Its program files are replaced, the data next to them stays.
+    ReplacePortable { zip: PathBuf, program: PathBuf, nested: Option<String>, elevated: bool, label: String },
 }
 
 impl Step {
@@ -194,14 +199,15 @@ impl Step {
             | Step::CheckSigner { label, .. }
             | Step::AddPackage { label, .. }
             | Step::RemovePackage { label, .. }
-            | Step::Leftover { label, .. } => label,
+            | Step::Leftover { label, .. }
+            | Step::ReplacePortable { label, .. } => label,
             Step::WriteFile { .. } => "Writing settings",
             Step::RemoveFile { .. } => "Cleaning up",
         }
     }
     pub fn elevated(&self) -> bool {
         match self {
-            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } | Step::Leftover { elevated, .. } | Step::AddPackage { elevated, .. } | Step::RemovePackage { elevated, .. } => *elevated,
+            Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } | Step::Leftover { elevated, .. } | Step::AddPackage { elevated, .. } | Step::RemovePackage { elevated, .. } | Step::ReplacePortable { elevated, .. } => *elevated,
             _ => false,
         }
     }
@@ -267,6 +273,7 @@ impl Plan {
             match s {
                 Step::ExtractZip { dest, .. } => v.push(norm(dest)),
                 Step::RemoveDir { path, .. } | Step::RemoveIfOnlyUninstaller { path, .. } => v.push(norm(path)),
+                Step::ReplacePortable { program, .. } => v.extend(portable::root_of(program).map(|r| norm(&r))),
                 _ => {}
             }
         }

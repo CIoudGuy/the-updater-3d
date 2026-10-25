@@ -20,6 +20,8 @@ Finds what you have, shows what changed, and updates everything in one click.
 ## Features
 
 - **One list for everything.** Every installed app, its version, and whether an update is waiting.
+  Portable apps count too: a portable browser like Thorium is found through its shortcut and
+  updated in place, with its profile kept.
 - **Update all in one click.** Downloads run in parallel over several connections; installs run
   silently, one at a time, in the background.
 - **Full change lists.** Release notes for every version, straight from each publisher.

@@ -587,6 +587,7 @@ fn step_detail(step: &sources::Step, files: Option<usize>) -> String {
         Step::AddPackage { .. } => "Windows is installing the app package".into(),
         Step::RemovePackage { .. } => "Windows is removing the app package".into(),
         Step::Leftover { label, .. } => label.clone(),
+        Step::ReplacePortable { .. } => "Replacing its program files, keeping its data".into(),
     }
 }
 
@@ -1115,7 +1116,7 @@ impl Core {
                 tagline: gh_feed.and_then(|f| f.about_of(&i.id)).map(String::from).or_else(|| i.tagline.clone()),
                 group: if gh_feed.is_some() { Source::Other.group().into() } else { i.source.group().into() },
                 running: is_running,
-                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
+                can_uninstall: !i.read_only && (i.uninstall.is_some() || i.source == Source::Programs || other::package_family(i).is_some() || sources::portable::is_portable(i) || matches!(&i.data, SourceData::Other { entry, .. } if !entry.uninstall_string.trim().is_empty() || !entry.quiet_uninstall_string.trim().is_empty()) || matches!(i.data, SourceData::Blender { .. }) || matches!(&i.data, SourceData::Tools { key, .. } if key == "godot")),
                 can_rollback,
                 read_only: i.read_only,
                 // Only for copies the Store updates: a sideloaded app package is updated here.
@@ -2801,7 +2802,7 @@ impl Core {
         let show_installed = self.settings.read().show_installed_in_get_apps || req.query.as_deref().is_some_and(|q| !q.trim().is_empty());
         let (page, pkgs) = tauri::async_runtime::spawn_blocking(move || -> Result<(browse::BrowsePage, Vec<sources::winget::Pkg>)> {
             let list = browse::list()?;
-            let here: HashSet<String> = installed.iter().filter(|i| i.source == Source::Other).map(|i| other::pkg_of(i).to_ascii_lowercase()).collect();
+            let here: HashSet<String> = installed.iter().filter(|i| i.source == Source::Other).flat_map(|i| other::same_app_ids(other::pkg_of(i))).collect();
             Ok(browse::page_for(&list, &req, &here, show_installed))
         })
         .await
@@ -2835,7 +2836,7 @@ impl Core {
             return None;
         }
         let pkg = sources::browse::pkgs_by_id(&[pkg_id.to_string()]).into_iter().next()?;
-        let have = self.st.lock().installed.iter().any(|i| i.source == Source::Other && other::pkg_of(i).eq_ignore_ascii_case(pkg_id));
+        let have = self.st.lock().installed.iter().any(|i| i.source == Source::Other && other::same_app_ids(other::pkg_of(i)).contains(&pkg_id.to_ascii_lowercase()));
         let mut e = other::entry(&pkg, pkg.latest.clone(), Some(pkg.id.clone()), have);
         sources::browse::apply(&mut e);
         {
@@ -4249,6 +4250,14 @@ impl Core {
                     return Checked::Done;
                 }
                 let unchanged = |now: &str| before.is_some_and(|b| b.version == now);
+                // A portable copy: its program file tells its version.
+                if let Some(exe) = before.filter(|b| sources::portable::is_portable(b)).and_then(|b| b.exe.clone()) {
+                    return match tauri::async_runtime::spawn_blocking(move || sources::portable::version_now(&exe)).await.ok().flatten() {
+                        Some(now) if !version::newer(v, &now) && !version::newer(&now, v) => Checked::Done,
+                        Some(now) => Checked::Shows { unchanged: unchanged(&now), version: now },
+                        None => Checked::Missing,
+                    };
+                }
                 let Some(rest) = app_id.strip_prefix("other:") else {
                     return match found {
                         Some(i) => Checked::Shows { unchanged: unchanged(&i.version), version: i.version },
@@ -4569,7 +4578,7 @@ fn set_control(tx: &watch::Sender<Control>, c: Control) {
 fn step_weight(step: &sources::Step) -> f64 {
     match step {
         sources::Step::Run { .. } | sources::Step::OpenUri { .. } | sources::Step::AddPackage { .. } | sources::Step::RemovePackage { .. } => 1.0,
-        sources::Step::ExtractZip { .. } => 0.5,
+        sources::Step::ExtractZip { .. } | sources::Step::ReplacePortable { .. } => 0.5,
         sources::Step::RemoveDir { .. } => 0.1,
         _ => 0.02,
     }

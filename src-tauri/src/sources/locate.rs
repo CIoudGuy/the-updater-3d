@@ -162,6 +162,8 @@ pub fn shortcut_target(lnk: &Path) -> Option<PathBuf> {
 pub struct Shortcut {
     pub name: String,
     pub target: PathBuf,
+    /// The shortcut file
+    pub lnk: PathBuf,
 }
 
 /// The Start menu folders for all users and for this user.
@@ -212,7 +214,7 @@ pub fn shortcuts_in(dirs: &[PathBuf]) -> Vec<Shortcut> {
                 }
             };
             let target = target.filter(|t| real_exe(t))?;
-            Some(Shortcut { name: f.file_stem()?.to_string_lossy().into_owned(), target })
+            Some(Shortcut { name: f.file_stem()?.to_string_lossy().into_owned(), target, lnk: f })
         })
         .collect()
 }

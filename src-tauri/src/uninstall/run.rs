@@ -144,10 +144,10 @@ pub struct BackupInfo {
     pub items: usize,
 }
 
-/// The entry an app came from, when it is from the uninstall list.
+/// The entry an app came from, when it is from the uninstall list (a portable copy has none).
 fn entry_of(i: &Installed) -> Option<&winutil::UninstallEntry> {
     match &i.data {
-        SourceData::Other { entry, .. } if !entry.key.is_empty() => Some(entry),
+        SourceData::Other { entry, .. } if !entry.key.is_empty() && entry.hive != crate::sources::portable::HIVE => Some(entry),
         _ => None,
     }
 }

@@ -10,7 +10,11 @@
 //! 4. its install folder or program name, among the packages of the same publisher
 //!
 //! A product or upgrade code match must also agree on the name or the publisher. When more than
-//! one package is left, the locale and the name decide; when they can not, the entry is dropped.
+//! one package is left, the locale and the name decide, then the build the copy names (Thorium's
+//! "AVX2" build); when they can not, the entry is dropped.
+//!
+//! Portable copies, which are not in the uninstall list, are matched the same way from what their
+//! program file says about itself (see `portable`).
 
 use super::winget::{self, Index, Installer, Manifest, Pkg, VerRef};
 use super::{msix, Download, Installed, Latest, Plan, SourceData, Step, StoreRef, Verify};
@@ -114,6 +118,8 @@ fn handled_entry(e: &winutil::UninstallEntry, handled: &[Installed]) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum How {
+    /// A portable copy (not in the uninstall list), matched from its program file
+    Portable,
     /// A distinctive name the app is also published under, in one package only
     Name,
     Location,
@@ -132,6 +138,7 @@ impl How {
             How::NamePublisher => "name and publisher",
             How::Location => "install folder",
             How::Name => "own name",
+            How::Portable => "portable copy",
             How::PackageFamily => "package family name",
         }
     }
@@ -340,6 +347,9 @@ fn match_entry(e: &winutil::UninstallEntry, idx: &Index, upgrade_codes: &HashMap
                 tiers.push(by_pub.iter().copied().filter(|r| idx.names_of(*r).iter().any(|n| names.contains(n))).map(|row| Cand { row, how: How::Location }).collect());
             }
         }
+        // A maker that names itself where the catalog has another name ("Alex313031" for "The
+        // Thorium Authors"): its packages are under that name ("Alex313031.Thorium").
+        tiers.push(idx.by_name(&nn.name).into_iter().filter(|r| idx.by_row(*r).is_some_and(|p| p.id.split('.').next().is_some_and(|s| winget::normalize_publisher(s) == publisher))).map(|row| Cand { row, how: How::NamePublisher }).collect());
         // An app published under its own name ("Bloxstrap" by "Bloxstrap") whose distinctive name
         // only one package has, and that package is named after it too.
         if publisher == nn.name && nn.name.len() >= 6 {
@@ -393,6 +403,9 @@ fn match_entry(e: &winutil::UninstallEntry, idx: &Index, upgrade_codes: &HashMap
         if best.len() == 1 {
             return Ok((best[0].row, best[0].how, upgrade));
         }
+        if let Some(c) = by_build(idx, &best, e) {
+            return Ok((c.row, c.how, upgrade));
+        }
         let ids: Vec<String> = best.iter().take(4).filter_map(|c| idx.by_row(c.row)).map(|p| p.id).collect();
         return Err(Miss::Ambiguous(ids));
     }
@@ -403,6 +416,27 @@ fn match_entry(e: &winutil::UninstallEntry, idx: &Index, upgrade_codes: &HashMap
         return Err(Miss::NoPublisher);
     }
     Err(Miss::NotInCatalog)
+}
+
+/// Builds of one app the catalog has as packages of their own ("Alex313031.Thorium.AVX2",
+/// "Alex313031.Thorium.SSE4"): the one whose own part of the id the copy names, in its folders or
+/// in a short marker file next to its program (`portable::build_words`).
+fn by_build<'a>(idx: &Index, best: &[&'a Cand], e: &winutil::UninstallEntry) -> Option<&'a Cand> {
+    let ids: Vec<Vec<String>> = best.iter().filter_map(|c| idx.by_row(c.row)).map(|p| p.id.split('.').map(|s| s.to_ascii_lowercase()).collect()).collect();
+    if ids.len() != best.len() {
+        return None;
+    }
+    // Builds of one app share the maker and the app in their ids ("Alex313031.Thorium").
+    let common = (0..).take_while(|n| ids.iter().all(|s| s.get(*n).is_some() && s.get(*n) == ids[0].get(*n))).count();
+    if common < 2 {
+        return None;
+    }
+    let words = super::portable::build_words(e);
+    let fits: Vec<usize> = ids.iter().enumerate().filter(|(_, s)| s.len() > common && s[common..].iter().all(|w| words.contains(w))).map(|(k, _)| k).collect();
+    match fits.as_slice() {
+        [k] => Some(best[*k]),
+        _ => None,
+    }
 }
 
 /// Match every app in the uninstall list against the index.
@@ -561,10 +595,46 @@ fn store_copy_of(p: &msix::AppPackage, idx: &Index) -> Option<i64> {
     (families.is_empty() || families.iter().any(|f| f.eq_ignore_ascii_case(&p.family))).then_some(*row)
 }
 
-/// Every match: the uninstall list's, then this user's app packages.
+/// Portable copies (`portable::candidates`) matched to the catalog as entries of the uninstall
+/// list are, when no entry there matched the package already and no other source lists it.
+pub fn portable_matches(found: &[winutil::UninstallEntry], idx: &Index, classic: &[Match], handled: &[Installed]) -> Vec<Match> {
+    let mut out: Vec<Match> = Vec::new();
+    for e in found {
+        if e.display_version.trim().is_empty() {
+            continue;
+        }
+        let Ok((row, _, _)) = match_entry(e, idx, &HashMap::new()) else { continue };
+        let Some(pkg) = idx.by_row(row) else { continue };
+        if handled_package(&pkg.id) || excluded_package(&pkg.id).is_some() || handled.iter().any(|h| pkg_of(h).eq_ignore_ascii_case(&pkg.id)) {
+            continue;
+        }
+        if classic.iter().chain(out.iter()).any(|m| m.pkg.id.eq_ignore_ascii_case(&pkg.id)) {
+            continue;
+        }
+        out.push(Match { entry: e.clone(), pkg, how: How::Portable, upgrade_code: None, package: None });
+    }
+    out
+}
+
+/// The portable copies on this PC that may be catalog apps.
+#[cfg(not(test))]
+fn portable_entries(entries: &[winutil::UninstallEntry], handled: &[Installed]) -> Vec<winutil::UninstallEntry> {
+    let shortcuts = super::locate::shortcuts_in(&super::portable::shortcut_dirs());
+    super::portable::candidates(&shortcuts, entries, handled, &super::portable::read_program)
+}
+
+/// Tests never read this PC's shortcuts.
+#[cfg(test)]
+fn portable_entries(_: &[winutil::UninstallEntry], _: &[Installed]) -> Vec<winutil::UninstallEntry> {
+    vec![]
+}
+
+/// Every match: the uninstall list's, this user's app packages, then portable copies.
 fn all_matches(entries: &[winutil::UninstallEntry], idx: &Index, path: &Path, handled: &[Installed]) -> Vec<Match> {
     let mut ms = match_on_disk(entries, idx, path, handled).matches;
     let more = package_matches(&msix::app_packages(), idx, &ms, handled);
+    ms.extend(more);
+    let more = portable_matches(&portable_entries(entries, handled), idx, &ms, handled);
     ms.extend(more);
     ms
 }
@@ -700,6 +770,8 @@ pub struct Want {
     /// An installed app package (MSIX): its package family name. Only a package of that family
     /// updates it.
     pub package: Option<String>,
+    /// A portable copy: only the app's portable zip updates it, in place.
+    pub portable: bool,
 }
 
 /// The processor Windows runs on ("arm64" even for this app running emulated as x64).
@@ -715,6 +787,9 @@ fn starts_dir(p: &str, root: &Path) -> bool {
 impl Want {
     pub fn for_entry(e: &winutil::UninstallEntry, upgrade_code: Option<&str>) -> Want {
         let nn = winget::normalize_name(&e.display_name);
+        if e.hive == super::portable::HIVE {
+            return Want { portable: true, locale: nn.locale, ..Want::fresh() };
+        }
         let loc = if e.install_location.trim().is_empty() { e.display_icon.split(',').next().unwrap_or("").to_string() } else { e.install_location.clone() };
         let arch = match nn.arch {
             Some("X64") => Some("x64"),
@@ -734,6 +809,7 @@ impl Want {
             upgrade_code: upgrade_code.map(String::from),
             locale: nn.locale,
             package: None,
+            portable: false,
         }
     }
 
@@ -744,7 +820,7 @@ impl Want {
             "x86" => Some("x86"),
             _ => None,
         };
-        Want { machine: machine_arch(), arch, scope: Some("user"), msi: false, product_code: None, upgrade_code: None, locale: None, package: Some(msix::family_of(full_name)) }
+        Want { machine: machine_arch(), arch, scope: Some("user"), msi: false, product_code: None, upgrade_code: None, locale: None, package: Some(msix::family_of(full_name)), portable: false }
     }
 
     pub fn for_installed(i: &Installed) -> Want {
@@ -757,7 +833,7 @@ impl Want {
 
     /// A new install: the computer's own architecture is preferred, any scope.
     pub fn fresh() -> Want {
-        Want { machine: machine_arch(), arch: None, scope: None, msi: false, product_code: None, upgrade_code: None, locale: None, package: None }
+        Want { machine: machine_arch(), arch: None, scope: None, msi: false, product_code: None, upgrade_code: None, locale: None, package: None, portable: false }
     }
 }
 
@@ -801,7 +877,7 @@ pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static 
         "zip" => return Err("a zip without an installer in it"),
         // A plain exe needs its silent switch. "InstallModes: silent" alone is often copied from a
         // template, and such an installer opens its window and waits for clicks.
-        "exe" if i.silent.is_none() && i.silent_progress.is_none() => return Err("its installer has no silent mode"),
+        "exe" if i.silent.is_none() && i.silent_progress.is_none() && !chromium_setup(i) => return Err("its installer has no silent mode"),
         "msi" | "wix" | "nsis" | "inno" | "burn" | "exe" => {}
         _ => return Err("an installer type that is not supported"),
     }
@@ -812,6 +888,28 @@ pub fn usable(i: &Installer, machine: &str) -> std::result::Result<(), &'static 
         return Err("no checksum");
     }
     if !(i.url.starts_with("https://") || i.url.starts_with("http://")) {
+        return Err("no download address");
+    }
+    Ok(())
+}
+
+/// Chromium's installer (Chrome's, Thorium's) has no window to click through: the catalog lists
+/// it as silent only, with no switch for that, and gives Chromium's own switches.
+fn chromium_setup(i: &Installer) -> bool {
+    i.install_modes.iter().all(|m| m == "silent") && i.custom.as_deref().is_some_and(|c| c.split_whitespace().any(|a| a == "--do-not-launch-chrome"))
+}
+
+/// Can this portable download update a portable copy here? `Err` says why not.
+fn usable_portable(i: &Installer, machine: &str) -> std::result::Result<(), &'static str> {
+    match i.arch.as_str() {
+        "x64" | "x86" | "neutral" => {}
+        "arm64" if machine == "arm64" => {}
+        _ => return Err(OTHER_CPU),
+    }
+    if i.sha256.len() != 64 || !i.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("no checksum");
+    }
+    if !i.url.starts_with("https://") {
         return Err("no download address");
     }
     Ok(())
@@ -832,7 +930,14 @@ pub fn choose_with<'a>(m: &'a Manifest, w: &Want, learned: &Learned) -> std::res
     let mut best: Option<(i32, &Installer)> = None;
     let same = |a: &Option<String>, b: &Option<String>| matches!((a, b), (Some(x), Some(y)) if x.eq_ignore_ascii_case(y.trim()));
     for i in &m.installers {
-        if let Err(r) = usable(i, w.machine) {
+        // A portable copy is updated by the app's portable download only, and nothing else
+        // installs one.
+        let portable = kind_of(i) == "portable";
+        if w.portable && !portable {
+            why = (3, "no portable download, this copy is portable");
+            continue;
+        }
+        if let Err(r) = if w.portable { usable_portable(i, w.machine) } else { usable(i, w.machine) } {
             let level = if r == OTHER_CPU { 1 } else { 2 };
             if level >= why.0 {
                 why = (level, r);
@@ -1434,6 +1539,7 @@ pub async fn fetch(installed: &[Installed], prev: Option<&Feed>) -> Result<Feed>
     })
     .await
     .map_err(|e| anyhow!("{e}"))??;
+    let portable: HashSet<String> = installed.iter().filter(|i| super::portable::is_portable(i)).map(|i| pkg_of(i).to_ascii_lowercase()).collect();
     let before = read_before(prev);
     let got: Vec<Loaded> = futures_util::stream::iter(pkgs).map(|p| load_or_reuse(&before, p)).buffer_unordered(crate::machine::tuned().manifest_parallel).collect().await;
     let lines: HashMap<String, &'static str> = popular.iter().map(|(p, l)| (p.id.to_ascii_lowercase(), *l)).collect();
@@ -1481,7 +1587,10 @@ pub async fn fetch(installed: &[Installed], prev: Option<&Feed>) -> Result<Feed>
     let mut failed = 0;
     for (pkg, r) in got {
         match r {
-            Ok((versions, m)) => {
+            Ok((versions, mut m)) => {
+                if portable.contains(&pkg.id.to_ascii_lowercase()) {
+                    add_portable_zip(&mut m).await;
+                }
                 feed.pkgs.insert(pkg.id.to_ascii_lowercase(), PkgFeed { pkg, versions, latest: Some(m) });
             }
             Err(e) => {
@@ -1671,6 +1780,9 @@ fn make_with(m: &Match, feed: Option<&Feed>, hints: &std::cell::OnceCell<super::
     if let Some(p) = &m.package {
         return make_package(m, p, feed);
     }
+    if m.entry.hive == super::portable::HIVE {
+        return Some(make_portable(m, feed));
+    }
     let e = &m.entry;
     let pf = feed.and_then(|f| f.get(&m.pkg.id));
     let man = pf.and_then(|p| p.latest.as_ref());
@@ -1740,6 +1852,36 @@ fn make_package(m: &Match, p: &msix::AppPackage, feed: Option<&Feed>) -> Option<
         icon_remote: logo.map(|l| l.to_string_lossy().to_string()),
         data: SourceData::Other { pkg: m.pkg.id.clone(), how: How::PackageFamily, entry: Box::new(m.entry.clone()), upgrade_code: None },
     })
+}
+
+/// A portable copy as an installed app. It is listed even when the catalog has no portable zip
+/// to update it with (then no update is offered), so Get apps does not offer it as new.
+fn make_portable(m: &Match, feed: Option<&Feed>) -> Installed {
+    let e = &m.entry;
+    let man = feed.and_then(|f| f.get(&m.pkg.id)).and_then(|pf| pf.latest.as_ref());
+    let name = man.map(|x| x.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| m.pkg.name.clone());
+    let (code, fg, bg) = mark_for(&name, &m.pkg.id);
+    Installed {
+        id: format!("other:{}", m.pkg.id),
+        source: Source::Other,
+        name,
+        code,
+        fg,
+        bg,
+        version: e.display_version.clone(),
+        install_dir: Some(PathBuf::from(&e.install_location)),
+        exe: Some(PathBuf::from(&e.key)),
+        uninstall: None,
+        updated_at: entry_date(e),
+        size_hint: None,
+        tagline: Some("Portable copy".into()),
+        channel: None,
+        missing: false,
+        read_only: false,
+        store: None,
+        icon_remote: None,
+        data: SourceData::Other { pkg: m.pkg.id.clone(), how: How::Portable, entry: Box::new(e.clone()), upgrade_code: None },
+    }
 }
 
 /// Installed apps matched to the catalog (no network: the index on disk, if there is one yet).
@@ -2676,6 +2818,46 @@ pub fn other_builds(idx: &Index, id: &str) -> Vec<(String, String)> {
     out
 }
 
+/// A portable copy updates from the app's portable zip. When the catalog lists only an installer
+/// downloaded from a GitHub release (Thorium's AVX2 build), the zip of that release that goes
+/// with the installer (`portable::pick_zip`) is added to the manifest as its portable download,
+/// with GitHub's checksum of it.
+pub async fn add_portable_zip(m: &mut Manifest) {
+    if m.installers.iter().any(|i| kind_of(i) == "portable") {
+        return;
+    }
+    let Ok(base) = choose(m, &Want::fresh()).cloned() else { return };
+    let (Some(repo), Some(tag)) = (installer_repo(&base), github_tag(&base.url)) else { return };
+    let Some(rel) = release_by_tag(&repo, &tag).await else { return };
+    let file = percent_decode(base.url.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or(""));
+    let Some(zip) = super::portable::pick_zip(&rel.assets, &file, &base.arch) else { return };
+    let Some(sha256) = zip.sha256.clone() else { return };
+    m.installers.push(Installer { arch: base.arch.clone(), kind: "zip".into(), nested_kind: Some("portable".into()), url: zip.url.clone(), sha256, release_date: base.release_date.clone(), ..Default::default() });
+}
+
+/// One release of a GitHub project by its tag: from the list of its newest releases, else asked
+/// for on its own (an older version).
+async fn release_by_tag(repo: &str, tag: &str) -> Option<super::ghapps::Release> {
+    if let Some(r) = super::ghapps::releases(repo).await.into_iter().find(|r| r.tag == tag) {
+        return Some(r);
+    }
+    let url = format!("https://api.github.com/repos/{repo}/releases/tags/{tag}");
+    let f = tokio::time::timeout(Duration::from_secs(15), http::get_cached(&url, &[("Accept", "application/vnd.github+json")], Duration::from_secs(24 * 3600))).await.ok()?.ok()?;
+    let v: Value = serde_json::from_slice(&f.body).ok()?;
+    super::ghapps::parse_releases(&Value::Array(vec![v])).into_iter().next()
+}
+
+/// The ids of one app in the catalog's packages of each installer kind, lowercase: an app
+/// installed from "Google.Chrome.EXE" is the app of "Google.Chrome" too, so Get apps does not
+/// offer it again as a new app.
+pub fn same_app_ids(pkg: &str) -> Vec<String> {
+    let low = pkg.to_ascii_lowercase();
+    let base = [".exe", ".msi", ".msix", ".appx"].iter().find_map(|k| low.strip_suffix(k)).unwrap_or(&low).to_string();
+    let mut v = vec![base.clone()];
+    v.extend([".exe", ".msi", ".msix", ".appx"].iter().map(|k| format!("{base}{k}")));
+    v
+}
+
 /// The project whose releases the catalog's installer is downloaded from: only then are its
 /// releases the files the catalog lists, so a pre-release installs the same way.
 fn installer_repo(i: &Installer) -> Option<String> {
@@ -2900,6 +3082,26 @@ pub fn build_plan(p: &Pkg, m: &Manifest, i: &Installer, kind: JobKind, current: 
     let update = current.is_some() && kind != JobKind::Install;
     let block_dirs: Vec<PathBuf> = current.and_then(|c| c.install_dir.clone()).filter(|d| own_dir(d)).into_iter().collect();
     let download = Download { url: i.url.clone(), dest: dest.clone(), size, sha256: Some(i.sha256.clone()).filter(|s| !s.is_empty()), sha512: None, md5: None, signer: i.signer.clone(), headers: vec![] };
+    if kind_of(i) == "portable" {
+        // A portable copy: its files are replaced in place from the zip. Nothing else installs one.
+        let program = current.filter(|c| super::portable::is_portable(c)).and_then(|c| c.exe.clone()).ok_or_else(|| anyhow!("{name}: only a portable copy here is updated from its portable download"))?;
+        let dir = program.parent().map(Path::to_path_buf).unwrap_or_default();
+        let doing = if kind == JobKind::Rollback { "Rolling back" } else { "Updating" };
+        let elevated = starts_dir(&program.to_string_lossy(), &paths::program_files()) || starts_dir(&program.to_string_lossy(), &paths::program_files_x86());
+        return Ok(Plan {
+            app_id: app_id.clone(),
+            kind,
+            name: name.clone(),
+            to_version: m.version.clone(),
+            downloads: vec![download],
+            steps: vec![Step::ReplacePortable { zip: dest.clone(), program: program.clone(), nested: i.nested_path.clone(), elevated, label: format!("{doing} {name} to {}", m.version) }],
+            block_dirs: vec![dir],
+            block_names: vec![],
+            verify: Verify::Version { app_id, version: m.version.clone() },
+            fallback: None,
+            cleanup: vec![dest],
+        });
+    }
     if package_kind(&i.kind) {
         // An app package: Windows' package manager installs it for this user, no admin rights.
         let family = i.family.clone().filter(|f| !f.trim().is_empty()).ok_or_else(|| anyhow!("{name}: the catalog does not name its package family"))?;
@@ -3061,6 +3263,10 @@ pub async fn plan_install(id: &str, ver: Option<&str>, kind: JobKind, current: O
             }
         }
     };
+    let mut m = m;
+    if w.portable {
+        add_portable_zip(&mut m).await;
+    }
     let i = choose(&m, &w).map_err(|why| anyhow!("{label} {} can not be installed here: {why}", m.version))?;
     if current.is_some() && kind != JobKind::Repair && i.upgrade_behavior.as_deref() == Some("deny") {
         bail!("The catalog says {label} can not be installed over the copy that is here. Uninstall it first.");
@@ -3145,6 +3351,9 @@ pub fn place_in(plan: &mut Plan, i: &Installer, dir: &Path) -> bool {
 }
 
 pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
+    if super::portable::is_portable(inst) {
+        return super::portable::plan_uninstall(inst);
+    }
     if let Some(family) = package_family(inst) {
         // An app package: Windows' package manager removes it (and its data) for this user.
         return Ok(Plan {
@@ -3200,3 +3409,5 @@ mod package_probe;
 mod probe;
 #[cfg(test)]
 mod locate_tests;
+#[cfg(test)]
+mod portable_tests;

@@ -237,7 +237,7 @@ fn tail(s: &[u8], max: usize) -> String {
     }
 }
 
-fn extract_zip(zip: &Path, dest: &Path, strip_root: bool) -> Result<()> {
+pub(crate) fn extract_zip(zip: &Path, dest: &Path, strip_root: bool) -> Result<()> {
     let f = std::fs::File::open(zip).with_context(|| format!("open {}", zip.display()))?;
     let mut ar = zip::ZipArchive::new(std::io::BufReader::new(f))?;
     // Strip the single top folder ("blender-5.2.2-windows-x64/") when every entry has it.
@@ -445,6 +445,7 @@ pub fn execute_with(step: &Step, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> Ste
         Step::RemovePackage { family, .. } => crate::sources::msix::remove(family).map(|t| (None, t)),
         Step::RemoveDir { path, .. } => remove_dir(path).map(|_| (None, String::new())),
         Step::Leftover { target, .. } => crate::uninstall::remove::apply(target).map(|_| (None, String::new())),
+        Step::ReplacePortable { zip, program, nested, .. } => crate::sources::portable::replace(zip, program, nested.as_deref(), &extract_zip).map(|t| (None, t)),
         Step::WriteFile { path, contents, .. } => {
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;

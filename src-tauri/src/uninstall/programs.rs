@@ -107,7 +107,7 @@ pub fn make(e: &UninstallEntry, exe: Option<PathBuf>, dir: Option<PathBuf>, exis
             let p = e.publisher.trim();
             // A web app's publisher is the browser that installed it.
             match crate::sources::locate::web_app(e) {
-                Some(_) if !p.is_empty() => Some(format!("{p} (web app)")),
+                Some(_) if !p.is_empty() => Some(format!("Web app in {p}")),
                 _ => Some(p.to_string()).filter(|p| !p.is_empty()),
             }
         }),

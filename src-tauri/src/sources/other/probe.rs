@@ -158,3 +158,22 @@ pub(super) fn old_install_dir(e: &winutil::UninstallEntry) -> Option<PathBuf> {
     }
     old_program_file(e).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe"))).and_then(|p| p.parent().map(Path::to_path_buf)).filter(|d| d.components().count() >= 3)
 }
+
+/// The portable copies this PC's shortcuts lead to, and what the catalog matches them to.
+#[test]
+#[ignore]
+fn live_portable_probe() {
+    let un = winutil::uninstall_entries();
+    let path = winget::index_path();
+    let idx = Index::open(&path).expect("index");
+    let shortcuts = crate::sources::locate::shortcuts_in(&crate::sources::portable::shortcut_dirs());
+    let found = crate::sources::portable::candidates(&shortcuts, &un, &[], &crate::sources::portable::read_program);
+    let classic = match_all(&un, &idx, &[], &winutil::msi_upgrade_codes()).matches;
+    for e in &found {
+        let r = match_entry(e, &idx, &HashMap::new());
+        println!("CANDIDATE {} | {} | {} | {} -> {:?}", e.display_name, e.publisher, e.display_version, e.key, r.as_ref().map(|(row, _, _)| idx.by_row(*row).map(|p| p.id)).map_err(|m| m.label()));
+    }
+    for m in portable_matches(&found, &idx, &classic, &[]) {
+        println!("PORTABLE MATCH {} -> {} words={:?}", m.entry.key, m.pkg.id, crate::sources::portable::build_words(&m.entry));
+    }
+}
