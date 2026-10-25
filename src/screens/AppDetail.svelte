@@ -295,9 +295,6 @@
         <div class="blk">
           <span class="lbl" id="pre-lbl">Updates</span>
           <Segmented options={preOpts} value={preOn ? "pre" : "stable"} onchange={setPre} label="Stable or pre-release updates" />
-          <span class="hint">
-            {#if isDriver}{preOn ? "Beta drivers install as updates." : "Only released drivers."}{:else if preOn}Betas and release candidates install as updates, like final versions.{:else if versions?.some((v) => v.installed && v.prerelease)}You stay on {app.version} until a newer final version is out, or roll back below.{:else}Only final versions. Pre-releases are listed below, marked.{/if}
-          </span>
         </div>
         {/if}
         {#if app.source === "other" && !app.isSelf}<OtherBuilds id={app.id} />{/if}
@@ -559,6 +556,10 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+  /* a switch is as wide as its options, not the column */
+  .blk > :global(.seg) {
+    align-self: flex-start;
   }
   .lbl {
     font-size: 12px;
