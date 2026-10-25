@@ -1919,14 +1919,31 @@ impl Core {
             Some(r) => {
                 let v = r.version.clone();
                 let first = self.self_release.lock().as_ref().map(|x| x.version.clone()) != Some(v.clone());
-                *self.self_release.lock() = Some(r);
-                self.set_status(|s| s.self_update = Some(v.clone()));
+                self.offer_self_update(r);
                 if first && notify {
                     self.notify(&format!("The Updater 3D {v} is ready"), "Open the app to update it.", Target::About);
                 }
                 Ok(Some(v))
             }
-            None => Ok(None),
+            // Nothing newer any more: an offer found before is not kept.
+            None => {
+                self.forget_self_update();
+                Ok(None)
+            }
+        }
+    }
+
+    /// A newer version of this app to offer.
+    pub fn offer_self_update(&self, r: crate::selfupdate::Release) {
+        let v = r.version.clone();
+        *self.self_release.lock() = Some(r);
+        self.set_status(|s| s.self_update = Some(v));
+    }
+
+    /// No newer version of this app to offer.
+    pub fn forget_self_update(&self) {
+        if self.self_release.lock().take().is_some() {
+            self.set_status(|s| s.self_update = None);
         }
     }
 

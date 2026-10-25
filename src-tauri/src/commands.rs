@@ -381,12 +381,19 @@ pub async fn install_self_update(app: AppHandle, core: C<'_>) -> Res<()> {
     if c.jobs().iter().any(|j| !j.state.is_finished()) {
         return Err("Finish or cancel the queue first".into());
     }
-    let r = c.self_release.lock().clone().ok_or("No update for The Updater 3D right now")?;
     // A second click while the first one is still downloading does nothing.
     static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Ok(());
     }
+    // What the feed offers now: the release found at the last check may have been replaced.
+    let saved = c.self_release.lock().clone();
+    let Some(r) = crate::selfupdate::current(saved, crate::selfupdate::check().await) else {
+        BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        c.forget_self_update();
+        return Err("The Updater 3D is up to date".into());
+    };
+    c.offer_self_update(r.clone());
     c.toast("info", format!("Downloading The Updater 3D {}", r.version), None);
     if let Err(e) = crate::selfupdate::install(&r).await {
         BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -443,8 +450,10 @@ pub async fn self_info() -> Res<SelfInfo> {
 /// The Updater 3D's version history with each release's notes.
 #[tauri::command]
 pub async fn self_versions(core: C<'_>) -> Res<Vec<VersionInfo>> {
-    let offered = core.inner().self_release.lock().clone();
-    let rels = crate::selfupdate::releases().await;
+    // The feed's offer as it is now, so the newest version is the one an update installs.
+    let c = core.inner().clone();
+    let (_, rels) = tokio::join!(c.check_self(false), crate::selfupdate::releases());
+    let offered = c.self_release.lock().clone();
     Ok(crate::selfupdate::history(&rels, offered.as_ref(), env!("CARGO_PKG_VERSION")))
 }
 

@@ -90,6 +90,20 @@ pub async fn check() -> Result<Option<Release>> {
     }))
 }
 
+/// The release to install: what the feed offers now (`fresh`), as the feed keeps only its
+/// newest release and one found at an earlier check is gone (404) once a newer one is out; the
+/// one found earlier (`saved`) when the feed can not be read; none when the feed has nothing
+/// newer than this build any more.
+pub fn current(saved: Option<Release>, fresh: Result<Option<Release>>) -> Option<Release> {
+    match fresh {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("self-update: the feed could not be read again ({e:#}), using the release found before");
+            saved
+        }
+    }
+}
+
 /// The app's own public project, where every release and its notes are.
 pub const REPO: &str = "CIoudGuy/the-updater-3d";
 
@@ -178,6 +192,18 @@ mod tests {
         let body = |v: &str| format!("- **Programs from GitHub update here.** Version {v}.\n\nSHA-256 of `TheUpdater3D_{v}_x64-setup.exe`:\n`09fad6c41659644d6b2d4bc54800c93384667d7c0b717044baf57ccbea79c28d`\n");
         let rel = |v: &str| json!({ "tag_name": format!("v{v}"), "draft": false, "prerelease": false, "html_url": format!("https://github.com/{REPO}/releases/tag/v{v}"), "published_at": "2026-10-24T09:30:00Z", "body": body(v), "assets": [{ "name": format!("TheUpdater3D_{v}_x64-setup.exe"), "size": 7685729, "browser_download_url": format!("https://github.com/{REPO}/releases/download/v{v}/TheUpdater3D_{v}_x64-setup.exe") }] });
         crate::sources::ghapps::parse_releases(&json!([rel("1.1.8"), rel("1.1.7")]))
+    }
+
+    #[test]
+    fn the_update_installed_is_the_one_the_feed_offers_now() {
+        let rel = |v: &str| Release { version: v.into(), notes: String::new(), url: format!("https://files.example/{v}.exe"), sha256: Some("ab".repeat(32)), size: Some(1), name: format!("TheUpdater3D_{v}_x64-setup.exe") };
+        // 1.2.8 was found at the last check; the feed has replaced it with 1.2.9 since (its 1.2.8
+        // file is gone): 1.2.9 is installed.
+        assert_eq!(current(Some(rel("1.2.8")), Ok(Some(rel("1.2.9")))).map(|r| r.version).as_deref(), Some("1.2.9"));
+        // The feed can not be read: the one found before.
+        assert_eq!(current(Some(rel("1.2.8")), Err(anyhow!("offline"))).map(|r| r.version).as_deref(), Some("1.2.8"));
+        // Nothing newer than this build any more: nothing.
+        assert!(current(Some(rel("1.2.8")), Ok(None)).is_none());
     }
 
     #[test]
