@@ -254,7 +254,7 @@ fn each_kind_of_leftover_is_found_and_nothing_else() {
         TaskRec { path: "\\Painter Update".into(), command: elsewhere.join("Painter.exe").display().to_string() },
         TaskRec { path: "\\Unrelated".into(), command: r"C:\Gone\Unrelated\x.exe".into() },
     ];
-    let s = Subject { name: "Zapster".into(), publisher: "ZapCorp Ltd.".into(), install_dir: Some(dir.clone()), entry: Some((Hive::Hkcu, key.sub("Uninstall\\Zapster"))), exes: vec![gone_exe.clone()] };
+    let s = Subject { name: "Zapster".into(), publisher: "ZapCorp Ltd.".into(), install_dir: Some(dir.clone()), entry: Some((Hive::Hkcu, key.sub("Uninstall\\Zapster"))), exes: vec![gone_exe.clone()], runner: None };
     let items = leftovers::scan(&s, &env, &[]);
     let got: Vec<(Kind, String)> = items.iter().map(|i| (i.kind, i.label.replace(&key.0, "K").replace(&fx.0.display().to_string(), "F"))).collect();
     let want = vec![
@@ -293,6 +293,30 @@ fn a_shortcut_to_a_program_that_is_still_there_is_listed_but_not_ticked() {
     let items = leftovers::scan(&s, &env_for(&fx, &key), &[]);
     let sc = items.iter().find(|i| i.kind == Kind::Shortcut).unwrap();
     assert!(!sc.checked);
+}
+
+#[test]
+fn a_browsers_web_app_has_no_folder_and_the_browser_is_never_left_over() {
+    let fx = Fixture::new("webapp");
+    let key = TestKey::new("webapp");
+    // A portable browser (no entry of its own) and a web app it installed, as Windows lists it.
+    let bin = fx.dir("Browsers\\Thorium\\BIN", &["thorium.exe", "chrome.dll"]);
+    let cmd = format!(r#""{}" --profile-directory=Default --uninstall-app-id=kmpdfnlgcoapkiibcehndbgjmnihblme"#, bin.join("thorium.exe").display());
+    let mut e = entry("3c9e1f0a7b2d4e6f8a1c3e5b7d9f0a2c", "Paper Planner", &cmd);
+    e.hive = "HKCU";
+    e.publisher = "Thorium".into();
+    assert_eq!(crate::sources::locate::web_app(&e).map(|(b, id)| (b, id)), Some((bin.join("thorium.exe"), "kmpdfnlgcoapkiibcehndbgjmnihblme".to_string())));
+    // Not the browser's program or folder.
+    assert_eq!(crate::sources::locate::locate(&e, &[], &crate::sources::locate::Hints::default()), (None, None));
+    let i = programs::make(&e, None, None, &|_| true, None);
+    assert_eq!(i.tagline.as_deref(), Some("Thorium (web app)"));
+    // Even if a folder were known: one that still holds the program the uninstall ran is not left over.
+    let s = Subject { name: "Paper Planner".into(), install_dir: Some(bin.clone()), runner: Some(bin.join("thorium.exe")), ..Default::default() };
+    assert!(leftovers::scan(&s, &env_for(&fx, &key), &[]).iter().all(|i| i.kind != Kind::Folder));
+    // An uninstaller that stayed behind does not keep its folder from being offered.
+    let app = fx.dir("Apps\\Zapster", &["unins000.exe", "left.dat"]);
+    let s = Subject { name: "Zapster".into(), install_dir: Some(app.clone()), runner: Some(app.join("unins000.exe")), ..Default::default() };
+    assert!(leftovers::scan(&s, &env_for(&fx, &key), &[]).iter().any(|i| i.kind == Kind::Folder));
 }
 
 #[test]

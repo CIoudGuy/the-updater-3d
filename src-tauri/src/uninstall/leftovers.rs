@@ -57,6 +57,14 @@ pub struct Subject {
     pub entry: Option<(Hive, String)>,
     /// Program files of the program (its main exe): their names fit too.
     pub exes: Vec<PathBuf>,
+    /// The program its uninstall command ran (a browser for its web app, a launcher for its game)
+    pub runner: Option<PathBuf>,
+}
+
+/// An uninstaller's own program, which may stay in a folder that is otherwise left over.
+fn uninstaller_like(p: &Path) -> bool {
+    let n = p.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    ["unins", "uninst", "remove", "setup", "update", "maintenance"].iter().any(|w| n.contains(w))
 }
 
 /// A service as the registry records it.
@@ -299,7 +307,10 @@ pub fn target_is_gone(t: &Path) -> bool {
 }
 
 pub fn scan(s: &Subject, env: &Env, prefs: &[crate::sources::Step]) -> Vec<Item> {
-    let dir = s.install_dir.as_deref().filter(|d| env.guard.dir_refused(d).is_none());
+    // A folder that still holds the program the uninstall command ran is that program's, not
+    // what is left of this one (a browser's folder after its web app, a launcher's after a game).
+    let runs_there = |d: &Path| s.runner.as_deref().is_some_and(|r| r.is_file() && r.starts_with(d) && !uninstaller_like(r));
+    let dir = s.install_dir.as_deref().filter(|d| env.guard.dir_refused(d).is_none() && !runs_there(d));
     let cx = Ctx { s, env, dir };
     let mut out: Vec<Item> = Vec::new();
 

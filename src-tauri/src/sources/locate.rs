@@ -301,7 +301,19 @@ fn version_fits(shortcut: &str, version: &str) -> bool {
 /// names; in the install folder (the entry's, Windows Installer's, or its uninstaller's), the
 /// program a Start menu shortcut or App Paths names, else the one that fits the app's name;
 /// with no folder known, the program of the shortcut or App Paths entry named like the app.
+/// A web app a Chromium browser (Chrome, Edge, Brave, Thorium) installed: its entry's uninstall
+/// command is the browser with "--uninstall-app-id=<id>". (the browser's program, the app's id)
+pub fn web_app(e: &UninstallEntry) -> Option<(PathBuf, String)> {
+    let args = crate::winutil::split_program_line(&e.uninstall_string);
+    let id = args.iter().find_map(|a| a.strip_prefix("--uninstall-app-id=")).filter(|id| !id.is_empty())?.to_string();
+    Some((crate::winutil::pathbuf(args.first()?), id))
+}
+
 pub fn locate(e: &UninstallEntry, msi: &[String], hints: &Hints) -> (Option<PathBuf>, Option<PathBuf>) {
+    // A web app has no program or folder of its own: the browser's are the browser's.
+    if web_app(e).is_some() {
+        return (None, None);
+    }
     let name = e.display_name.as_str();
     let mut dir = location_dir(e).or_else(|| msi.iter().find_map(|c| msi_install_location(c))).or_else(|| named_dir(e));
     let mut exe = icon_exe(e).filter(|x| dir.as_ref().is_none_or(|d| under(x, d)));

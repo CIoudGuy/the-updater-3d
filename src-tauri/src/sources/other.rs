@@ -450,6 +450,11 @@ fn match_all_with(entries: &[winutil::UninstallEntry], idx: &Index, handled: &[I
             r.misses.push((e.clone(), Miss::Excluded("a driver")));
             continue;
         }
+        // A browser's web app is no catalog app, whatever it is named.
+        if super::locate::web_app(e).is_some() {
+            r.misses.push((e.clone(), Miss::Excluded("a web app")));
+            continue;
+        }
         match find(e) {
             Ok((row, how, upgrade_code)) => {
                 let Some(pkg) = idx.by_row(row) else { continue };

@@ -103,7 +103,14 @@ pub fn make(e: &UninstallEntry, exe: Option<PathBuf>, dir: Option<PathBuf>, exis
         uninstall: if broken.is_some() { None } else { choice.map(|c| c.args) },
         updated_at: winutil::install_date_iso(e.install_date.trim()).or_else(|| e.written.map(|w| chrono::DateTime::<chrono::Utc>::from(w).format("%Y-%m-%dT%H:%M:%SZ").to_string())),
         size_hint: Some(e.estimated_size_kb * 1024).filter(|s| *s > 0),
-        tagline: broken.clone().or_else(|| Some(e.publisher.trim().to_string()).filter(|p| !p.is_empty())),
+        tagline: broken.clone().or_else(|| {
+            let p = e.publisher.trim();
+            // A web app's publisher is the browser that installed it.
+            match crate::sources::locate::web_app(e) {
+                Some(_) if !p.is_empty() => Some(format!("{p} (web app)")),
+                _ => Some(p.to_string()).filter(|p| !p.is_empty()),
+            }
+        }),
         channel: None,
         missing: broken.is_some(),
         read_only: false,

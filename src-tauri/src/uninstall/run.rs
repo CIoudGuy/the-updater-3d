@@ -160,6 +160,7 @@ pub fn subject(inst: &Installed) -> Subject {
         install_dir: inst.install_dir.clone(),
         entry: entry_of(inst).map(|e| (Hive::of_entry(e.hive), entry_key_path(e.hive, &e.key))),
         exes: inst.exe.iter().cloned().collect(),
+        runner: entry_of(inst).and_then(|e| winutil::split_program_line(&e.uninstall_string).into_iter().next()).map(|p| winutil::pathbuf(&p)),
     }
 }
 
