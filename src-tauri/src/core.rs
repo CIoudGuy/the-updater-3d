@@ -1599,11 +1599,23 @@ impl Core {
             self.emit_apps();
         }
         // Sizes on disk: remembered per version, measured once (can take a moment for big apps).
+        let mut forgot = false;
         for i in &installed {
-            let key = format!("{}@{}", i.id, i.version);
-            if let Some(sz) = self.persisted.lock().sizes.get(&key).copied() {
-                self.st.lock().sizes.insert(i.id.clone(), sz);
+            let remembered = remembered_size(&self.persisted.lock().sizes, i);
+            match remembered {
+                Some(sz) => {
+                    self.st.lock().sizes.insert(i.id.clone(), sz);
+                }
+                // Measured from a folder the app no longer has: not its size.
+                None if i.install_dir.is_none() => {
+                    forgot |= self.persisted.lock().sizes.remove(&format!("{}@{}", i.id, i.version)).is_some();
+                    self.st.lock().sizes.remove(&i.id);
+                }
+                None => {}
             }
+        }
+        if forgot {
+            store::save_state(&self.persisted.lock());
         }
         self.emit_apps();
         let mut measured = false;
@@ -4898,6 +4910,13 @@ fn read_only_error(inst: &Installed) -> anyhow::Error {
     anyhow!("{} is updated and removed by {by}", inst.name)
 }
 
+/// The size measured earlier for an app at its version, while it still has the folder it was
+/// measured from (a browser's web app was once given its browser's folder: that size is not its own).
+fn remembered_size(sizes: &std::collections::BTreeMap<String, u64>, i: &Installed) -> Option<u64> {
+    i.install_dir.as_ref()?;
+    sizes.get(&format!("{}@{}", i.id, i.version)).copied()
+}
+
 fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u64>) -> Latest {
     if l.size.is_none() {
         l.size = dl_sizes.get(&format!("{app_id}@{}", l.version)).copied().filter(|n| *n > 0);
@@ -4908,6 +4927,19 @@ fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u6
 #[cfg(test)]
 mod tests {
     use super::{update_notice, with_download_size};
+
+    #[test]
+    fn a_size_measured_from_a_folder_the_app_no_longer_has_is_not_shown() {
+        // "Paper Planner", a web app Thorium installed: 781 MB was measured from
+        // Thorium's folder before web apps had no folder of their own.
+        let e = crate::winutil::UninstallEntry { key: "3c9e1f0a7b2d4e6f8a1c3e5b7d9f0a2c".into(), hive: "HKCU", display_name: "Paper Planner".into(), display_version: "1.0".into(), publisher: "Thorium".into(), uninstall_string: r#""C:\Browsers\Thorium\BIN\thorium.exe" --uninstall-app-id=kmpdfnlgcoapkiibcehndbgjmnihblme"#.into(), ..Default::default() };
+        let web = crate::uninstall::programs::make(&e, None, None, &|_| true, None);
+        let sizes: std::collections::BTreeMap<String, u64> = [(format!("{}@1.0", web.id), 781 * 1024 * 1024)].into();
+        assert_eq!(super::remembered_size(&sizes, &web), None);
+        // An app that still has its folder keeps the size measured from it.
+        let app = crate::sources::Installed { install_dir: Some(std::path::PathBuf::from(r"C:\Apps\Zapster")), ..web.clone() };
+        assert_eq!(super::remembered_size(&sizes, &app), Some(781 * 1024 * 1024));
+    }
 
     #[test]
     fn an_other_app_that_follows_pre_releases_is_offered_the_newest_one() {
