@@ -17,6 +17,7 @@ pub mod icons;
 pub mod intel;
 pub mod msix;
 pub mod msstore;
+pub mod npu;
 pub mod locate;
 pub mod makers;
 pub mod proglogo;

@@ -1,6 +1,7 @@
 //! Drivers, listed with the apps (group "Drivers"): every graphics card with its maker's own
 //! newest driver (NVIDIA, AMD, Intel), every other device that has a driver from its maker,
-//! Intel's own drivers for Intel Wi-Fi, Bluetooth and network adapters, the AMD chipset drivers,
+//! Intel's own drivers for Intel Wi-Fi, Bluetooth and network adapters, the AMD chipset, RAID and
+//! NPU drivers,
 //! the BIOS (the newest one the board's or PC's maker lists, see `board`), and every driver update Windows
 //! Update offers this PC (`Type='Driver'`, the same list as Settings > Windows Update > Optional
 //! updates). Microsoft signs every Windows Update driver; a maker's own package must be signed by
@@ -274,6 +275,8 @@ pub enum How {
     Amd(super::amd::Release),
     Intel(super::intel::Release),
     AmdChipset(super::chipset::Release),
+    AmdRaid(super::chipset::RaidRelease),
+    AmdNpu(super::npu::Release),
     /// A package from the board's or PC's maker (Dell, HP, Lenovo catalogs)
     Maker(Box<super::board::MakerDriver>),
 }
@@ -359,6 +362,13 @@ pub struct Inputs<'a> {
     pub intel: Option<&'a [super::intel::Config]>,
     /// The AMD chipset drivers: the installed version and AMD's newest
     pub chipset: Option<(&'a str, Option<&'a super::chipset::Release>)>,
+    /// AMD's RAID driver: the installed version (this PC has an AMD RAID controller) and AMD's newest
+    pub raid: Option<(&'a str, &'a super::chipset::RaidRelease)>,
+    /// AMD's NPU driver (for a PC with an NPU)
+    pub npu: Option<&'a super::npu::Release>,
+    /// Each Radeon PRO card's matching id and its AMD Software: PRO Edition (None: AMD has none
+    /// for that card that the app can read)
+    pub amd_pro: &'a [(String, Option<super::amd::Release>)],
     pub bios: Option<&'a super::board::Bios>,
     /// Drivers and tools the board's or PC's maker lists for it, and the maker's name
     pub maker: &'a [super::board::MakerDriver],
@@ -381,6 +391,16 @@ fn intel_pick(inp: &Inputs, p: &Present, cat: Option<&str>, id: &str) -> (Option
     let follows = (beta.is_some() || choice == Some(true)).then(|| choice.unwrap_or(false));
     let pick = if choice == Some(true) { beta.or(release) } else { release };
     (pick, follows)
+}
+
+/// AMD's driver for a graphics card: AMD Software: PRO Edition for a Radeon PRO card (the one from
+/// the card's own page; None when AMD has none the app can read, a PRO card is never given
+/// Adrenalin), Adrenalin for the others.
+fn amd_pick<'a>(inp: &Inputs<'a>, p: &Present) -> Option<&'a super::amd::Release> {
+    if super::amd::is_pro(&p.desc) {
+        return inp.amd_pro.iter().find(|(m, _)| m.eq_ignore_ascii_case(&p.matching_id)).and_then(|(_, r)| r.as_ref());
+    }
+    inp.amd
 }
 
 /// Does a hardware id from a maker's list name this installed device? The same id, or one
@@ -436,7 +456,7 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
                 }
             };
             out.push(Found { entry: e, how });
-        } else if let (true, Some(r)) = (super::amd::is_gpu(p), inp.amd) {
+        } else if let (true, Some(r)) = (super::amd::is_gpu(p), amd_pick(inp, p)) {
             let id = format!("driver:amd:{low}");
             if out.iter().any(|f| f.entry.id == id) {
                 continue;
@@ -448,7 +468,7 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
             e.size = if newer { r.size } else { None };
             e.notes_url = safe_link(Some(r.notes_url.clone()));
             e.notes = r.notes.clone();
-            e.note = Some(format!("Adrenalin Edition {} from AMD", r.version));
+            e.note = Some(format!("{} {} from AMD", if r.is_pro() { "AMD Software: PRO Edition" } else { "Adrenalin Edition" }, r.version));
             maker_has.push(low.clone());
             out.push(Found { entry: e, how: newer.then(|| How::Amd(r.clone())) });
         } else if let Some((Some(r), follows)) = super::intel::is_gpu(p).then(|| intel_pick(inp, p, Some("Graphics"), &format!("driver:intel:{low}"))) {
@@ -467,6 +487,7 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
             e.date = p.date.clone();
             e.vendor_url = Some(url.to_string());
             e.status = if inp.wu.is_some() { AppStatus::Current } else { AppStatus::Unknown };
+            let tool = if super::amd::is_pro(&p.desc) { "AMD Software: PRO Edition" } else { *tool };
             e.note = Some(format!("Newest {maker} drivers come from {tool}"));
             out.push(Found { entry: e, how: None });
         } else {
@@ -481,6 +502,10 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
         if by_device.contains_key(&low) {
             continue;
         }
+        // AMD's RAID driver is one entry of its own (below), not one for each part of it.
+        if inp.raid.is_some() && super::chipset::is_raid(p) {
+            continue;
+        }
         // The same driver on several devices (USB ports, audio endpoints): one entry.
         if let Some(k) = out.iter().position(|f| f.entry.source == "device" && f.entry.name.eq_ignore_ascii_case(&p.desc) && f.entry.version == p.version) {
             by_device.insert(low, k);
@@ -489,6 +514,23 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
         let maker = short_maker(&p.provider);
         let mut e = base_entry(format!("driver:dev:{low}"), p.desc.clone(), kind_of(&p.class), maker.clone(), "device", p.version.clone());
         e.date = p.date.clone();
+        // AMD's own NPU driver, when its INF lists this device.
+        if let Some(r) = inp.npu.filter(|r| super::npu::supports(r, p)) {
+            let newer = super::update_offered(&r.version, &p.version, false);
+            e.kind = "NPU".into();
+            e.maker = "AMD".into();
+            e.source = "amd".into();
+            e.latest = Some(if newer { r.version.clone() } else { p.version.clone() });
+            e.status = if newer { AppStatus::Update } else { AppStatus::Current };
+            e.size = if newer { r.size } else { None };
+            e.date = r.date.clone().filter(|_| newer).or(e.date);
+            e.notes_url = safe_link(Some(r.notes_url.clone()));
+            e.note = Some(if newer { "AMD's NPU driver from AMD. Installing it accepts AMD's software license.".into() } else { "AMD's NPU driver from AMD".into() });
+            maker_has.push(low.clone());
+            out.push(Found { entry: e, how: newer.then(|| How::AmdNpu(r.clone())) });
+            by_device.insert(low, out.len() - 1);
+            continue;
+        }
         let (pick, follows) = intel_pick(inp, p, None, &e.id);
         e.pre_channel = follows;
         let how = match pick {
@@ -646,6 +688,19 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
         out.push(Found { entry: e, how });
     }
 
+    // AMD's RAID driver (one package for all of its parts), for a PC with an AMD RAID controller.
+    if let Some((have, r)) = inp.raid {
+        let newer = super::update_offered(&r.version, have, false);
+        let mut e = base_entry("driver:amd-raid".into(), "AMD RAID Driver".into(), "Storage".into(), "AMD".into(), "amd", have.to_string());
+        e.latest = Some(if newer { r.version.clone() } else { have.to_string() });
+        e.status = if newer { AppStatus::Update } else { AppStatus::Current };
+        e.size = if newer { r.size } else { None };
+        e.notes_url = safe_link(Some(r.notes_url.clone()));
+        e.notes = r.notes.clone();
+        e.note = Some(if newer { "AMD's RAID driver for SATA and NVMe RAID. It is a boot driver: Windows needs two restarts to finish it.".into() } else { "AMD's RAID driver for SATA and NVMe RAID".into() });
+        out.push(Found { entry: e, how: newer.then(|| How::AmdRaid(r.clone())) });
+    }
+
     if let Some(b) = inp.bios {
         out.push(Found { entry: super::board::entry(b), how: None });
     }
@@ -738,6 +793,8 @@ pub fn plan(f: &Found) -> Result<Plan> {
         How::Amd(r) => super::amd::plan_install(&e.id, &e.name, r),
         How::Intel(r) => super::intel::plan_install(&e.id, &e.name, r),
         How::AmdChipset(r) => super::chipset::plan_install(&e.id, &e.name, r),
+        How::AmdRaid(r) => super::chipset::plan_raid_install(&e.id, &e.name, r),
+        How::AmdNpu(r) => super::npu::plan_install(&e.id, &e.name, r),
         How::Maker(d) => super::board::plan_install(&e.id, &e.name, d),
         How::WindowsUpdate { update_id } => {
             let me = std::env::current_exe()?;

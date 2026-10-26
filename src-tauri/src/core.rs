@@ -1248,8 +1248,17 @@ impl Core {
             });
             anyhow::Ok(futures_util::future::join_all(asks).await)
         };
-        let has_amd = present.iter().any(sources::amd::is_gpu);
+        // Adrenalin for AMD cards, AMD Software: PRO Edition (from the card's own page) for each Radeon PRO card.
+        let has_amd = present.iter().any(|p| sources::amd::is_gpu(p) && !sources::amd::is_pro(&p.desc));
         let amd_f = async { if has_amd { sources::amd::latest(win11).await.map(Some) } else { Ok(None) } };
+        let pro_cards: Vec<(String, String)> = present.iter().filter(|p| sources::amd::is_gpu(p) && sources::amd::is_pro(&p.desc)).map(|p| (p.matching_id.clone(), p.desc.clone())).collect();
+        let pro_f = futures_util::future::join_all(pro_cards.iter().map(|(matching, desc)| async move {
+            let rel = sources::amd::latest_pro(desc).await.map_err(|e| log::warn!("amd pro lookup {desc}: {e:#}")).ok().flatten();
+            (matching.clone(), rel)
+        }));
+        // AMD's RAID and NPU drivers, for a PC that has a RAID controller or an NPU.
+        let raid_have = chipset::raid_installed(&present);
+        let npu_f = async { if present.iter().any(sources::npu::is_npu) { sources::npu::latest().await.map(Some) } else { Ok(None) } };
         // Intel's list covers Intel graphics, Wi-Fi, Bluetooth and network adapters (and Killer).
         let has_intel = present.iter().any(|p| {
             let id = p.matching_id.to_ascii_lowercase();
@@ -1258,6 +1267,7 @@ impl Core {
         let intel_f = async { if has_intel { sources::intel::fetch().await.map(Some) } else { Ok(None) } };
         let product = board.as_ref().map(|b| b.product.clone()).unwrap_or_default();
         let chipset_f = async { if chipset_have.is_some() { chipset::latest(&product).await.map(Some) } else { Ok(None) } };
+        let raid_f = async { if raid_have.is_some() { chipset::latest_raid(&product).await } else { Ok(None) } };
         // The BIOS and the drivers the board's or PC's maker lists, at the same time.
         let bios_board = board.clone();
         let bios_f = async {
@@ -1269,7 +1279,7 @@ impl Core {
                 None => Ok(None),
             }
         };
-        let (nv, amd, intel, chip, bios) = tokio::join!(nvidia_f, amd_f, intel_f, chipset_f, bios_f);
+        let (nv, amd, intel, chip, bios, amd_pro, raid, npu) = tokio::join!(nvidia_f, amd_f, intel_f, chipset_f, bios_f, pro_f, raid_f, npu_f);
         let warn = |what: &str, e: anyhow::Error| log::warn!("{what} drivers: {e:#}");
         let nv = nv.unwrap_or_else(|e| {
             warn("nvidia", e);
@@ -1289,6 +1299,14 @@ impl Core {
             warn("amd chipset", e);
             None
         });
+        let raid = raid.unwrap_or_else(|e| {
+            warn("amd raid", e);
+            None
+        });
+        let npu = npu.unwrap_or_else(|e| {
+            warn("amd npu", e);
+            None
+        });
         let (bios, maker_list) = match bios.unwrap_or(None) {
             Some((b, l)) => (Some(b), l),
             None => (None, vec![]),
@@ -1303,6 +1321,9 @@ impl Core {
                 amd: amd.as_ref(),
                 intel: intel.as_deref(),
                 chipset: chipset_have.as_deref().map(|h| (h, chip.as_ref())),
+                raid: raid_have.as_deref().zip(raid.as_ref()),
+                npu: npu.as_ref(),
+                amd_pro: &amd_pro,
                 bios: bios.as_ref(),
                 maker: &maker_list,
                 maker_name,
