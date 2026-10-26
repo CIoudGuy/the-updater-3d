@@ -87,3 +87,15 @@ fn live_programs_probe() {
     println!("shortcuts: {} checked, {gone} point at missing programs", lnks.len());
     println!("services read: {}, scheduled tasks read: {}", env.services.len(), env.tasks.len());
 }
+
+/// The PC-wide dead shortcut cleanup on this PC, read only:
+/// `cargo test --lib live_dead_shortcuts_probe -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn live_dead_shortcuts_probe() {
+    let env = super::leftovers::Env::system(vec![], vec![]);
+    println!("desktops: {:?}", env.desktops);
+    for i in super::leftovers::dead_shortcuts(&env) {
+        println!("{:?} {} | {}", i.kind, i.label, i.detail);
+    }
+}
