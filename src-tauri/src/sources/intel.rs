@@ -1,4 +1,4 @@
-//! Intel drivers (graphics, Wi-Fi, Bluetooth, network adapters), from the data Intel Driver &
+//! Intel drivers (graphics, Wi-Fi, Bluetooth, network adapters, the NPU), from the data Intel Driver &
 //! Support Assistant reads (dsadata.intel.com): each driver package with the device ids it is
 //! for, its download on downloadmirror.intel.com and its exact size. The package must be signed
 //! by Intel. Intel marks most of its packages as not for silent install, so its own installer
@@ -20,6 +20,9 @@ pub const SIGNER: &str = "Intel Corporation";
 #[serde(rename_all = "PascalCase")]
 pub struct Config {
     pub id: u64,
+    /// The package's version ("32.0.100.5540", "32.0.101.9150 WHQL Certified")
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -151,14 +154,14 @@ pub fn for_device_with(p: &Present, configs: &[Config], windows11: bool, categor
         .iter()
         .filter(|c| beta || !c.is_beta)
         .filter_map(|c| {
-            let comp = c.components.iter().find(|k| category.is_none_or(|want| k.category.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(want))) && k.version.is_some() && k.detection_values.iter().any(|v| fits(&p.matching_id, v)))?;
+            let comp = c.components.iter().find(|k| category.is_none_or(|want| k.category.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(want))) && driver_version(c, k).is_some() && k.detection_values.iter().any(|v| fits(&p.matching_id, v)))?;
             let file = c.files.iter().find(|f| f.url.ends_with(".exe") && f.operating_systems.iter().any(|o| o.starts_with(os) && o.ends_with("-64")))?;
             if !super::drivers::host_is(&file.url, &["downloadmirror.intel.com"]) {
                 return None;
             }
             let html = c.extended_details.as_deref().filter(|d| !d.trim().is_empty()).or(c.details.as_deref()).unwrap_or_default();
             Some(Release {
-                version: comp.version.clone()?,
+                version: driver_version(c, comp)?,
                 name: clean(c.name.as_deref().unwrap_or("Intel driver")),
                 date: c.display_release_date.as_deref().and_then(|d| d.get(..10)).map(|d| d.replace('-', ".")),
                 url: file.url.clone(),
@@ -171,6 +174,16 @@ pub fn for_device_with(p: &Present, configs: &[Config], windows11: bool, categor
             })
         })
         .max_by(|a, b| super::tools::cmp_ver(&a.version, &b.version))
+}
+
+/// The driver version a package installs for a device: its part's own, else the package's
+/// (Intel's NPU driver lists it only there). Not for Intel's apps ("OtherDownloads": Arc
+/// Control and the like), which are no device's driver.
+fn driver_version(c: &Config, k: &Component) -> Option<String> {
+    if k.category.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("OtherDownloads")) {
+        return None;
+    }
+    k.version.clone().or_else(|| c.version.as_deref().and_then(|v| v.split_whitespace().next()).map(String::from)).filter(|v| v.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
 }
 
 /// `for_device` for graphics packages only.
@@ -269,6 +282,26 @@ mod tests {
         // Windows 10 has no file for the 11th-14th Gen package here.
         assert!(for_card(&card("PCI\\VEN_8086&DEV_9A49"), &list, false).is_none());
         assert!(for_card(&card("PCI\\VEN_8086&DEV_569"), &list, true).is_none(), "DEV_569 is not DEV_5690");
+    }
+
+    #[test]
+    fn the_npu_gets_intels_driver_whose_version_only_the_package_names() {
+        // Intel's NPU driver as its data lists it: no version on the device part.
+        let list: Vec<Config> = serde_json::from_str(r#"[
+          {"Id":927127,"Version":"32.0.100.5540","Name":"Intel® NPU Driver - Windows*","DisplayReleaseDate":"2026-09-30T00:00:00Z","IsBeta":false,"AllowSilentInstallation":false,
+           "Url":"https://www.intel.com/content/www/us/en/download/794734/intel-npu-driver-windows.html",
+           "Files":[{"Url":"https://downloadmirror.intel.com/927127/npu_win_32.0.100.5540.exe","Size":120000000,"OperatingSystems":["windows-11-24h2-64","windows-11-25h2-64"]}],
+           "Components":[{"Category":"OtherDrivers","Version":null,"DetectionValues":["VEN_8086&DEV_643E","VEN_8086&DEV_7D1D","VEN_8086&DEV_AD1D"]}]},
+          {"Id":739868,"Version":"1.0.4739.0","Name":"Intel® Arc™ Control","IsBeta":false,
+           "Files":[{"Url":"https://downloadmirror.intel.com/739868/arc_control.exe","Size":1,"OperatingSystems":["windows-11-25h2-64"]}],
+           "Components":[{"Category":"OtherDownloads","Version":null,"DetectionValues":["VEN_8086&DEV_7D1D"]}]}
+        ]"#).unwrap();
+        let npu = Present { matching_id: r"PCI\VEN_8086&DEV_7D1D&SUBSYS_14C31025&REV_04".into(), class: "ComputeAccelerator".into(), version: "32.0.100.4297".into(), desc: "Intel(R) AI Boost".into(), ..Default::default() };
+        let r = for_device(&npu, &list, true, None).expect("the NPU driver");
+        assert_eq!((r.version.as_str(), r.name.as_str()), ("32.0.100.5540", "Intel NPU Driver - Windows"));
+        // Intel's apps are no device's driver.
+        let only_app: Vec<Config> = list.into_iter().filter(|c| c.id == 739868).collect();
+        assert!(for_device(&npu, &only_app, true, None).is_none());
     }
 
     #[test]
