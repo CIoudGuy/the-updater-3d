@@ -64,6 +64,8 @@ Finds what you have, shows what changed, and updates everything in one click.
 | **Craft apps** | ArtCraft and the Craft apps (PhotoCraft, VectorCraft, FilmCraft and more) | ArtCraft's releases |
 | **More apps** | OBS Studio, Krita, FreeCAD, Godot, Unity Editor, Unity Hub, Epic Games Launcher (Preview) | Each project's own releases |
 | **Other apps** | 15,000+ Windows apps: browsers, chat, dev tools, media, utilities, including app packages (MSIX) like Affinity | Microsoft's public winget catalog |
+| **Drivers** | NVIDIA (Game Ready or Studio), AMD Radeon and Radeon PRO, AMD chipset, RAID and Ryzen AI NPU, every Intel device Intel lists (graphics, Wi-Fi, Bluetooth, network, NPU), the BIOS, and every driver Windows Update offers. Drivers install without their makers' extra apps | NVIDIA, AMD and Intel directly; Dell, HP, Lenovo and ASUS lists; Windows Update |
+| **Windows** | Security, monthly, .NET, Defender and optional updates, installed when you click Update. Feature upgrades open Windows Update | Windows Update |
 | **Everything else** | Any other program on the PC, for uninstalling and cleanup | Windows' list of installed programs |
 
 ## Install
