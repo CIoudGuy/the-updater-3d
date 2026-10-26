@@ -342,7 +342,7 @@ pub fn short_maker(m: &str) -> String {
 }
 
 fn base_entry(id: String, name: String, kind: String, maker: String, source: &str, version: String) -> DriverEntry {
-    DriverEntry { id, name, kind, maker, source: source.into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None }
+    DriverEntry { id, name, kind, maker, source: source.into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None }
 }
 
 /// NVIDIA's answer for one card: its matching id, product id ("" when NVIDIA does not list it)
@@ -368,6 +368,10 @@ pub struct Inputs<'a> {
     pub pre: Option<&'a std::collections::BTreeMap<String, bool>>,
     /// NVIDIA's beta drivers: product id and its newest beta
     pub nvidia_beta: &'a [(String, super::nvidia::Release)],
+    /// The user's choice of Studio drivers (entry id -> follows Studio instead of Game Ready)
+    pub studio: Option<&'a std::collections::BTreeMap<String, bool>>,
+    /// NVIDIA's Studio drivers: product id and its newest Studio driver
+    pub nvidia_studio: &'a [(String, super::nvidia::Release)],
 }
 
 /// Intel's driver for a device listed under `id`, and whether that entry follows Intel's betas:
@@ -415,8 +419,18 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
             let beta = inp.nvidia_beta.iter().find(|(f, _)| !pfid.is_empty() && *f == pfid).map(|(_, b)| b.clone()).filter(|b| rel.as_ref().is_none_or(|r| super::update_offered(&b.version, &r.version, false)));
             let follows = (beta.is_some() || choice == Some(true)).then(|| choice.unwrap_or(false));
             let rel = if choice == Some(true) { beta.or(rel) } else { rel };
+            // Studio: the choice is there while NVIDIA has a Studio driver for the card. A card
+            // that follows it is offered the newest Studio driver (older than the Game Ready one
+            // at times; offered only when newer than the installed driver, never as a downgrade)
+            // and has no beta; when that driver cannot be had, nothing is offered rather than
+            // the Game Ready one.
+            let studio_driver = inp.nvidia_studio.iter().find(|(f, _)| !pfid.is_empty() && *f == pfid).map(|(_, s)| s.clone());
+            let studio_on = inp.studio.and_then(|m| m.get(&id).copied()) == Some(true);
+            let studio = (studio_driver.is_some() || studio_on).then_some(studio_on);
+            let (rel, follows) = if studio_on { (studio_driver, None) } else { (rel, follows) };
             let mut e = base_entry(id, p.desc.clone(), "Graphics".into(), "NVIDIA".into(), "nvidia", have.clone());
             e.pre_channel = follows;
+            e.studio = studio;
             let how = match rel {
                 Some(r) => {
                     e.latest = Some(r.version.clone());
@@ -431,7 +445,7 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
                 }
                 None => {
                     e.status = AppStatus::Unknown;
-                    e.note = Some(if pfid.is_empty() { "NVIDIA does not list this card".into() } else { "Could not reach NVIDIA".into() });
+                    e.note = Some(if pfid.is_empty() { "NVIDIA does not list this card".into() } else if studio_on { "Could not get NVIDIA's Studio driver".into() } else { "Could not reach NVIDIA".into() });
                     None
                 }
             };

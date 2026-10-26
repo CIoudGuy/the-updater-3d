@@ -1125,6 +1125,7 @@ impl Core {
                 manual_url: gh_feed.filter(|_| has_update).and_then(|f| ghapps::manual_page(i, f, pre.get(&i.id).copied())),
                 github: gh_feed.and_then(|f| f.get(&i.id)).map(|(t, _)| t.repo.clone()),
                 is_self: false,
+                studio: None,
                 pre_channel: {
                     let choice = pre.get(&i.id).copied();
                     match i.source {
@@ -1237,13 +1238,13 @@ impl Core {
             let asks = gpus.iter().map(|(matching, desc)| {
                 let pfid = sources::nvidia::product_id(desc, &products).unwrap_or_default();
                 async move {
-                    let (rel, beta) = if pfid.is_empty() {
-                        (None, None)
+                    let (rel, beta, studio) = if pfid.is_empty() {
+                        (None, None, None)
                     } else {
-                        let (rel, beta) = tokio::join!(sources::nvidia::latest(&pfid), sources::nvidia::latest_beta(&pfid));
-                        (rel.map_err(|e| log::warn!("nvidia lookup {desc}: {e:#}")).ok(), beta)
+                        let (rel, beta, studio) = tokio::join!(sources::nvidia::latest(&pfid), sources::nvidia::latest_beta(&pfid), sources::nvidia::latest_studio(&pfid));
+                        (rel.map_err(|e| log::warn!("nvidia lookup {desc}: {e:#}")).ok(), beta, studio)
                     };
-                    ((matching.clone(), pfid.clone(), rel), beta.map(|b| (pfid, b)))
+                    ((matching.clone(), pfid.clone(), rel), beta.map(|b| (pfid.clone(), b)), studio.map(|s| (pfid, s)))
                 }
             });
             anyhow::Ok(futures_util::future::join_all(asks).await)
@@ -1275,8 +1276,12 @@ impl Core {
             warn("nvidia", e);
             vec![]
         });
-        let (nv, nv_beta): (Vec<drivers::NvidiaAnswer>, Vec<Option<(String, sources::nvidia::Release)>>) = nv.into_iter().unzip();
-        let nv_beta: Vec<(String, sources::nvidia::Release)> = nv_beta.into_iter().flatten().collect();
+        let (nv, nv_beta, nv_studio): (Vec<drivers::NvidiaAnswer>, Vec<_>, Vec<_>) = nv.into_iter().fold((vec![], vec![], vec![]), |(mut a, mut b, mut c), (x, y, z)| {
+            a.push(x);
+            b.extend(y);
+            c.extend(z);
+            (a, b, c)
+        });
         let amd = amd.unwrap_or_else(|e| {
             warn("amd", e);
             None
@@ -1295,6 +1300,7 @@ impl Core {
         };
         let maker_name = bios.as_ref().and_then(|b| b.maker).map(|m| m.name()).unwrap_or_default();
         let pre = self.settings.read().pre_releases.clone();
+        let studio = self.settings.read().driver_studio.clone();
         let inputs = |wu: Option<&drivers::Feed>| {
             drivers::collect(&drivers::Inputs {
                 wu,
@@ -1309,6 +1315,8 @@ impl Core {
                 windows11: win11,
                 pre: Some(&pre),
                 nvidia_beta: &nv_beta,
+                studio: Some(&studio),
+                nvidia_studio: &nv_studio,
             })
         };
         // The makers answered: show that now, with Windows Update's last answer.
@@ -4323,6 +4331,11 @@ impl Core {
             let changed: Vec<String> = new.pre_releases.keys().chain(old.pre_releases.keys()).filter(|k| new.pre_releases.get(*k) != old.pre_releases.get(*k)).cloned().collect();
             self.pre_releases_changed(changed);
         }
+        // The user chose Game Ready or Studio for a card: the driver check picks its driver again.
+        if new.driver_studio != old.driver_studio {
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move { me.check_drivers().await });
+        }
         let rescan = new.sources.adobe != old.sources.adobe
             || new.sources.craft != old.sources.craft
             || new.sources.blender != old.sources.blender
@@ -4884,6 +4897,7 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         github: None,
         is_self: false,
         pre_channel: e.pre_channel,
+        studio: e.studio,
         channel: None,
         note: e.note.clone(),
         job_id,
@@ -5043,7 +5057,7 @@ mod tests {
     #[test]
     fn the_apps_own_entry_shows_its_own_update_and_is_never_a_job() {
         use crate::model::{AppStatus, DriverEntry, Source};
-        let d = DriverEntry { id: "prog:hkcu:the updater 3d".into(), name: "The Updater 3D".into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.2.0".into(), latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: Some("Mega Limited".into()), notes: vec![], pre_channel: None };
+        let d = DriverEntry { id: "prog:hkcu:the updater 3d".into(), name: "The Updater 3D".into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.2.0".into(), latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: Some("Mega Limited".into()), notes: vec![], pre_channel: None, studio: None };
         let mut a = super::driver_app(&d, AppStatus::Current, false, None, None);
         a.source = Source::Programs;
         a.manual_url = None;
@@ -5422,7 +5436,7 @@ mod job_fix_tests {
 
     #[test]
     fn an_app_set_to_dont_update_shows_no_update() {
-        let d = crate::model::DriverEntry { id: "other:7zip.7zip".into(), name: "7-Zip".into(), kind: "x".into(), maker: "x".into(), source: "x".into(), version: "24.0".into(), latest: Some("25.0".into()), status: crate::model::AppStatus::Update, size: Some(1), date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None };
+        let d = crate::model::DriverEntry { id: "other:7zip.7zip".into(), name: "7-Zip".into(), kind: "x".into(), maker: "x".into(), source: "x".into(), version: "24.0".into(), latest: Some("25.0".into()), status: crate::model::AppStatus::Update, size: Some(1), date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None };
         let mut apps = vec![super::driver_app(&d, crate::model::AppStatus::Update, true, None, None), super::driver_app(&crate::model::DriverEntry { id: "other:vlc".into(), ..d.clone() }, crate::model::AppStatus::Update, true, None, None)];
         skip_ignored(&mut apps, &["other:7zip.7zip".to_string()].into_iter().collect());
         assert_eq!((apps[0].status, apps[0].update_size, apps[0].latest.as_deref()), (crate::model::AppStatus::Current, None, Some("25.0")));

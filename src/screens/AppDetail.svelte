@@ -59,6 +59,16 @@
     if (!app) return;
     store.patchSettings({ preReleases: { ...(store.settings.preReleases ?? {}), [app.id]: v === "pre" } });
   }
+  /** Game Ready or Studio driver: shown for an NVIDIA card that has a Studio driver */
+  const studioOn = $derived(app?.studio ?? null);
+  const studioOpts = [
+    { value: "gr", label: "Game Ready" },
+    { value: "studio", label: "Studio" },
+  ];
+  function setStudio(v: string) {
+    if (!app) return;
+    store.patchSettings({ driverStudio: { ...(store.settings.driverStudio ?? {}), [app.id]: v === "studio" } });
+  }
   let reqSeq = 0;
   function loadVersions(aid: string) {
     const seq = ++reqSeq;
@@ -295,6 +305,12 @@
         <div class="blk">
           <span class="lbl" id="pre-lbl">Updates</span>
           <Segmented options={preOpts} value={preOn ? "pre" : "stable"} onchange={setPre} label="Stable or pre-release updates" />
+        </div>
+        {/if}
+        {#if isDriver && studioOn !== null}
+        <div class="blk">
+          <span class="lbl" id="studio-lbl">Driver</span>
+          <Segmented options={studioOpts} value={studioOn ? "studio" : "gr"} onchange={setStudio} label="Game Ready or Studio driver" />
         </div>
         {/if}
         {#if app.source === "other" && !app.isSelf}<OtherBuilds id={app.id} />{/if}

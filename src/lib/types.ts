@@ -59,6 +59,8 @@ export interface AppEntry {
   isSelf?: boolean;
   /** The app publishes pre-releases the user can choose for it: whether it follows them now. Null when there is nothing to choose (an Other app: until its version list shows pre-releases). */
   preChannel?: boolean | null;
+  /** An NVIDIA card with a Studio driver to choose: whether it follows Studio (true) or Game Ready (false). Null for everything else. */
+  studio?: boolean | null;
   /** Blender only: "stable" | "lts" | "beta". */
   channel: string | null;
   /** Human note shown under the version, e.g. "Installs next to 5.2, your 5.2 stays". */
@@ -300,6 +302,8 @@ export interface Settings {
   installRoot?: string;
   /** Apps the user chose updates for: true gets their pre-releases (betas, release candidates), false only final versions */
   preReleases?: Record<string, boolean>;
+  /** NVIDIA cards the user chose the Studio driver for (driver id to true); the others get Game Ready */
+  driverStudio?: Record<string, boolean>;
   /** "beta" (default) also lists Blender alpha, beta and release candidate builds; "stable" hides them */
   blenderChannel: "stable" | "beta";
   /** Bug-fix releases (5.2.2 -> 5.2.3) keep the old copy instead of replacing it */

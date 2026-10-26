@@ -111,6 +111,46 @@ fn an_nvidia_card_follows_nvidias_beta_drivers_only_when_chosen() {
 }
 
 #[test]
+fn an_nvidia_card_follows_studio_only_when_chosen_and_is_never_offered_a_downgrade() {
+    let release = |v: &str, name: &str| crate::sources::nvidia::Release { version: v.into(), url: format!("https://us.download.nvidia.com/Windows/{v}/{v}-desktop-win10-win11-64bit-international-dch-whql.exe"), name: name.into(), ..Default::default() };
+    let gr = release("621.01", "GeForce Game Ready Driver");
+    let studio = release("617.42", "NVIDIA Studio Driver");
+    let beta = crate::sources::nvidia::Release { beta: true, ..release("622.07", "GeForce Game Ready Driver") };
+    let id = "driver:nvidia:1022".to_string();
+    let nv = vec![("PCI\\VEN_10DE&DEV_2786".to_string(), "1022".to_string(), Some(gr.clone()))];
+    let (studios, betas) = (vec![("1022".to_string(), studio.clone())], vec![("1022".to_string(), beta)]);
+    let studio_choice: std::collections::BTreeMap<String, bool> = [(id.clone(), true)].into();
+    let on = |cards: &[Present], choice: Option<&std::collections::BTreeMap<String, bool>>, beta: &[(String, crate::sources::nvidia::Release)]| {
+        let inp = Inputs { nvidia: &nv, nvidia_studio: &studios, nvidia_beta: beta, studio: choice, ..with(None, cards) };
+        collect(&inp).remove(0)
+    };
+    let old = vec![gpu("PCI\\VEN_10DE&DEV_2786", "NVIDIA GeForce RTX 4070", "32.0.16.1042")];
+    // Game Ready by default, and the choice is there because NVIDIA has a Studio driver.
+    let f = on(&old, None, &[]);
+    assert_eq!((f.entry.latest.as_deref(), f.entry.studio, f.how), (Some("621.01"), Some(false), Some(How::Nvidia(gr.clone()))));
+    // Studio chosen: the newest Studio driver, although Game Ready is newer.
+    let f = on(&old, Some(&studio_choice), &[]);
+    assert_eq!((f.entry.latest.as_deref(), f.entry.studio, f.entry.status), (Some("617.42"), Some(true), AppStatus::Update));
+    assert_eq!(f.how, Some(How::Nvidia(studio.clone())));
+    assert_eq!(f.entry.note.as_deref(), Some("NVIDIA Studio Driver from NVIDIA"));
+    // Studio has no beta: no beta choice, and a beta never replaces the Studio driver.
+    let f = on(&old, Some(&studio_choice), &betas);
+    assert_eq!((f.entry.latest.as_deref(), f.entry.pre_channel), (Some("617.42"), None));
+    // A card on Game Ready 621.01 that follows Studio (617.42) is not offered a downgrade.
+    let current = vec![gpu("PCI\\VEN_10DE&DEV_2786", "NVIDIA GeForce RTX 4070", "32.0.16.2101")];
+    let f = on(&current, Some(&studio_choice), &[]);
+    assert_eq!((f.entry.status, f.how), (AppStatus::Current, None));
+    // Studio chosen but not obtainable: nothing is offered, not the Game Ready driver.
+    let none: Vec<(String, crate::sources::nvidia::Release)> = vec![];
+    let inp = Inputs { nvidia: &nv, nvidia_studio: &none, studio: Some(&studio_choice), ..with(None, &old) };
+    let f = collect(&inp).remove(0);
+    assert_eq!((f.entry.status, f.entry.studio, f.how), (AppStatus::Unknown, Some(true), None));
+    // A card without a Studio driver has no choice to show.
+    let inp = Inputs { nvidia: &nv, ..with(None, &old) };
+    assert_eq!(collect(&inp).remove(0).entry.studio, None);
+}
+
+#[test]
 fn nvidias_beta_flag_is_read_from_its_answer() {
     let answer = r#"{"Success":"1","IDS":[{"downloadInfo":{"Success":"1","Version":"622.07","Name":"GeForce%20Game%20Ready%20Driver","IsBeta":"1","IsWHQL":"0","DownloadURL":"https://us.download.nvidia.com/Windows/622.07/622.07-desktop-win10-win11-64bit-international-dch-whql.exe","ReleaseDateTime":"Wed Oct 28, 2026"}}]}"#;
     assert!(crate::sources::nvidia::parse_lookup(answer).unwrap().beta);
