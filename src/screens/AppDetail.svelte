@@ -22,7 +22,7 @@
   import { router } from "../lib/router.svelte";
   import { askUninstall, installVersion, modalOpen, openApp, openStorePage, repairApp, setIgnored, showInFolder, updateOne } from "../lib/actions";
   import { tryLoad } from "../lib/load";
-  import { aboutLine, listedOnly } from "../lib/view";
+  import { aboutLine, isWindows, listedOnly } from "../lib/view";
   import { bytes, cmpVersion, dateLong, dateShort, preParts, splitVersion } from "../lib/format";
   import { canCancel, canPause, cancelTip, jobStatus, pauseTip, pct } from "../lib/jobs";
   import { enter, reduced, rise } from "../lib/motion";
@@ -40,6 +40,8 @@
   const isAdobe = $derived(app?.source === "adobe");
   /** a device driver, the chipset or the BIOS: installs only its newest version, never rolls back */
   const isDriver = $derived(app?.source === "drivers");
+  /** One of Windows' own updates, or the "Windows Update" entry */
+  const isWin = $derived(!!app && isWindows(app));
   /** its updates are turned off ("Don't update") */
   const ignored = $derived(!!app && isIgnored(app.id));
   /** FreeCAD, Godot and Unity install each version next to the others (ids "tools:godot:4.7.2"); OBS Studio and Krita update in place. */
@@ -161,7 +163,7 @@
   const statusLine = $derived.by(() => {
     if (!app) return "";
     if (listedOnly(app) && !job) return app.status === "missing" ? "Uninstaller missing" : "Installed";
-    if (isDriver && !job && app.status === "update" && app.manualUrl) return `${app.latest} available from its maker`;
+    if (isDriver && !job && app.status === "update" && app.manualUrl) return isWin ? "Install it from Windows Update" : `${app.latest} available from its maker`;
     if (!job && ignored) return app.latest && cmpVersion(app.latest, app.version) > 0 ? `Updates off, ${app.latest} is out` : "Updates off";
     switch (app.status) {
       case "update":
@@ -217,10 +219,10 @@
               <Btn variant="secondary" title="Show and install its updates again" onclick={() => setIgnored(app.id, false)}>Turn updates on</Btn>
             {/if}
             {#if isDriver && store.status.restartNeeded}
-              <Btn variant="secondary" title="Restart the PC in a minute to finish installing drivers" onclick={() => send("restart_pc", {})}>Restart PC</Btn>
+              <Btn variant="secondary" title="Restart the PC in a minute to finish installing {isWin ? 'updates' : 'drivers'}" onclick={() => send("restart_pc", {})}>Restart PC</Btn>
             {/if}
             {#if app.manualUrl}
-              <Btn variant={app.status === "update" ? "primary" : "secondary"} title="Open {app.manualUrl}" onclick={() => send("open_driver_page", { id: app.id })}>{app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : `Get ${app.latest}`) : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
+              <Btn variant={app.status === "update" ? "primary" : "secondary"} title={isWin ? "Open Windows Update in Settings" : `Open ${app.manualUrl}`} onclick={() => send("open_driver_page", { id: app.id })}>{isWin ? "Open Windows Update" : app.status === "update" ? (app.id === "driver:bios" ? "Download from maker" : `Get ${app.latest}`) : app.github ? "Release page" : "Maker's page"} <Icon d={I.external} size={14} width={2.5} /></Btn>
             {:else if app.status === "update"}
               <Btn variant="primary" hint="U" title="Update to {app.latest}  U" onclick={() => updateOne(app.id)}>Update to {app.latest}</Btn>
             {:else if app.status === "missing" && canRepair(app)}
@@ -246,7 +248,10 @@
     <div class="cols">
       {#if listedOnly(app) || (isDriver && versions?.length === 1 && !versions[0].notes.length && !versions[0].notesUrl)}
       <section aria-label="About this program">
-        {#if isDriver}
+        {#if isWin}
+        <div class="sec-h"><span>{app.status === "update" ? "About this update" : "About Windows Update"}</span></div>
+        <p class="gone">{app.status === "update" ? "Windows Update in Settings installs it." : "Windows installs its updates itself, on its own schedule. The ones it offers now are listed under Windows, to install one right away."}</p>
+        {:else if isDriver}
         <div class="sec-h"><span>About this driver</span></div>
         <p class="gone">{app.manualUrl ? "Its maker's page has the newest version, its changes and how to install it." : "Installed for a device in this PC. Windows Update and the makers are asked for a newer one with every check."}</p>
         {:else}

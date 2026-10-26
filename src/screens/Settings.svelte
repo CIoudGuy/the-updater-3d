@@ -275,7 +275,7 @@
           <SRow label="Other apps" desc="Every other app on this PC, from winget.">
             {#snippet control()}<Toggle checked={s.sources.other} label="Other apps from the winget catalog" onchange={(v) => store.patchSettings({ sources: { ...s.sources, other: v } })} />{/snippet}
           </SRow>
-          <SRow label="Drivers" desc="Graphics, network, audio and chipset drivers, and your BIOS (never flashed here).">
+          <SRow label="Drivers" desc="Graphics, network, audio and chipset drivers, your BIOS (never flashed here), and the updates Windows Update offers.">
             {#snippet control()}<Toggle checked={s.sources.drivers !== false} label="Drivers" onchange={(v) => store.patchSettings({ sources: { ...s.sources, drivers: v } })} />{/snippet}
           </SRow>
           <SRow label="Show installed apps in Get apps" desc="Also list apps you already have." id="show-installed">

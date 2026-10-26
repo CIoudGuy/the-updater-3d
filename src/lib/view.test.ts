@@ -1,7 +1,14 @@
 // node --test src/lib/view.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, aboutLine, isEmptyLibrary, latestColumn, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
+import { allSourcesOff, failedCount, failedSentence, groupOrAll, installedNone, aboutLine, isEmptyLibrary, isWindows, latestColumn, listedOnly, lowDiskWords, splitMissing, timeLeft } from "./view.ts";
+
+test("Windows' own updates are told apart from the drivers they are listed with", () => {
+  assert.equal(isWindows({ source: "drivers", id: "driver:win:status" }), true);
+  assert.equal(isWindows({ source: "drivers", id: "driver:win:0b5a4a1e-1111-4c2d-9e3f-0123456789a0" }), true);
+  assert.equal(isWindows({ source: "drivers", id: "driver:nvidia:1022" }), false);
+  assert.equal(isWindows({ source: "other", id: "driver:win:status" }), false);
+});
 
 test("a source filter whose last app is gone falls back to all", () => {
   assert.equal(groupOrAll("Blender", ["Adobe", "Craft apps"]), "all");

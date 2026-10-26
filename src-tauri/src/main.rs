@@ -11,6 +11,10 @@ fn main() {
     if args.iter().any(|a| a == updater_lib::sources::drivers::INSTALL_FLAG) {
         std::process::exit(updater_lib::sources::drivers::install_main(&args));
     }
+    // ...and as the elevated installer of Windows' own updates.
+    if args.iter().any(|a| a == updater_lib::sources::winupdate::INSTALL_FLAG) {
+        std::process::exit(updater_lib::sources::winupdate::install_main(&args));
+    }
     // ...and as a one-page render check (`--render-page <url> <out file>`).
     if args.iter().any(|a| a == "--render-page") {
         std::process::exit(updater_lib::render::render_main(&args));

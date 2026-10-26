@@ -535,6 +535,8 @@ fn watch_spec(step: &sources::Step, base: String, files: Option<usize>, before: 
                     Some((l.clone(), LogKind::Msi))
                 } else if args.contains(&format!("/LOG={}", l.display())) {
                     Some((l.clone(), LogKind::Inno))
+                } else if args.iter().any(|a| a == sources::winupdate::INSTALL_FLAG) {
+                    Some((l.clone(), LogKind::WindowsUpdate))
                 } else {
                     None
                 }
@@ -1226,6 +1228,8 @@ impl Core {
         }
         let t0 = Instant::now();
         let wu_task = tauri::async_runtime::spawn(drivers::fetch());
+        // Windows' own updates, asked at the same time (listed under Windows).
+        let win_task = tauri::async_runtime::spawn(sources::winupdate::check());
         let (present, board, chipset_have) = tauri::async_runtime::spawn_blocking(|| (drivers::present(), board::read(), chipset::installed())).await.unwrap_or_default();
         let win11 = drivers::windows_11();
         let gpus: Vec<(String, String)> = present.iter().filter(|p| sources::nvidia::is_gpu(p)).map(|p| (p.matching_id.clone(), p.desc.clone())).collect();
@@ -1341,8 +1345,12 @@ impl Core {
             })
         };
         // The makers answered: show that now, with Windows Update's last answer.
-        let before = self.drivers.lock().wu.clone();
-        let first = inputs(before.as_ref());
+        let (before, win_before): (_, Vec<drivers::Found>) = {
+            let d = self.drivers.lock();
+            (d.wu.clone(), d.found.iter().filter(|f| sources::winupdate::is_windows(&f.entry.id)).cloned().collect())
+        };
+        let mut first = inputs(before.as_ref());
+        first.extend(win_before);
         log::info!("timing: drivers from the makers in {} ms", t0.elapsed().as_millis());
         self.drivers.lock().found = first;
         self.emit_apps();
@@ -1358,7 +1366,8 @@ impl Core {
                 None
             }
         };
-        let found = inputs(wu.as_ref());
+        let mut found = inputs(wu.as_ref());
+        found.extend(win_task.await.unwrap_or_default());
         log::info!("timing: driver check found {} drivers in {} ms", found.len(), t0.elapsed().as_millis());
         let saved = {
             let mut d = self.drivers.lock();
@@ -1380,6 +1389,10 @@ impl Core {
         let d = self.drivers.lock();
         let Some(f) = d.found.iter().find(|f| f.entry.id == id) else { return vec![] };
         let e = &f.entry;
+        // A Windows update is not installed: its one version is the one offered.
+        if sources::winupdate::is_windows(&e.id) && e.status == AppStatus::Update {
+            return vec![VersionInfo { version: e.latest.clone().unwrap_or_default(), date: e.date.clone(), notes: e.notes.clone(), notes_url: e.notes_url.clone(), size: e.size, installed: false, latest: true, prerelease: false }];
+        }
         let newest = e.latest.clone().filter(|l| l != &e.version);
         let mut out = Vec::new();
         if let Some(l) = newest {
@@ -1409,7 +1422,7 @@ impl Core {
             let pre = self.settings.read().pre_releases.get(id).copied();
             return ghapps::manual_page(&inst, &feed, pre).filter(|u| drivers::host_is(u, &["github.com"]));
         }
-        self.drivers.lock().found.iter().find(|f| f.entry.id == id).and_then(|f| drivers::safe_link(f.entry.vendor_url.clone()))
+        self.drivers.lock().found.iter().find(|f| f.entry.id == id).and_then(|f| sources::winupdate::page_link(f.entry.vendor_url.clone()))
     }
 
     /// A driver job finished: show the new version until the next check, and ask for a restart
@@ -1433,7 +1446,8 @@ impl Core {
             let first = !self.status().restart_needed;
             self.set_status(|s| s.restart_needed = true);
             if first {
-                self.notify("Restart to finish installing drivers", "Open The Updater 3D to restart now, or restart later yourself.", Target::Home);
+                let what = if sources::winupdate::is_windows(id) { "updates" } else { "drivers" };
+                self.notify(&format!("Restart to finish installing {what}"), "Open The Updater 3D to restart now, or restart later yourself.", Target::Home);
             }
         }
         self.emit_apps();
@@ -2013,9 +2027,7 @@ impl Core {
             }
         };
         let mut queued = 0;
-        // Drivers ask for admin rights and some restart the screen; a game or a release that
-        // only downloads from its page is updated there.
-        for a in apps.iter().filter(|a| a.status == AppStatus::Update && a.source != Source::Drivers && a.manual_url.is_none()) {
+        for a in apps.iter().filter(|a| auto_installs(a)) {
             if auto_mode_of(&s, &a.id) != AutoMode::Install || a.running {
                 continue;
             }
@@ -4937,10 +4949,18 @@ fn skip_ignored(apps: &mut [AppEntry], ignored: &std::collections::BTreeSet<Stri
     }
 }
 
+/// What automatic mode installs by itself. Not drivers: they ask for admin rights and some
+/// restart the screen. Never Windows' own updates: Windows installs them itself, on its own
+/// schedule. A game or a release that only downloads from its page is updated there.
+fn auto_installs(a: &AppEntry) -> bool {
+    a.status == AppStatus::Update && a.source != Source::Drivers && sources::winupdate::auto_installs(&a.id) && a.manual_url.is_none()
+}
+
 /// A driver as the apps list shows it. `installable`: its update installs here.
 fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at: Option<String>, job_id: Option<String>) -> AppEntry {
     let (fg, bg) = driver_colors(&e.maker);
     let manual = status == AppStatus::Update && !installable;
+    let windows = sources::winupdate::is_windows(&e.id);
     AppEntry {
         id: e.id.clone(),
         source: Source::Drivers,
@@ -4957,14 +4977,14 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         size_on_disk: None,
         install_dir: None,
         updated_at,
-        tagline: Some(if e.kind == "BIOS" || e.kind == "Chipset" { format!("{} from {}", e.kind, e.maker) } else { format!("{} driver from {}", e.kind, e.maker) }),
-        group: Source::Drivers.group().into(),
+        tagline: Some(if windows { e.kind.clone() } else if e.kind == "BIOS" || e.kind == "Chipset" { format!("{} from {}", e.kind, e.maker) } else { format!("{} driver from {}", e.kind, e.maker) }),
+        group: if windows { sources::winupdate::GROUP.into() } else { Source::Drivers.group().into() },
         running: false,
         can_uninstall: false,
         can_rollback: false,
         read_only: false,
         store_url: None,
-        manual_url: if manual || !installable { drivers::safe_link(e.vendor_url.clone()) } else { None },
+        manual_url: if manual || !installable { sources::winupdate::page_link(e.vendor_url.clone()) } else { None },
         github: None,
         is_self: false,
         pre_channel: e.pre_channel,
@@ -4985,6 +5005,7 @@ fn driver_code(maker: &str) -> &'static str {
         m if m.starts_with("gigabyte") => "GB",
         m if m.starts_with("mediatek") => "MT",
         m if m.starts_with("qualcomm") => "Qc",
+        m if m.starts_with("microsoft") => "Win",
         _ => "Dr",
     }
 }
@@ -4995,6 +5016,7 @@ fn driver_colors(maker: &str) -> (&'static str, &'static str) {
         m if m.starts_with("nvidia") => ("#FFFFFF", "#4E7A00"),
         m if m.starts_with("amd") || m.starts_with("advanced micro") => ("#FFFFFF", "#9E1B1B"),
         m if m.starts_with("intel") => ("#FFFFFF", "#0B5CAD"),
+        m if m.starts_with("microsoft") => ("#FFFFFF", "#0067B8"),
         _ => ("#EDEDED", "#3A4A5C"),
     }
 }
@@ -5952,5 +5974,45 @@ mod icon_miss_tests {
         assert!(icon_is_small(std::path::Path::new("C:/x/other-a.b.svg")));
         assert!(!icon_is_small(std::path::Path::new("C:/x/other-a.b.png")));
         assert!(!icon_is_small(std::path::Path::new("C:/x/other-a.b.ico")));
+    }
+}
+
+#[cfg(test)]
+mod windows_update_tests {
+    use super::{auto_installs, driver_app};
+    use crate::model::{AppStatus, Source};
+    use crate::sources::winupdate::{self, Feed, Inputs, Offer};
+
+    fn listed(titles: &[&str]) -> Vec<crate::sources::drivers::Found> {
+        let offers = titles.iter().enumerate().map(|(i, t)| Offer { update_id: format!("0b5a4a1e-1111-4c2d-9e3f-0123456789a{i}"), title: t.to_string(), ..Default::default() }).collect();
+        let feed = Feed { offers };
+        winupdate::collect(&Inputs { answer: Ok(&feed), policy: &Default::default(), restart: false, os: &Default::default(), today: chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap() })
+    }
+
+    /// Windows installs its own updates on its own schedule: automatic mode leaves them alone.
+    #[test]
+    fn automatic_mode_never_installs_windows_updates() {
+        let found = listed(&["2026-10 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems (KB5000001)"]);
+        let f = &found[1];
+        assert!(f.how.is_some(), "it installs when the user clicks Update");
+        let mut a = driver_app(&f.entry, AppStatus::Update, true, None, None);
+        assert_eq!((a.group.as_str(), a.tagline.as_deref(), a.manual_url.as_deref()), ("Windows", Some("Cumulative update"), None));
+        assert!(!auto_installs(&a));
+        // Not even when it were listed as another source.
+        a.source = Source::Other;
+        assert!(!auto_installs(&a));
+        // An app's update in the same state is installed.
+        a.id = "other:videolan.vlc".into();
+        assert!(auto_installs(&a));
+    }
+
+    #[test]
+    fn feature_updates_and_the_windows_update_entry_open_settings() {
+        let found = listed(&["Feature update to Windows 11, version 25H2"]);
+        let status = driver_app(&found[0].entry, found[0].entry.status, found[0].how.is_some(), None, None);
+        assert_eq!((status.name.as_str(), status.group.as_str(), status.manual_url.as_deref()), ("Windows Update", "Windows", Some(winupdate::SETTINGS_URL)));
+        let feature = driver_app(&found[1].entry, AppStatus::Update, found[1].how.is_some(), None, None);
+        assert_eq!(feature.manual_url.as_deref(), Some(winupdate::SETTINGS_URL));
+        assert!(!auto_installs(&feature));
     }
 }

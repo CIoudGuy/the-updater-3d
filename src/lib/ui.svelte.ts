@@ -3,7 +3,7 @@ import type { AppEntry, CatalogEntry } from "./types";
 import type { BrowseState, OtherSort } from "./browse";
 import { focusAfterLeave } from "./keys";
 import { store } from "./store.svelte";
-import { listedOnly } from "./view";
+import { isWindows, listedOnly } from "./view";
 
 export interface PopItem {
   id: string;
@@ -55,7 +55,7 @@ export type DialogState =
     };
 
 export type InstalledFilter = "updates" | "all" | "drivers" | "recent";
-export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Drivers" | "Other programs";
+export type InstalledGroup = "all" | "Adobe" | "Craft apps" | "Blender" | "More apps" | "Other apps" | "Drivers" | "Windows" | "Other programs";
 /** Installed: every program, or only the apps a catalog updates. */
 export type InstalledScope = "everything" | "catalog";
 export type SortKey = "name" | "size" | "updated" | "status";
@@ -189,7 +189,7 @@ export function menuItemsFor(app: AppEntry): PopItem[] {
   const skip: PopItem = isIgnored(app.id) ? { id: "unignore", label: "Show its updates again", icon: "play" } : { id: "ignore", label: "Don't update", icon: "pause" };
   if (app.source === "drivers") {
     items.push({ id: "notes", label: "Release notes", icon: "notes", key: "N" });
-    if (app.manualUrl) items.push({ id: "maker", label: "Open the maker's page", icon: "external" });
+    if (app.manualUrl) items.push({ id: "maker", label: isWindows(app) ? "Open Windows Update" : "Open the maker's page", icon: "external" });
     items.push(skip);
     return items;
   }

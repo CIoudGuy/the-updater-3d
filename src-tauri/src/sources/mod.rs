@@ -25,6 +25,7 @@ pub mod other;
 pub mod portable;
 pub mod tools;
 pub mod winget;
+pub mod winupdate;
 
 use crate::model::{JobKind, Source};
 use serde::{Deserialize, Serialize};

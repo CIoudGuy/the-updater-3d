@@ -7,7 +7,7 @@ import { statusLabel, store } from "./store.svelte";
 import type { AppEntry } from "./types";
 import { isIgnored, menuItemsFor, ui } from "./ui.svelte";
 import { runAppMenu } from "./actions";
-import { listedOnly } from "./view";
+import { isWindows, listedOnly } from "./view";
 
 export function openMenuFor(app: AppEntry, anchor: HTMLElement, at?: { x: number; y: number }) {
   const r = at ? new DOMRect(at.x, at.y, 0, 0) : anchor.getBoundingClientRect();
@@ -40,6 +40,8 @@ export function subline(app: AppEntry): string {
     case "blocked":
       return j?.step ?? "Close the app to continue";
     case "update":
+      // A Windows update shows its KB number as its version: its kind says more here.
+      if (isWindows(app)) return app.manualUrl ? "Install it from Settings" : (app.tagline ?? "Ready to install");
       return `${app.latest} available`;
     case "failed": {
       const f = store.failedJobs.find((x) => x.appId === app.id);

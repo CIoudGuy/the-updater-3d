@@ -4512,6 +4512,7 @@ dependencies = [
  "uuid",
  "webview2-com",
  "windows",
+ "windows-core",
  "winreg",
  "yaml-rust2",
  "zip",

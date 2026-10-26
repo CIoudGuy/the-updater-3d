@@ -541,6 +541,8 @@ pub fn usual_time(secs: f64, runs: u32) -> Option<String> {
 pub enum LogKind {
     Msi,
     Inno,
+    /// The progress file of a Windows update install (see `winupdate::ProgressLog`)
+    WindowsUpdate,
 }
 
 /// The folder a step changes.
@@ -576,6 +578,7 @@ pub struct Live {
 enum Parser {
     Msi(MsiLog),
     Inno(InnoLog),
+    WindowsUpdate(crate::sources::winupdate::ProgressLog),
 }
 
 impl Parser {
@@ -583,24 +586,28 @@ impl Parser {
         match k {
             LogKind::Msi => Parser::Msi(MsiLog::default()),
             LogKind::Inno => Parser::Inno(InnoLog::default()),
+            LogKind::WindowsUpdate => Parser::WindowsUpdate(Default::default()),
         }
     }
     fn feed(&mut self, l: &str) {
         match self {
             Parser::Msi(p) => p.feed(l),
             Parser::Inno(p) => p.feed(l),
+            Parser::WindowsUpdate(p) => p.feed(l),
         }
     }
     fn text(&self) -> Option<String> {
         match self {
             Parser::Msi(p) => p.text(),
             Parser::Inno(p) => p.text(),
+            Parser::WindowsUpdate(p) => p.text(),
         }
     }
     fn fraction(&self) -> Option<f64> {
         match self {
             Parser::Msi(p) => p.fraction(),
             Parser::Inno(_) => None,
+            Parser::WindowsUpdate(p) => p.fraction(),
         }
     }
 }
