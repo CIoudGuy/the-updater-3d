@@ -93,7 +93,7 @@ pub fn is_windows(id: &str) -> bool {
 
 /// A feature update: a new version of Windows. Only Settings installs those.
 pub fn is_upgrade(o: &Offer) -> bool {
-    static TITLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bfeature update to windows\b|\bupgrade to windows\b").unwrap());
+    static TITLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bfeature update to windows\b|\bupgrade to windows\b|^windows \d+, version \d\dh\d$").unwrap());
     o.classes.iter().any(|c| c == CLASS_UPGRADES) || TITLE.is_match(o.title.trim())
 }
 

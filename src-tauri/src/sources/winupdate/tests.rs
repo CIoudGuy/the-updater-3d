@@ -23,7 +23,9 @@ fn feature_updates_are_listed_but_never_installed_here() {
     let by_class = offer("Windows 11, version 25H2", &[CLASS_UPGRADES]);
     let by_title = offer("Feature update to Windows 11, version 25H2", &[]);
     let upgrade = offer("Upgrade to Windows 11 Pro", &[]);
-    for o in [&by_class, &by_title, &upgrade] {
+    // The name Settings shows it under, when Windows gives it no category.
+    let bare = offer("Windows 11, version 26H2", &[]);
+    for o in [&by_class, &by_title, &upgrade, &bare] {
         assert!(is_upgrade(o), "{}", o.title);
         assert!(listed(o));
         assert!(!installable(o));
