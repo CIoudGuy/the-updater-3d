@@ -98,7 +98,8 @@ pub fn maker_of(b: &Board) -> Option<Maker> {
     let sys = b.system_maker.to_ascii_lowercase();
     let board = b.maker.to_ascii_lowercase();
     let is = |s: &str, names: &[&str]| names.iter().any(|n| s.starts_with(n));
-    if is(&sys, &["dell"]) {
+    // Alienware PCs are Dell's, in Dell's catalog by their system id; older ones name Alienware.
+    if is(&sys, &["dell", "alienware"]) {
         return Some(Maker::Dell);
     }
     if is(&sys, &["hp", "hewlett-packard", "hewlett packard"]) {
@@ -363,6 +364,8 @@ mod tests {
         assert_eq!(maker_of(&board("ASRock", "B650M Pro RS", "3.10")), Some(Maker::Asrock));
         let dell = Board { maker: "Dell Inc.".into(), product: "0X8DXD".into(), system_maker: "Dell Inc.".into(), system_product: "XPS 15 9520".into(), system_sku: "0A1F".into(), ..Default::default() };
         assert_eq!((maker_of(&dell), dell.display_name().as_str()), (Some(Maker::Dell), "XPS 15 9520"));
+        let alienware = Board { maker: "Alienware".into(), product: "0J8H5R".into(), system_maker: "Alienware".into(), system_product: "Alienware Aurora R11".into(), system_sku: "0974".into(), ..Default::default() };
+        assert_eq!(maker_of(&alienware), Some(Maker::Dell));
         let lenovo = Board { maker: "LENOVO".into(), product: "21CBCTO1WW".into(), system_maker: "LENOVO".into(), system_product: "21CBCTO1WW".into(), system_family: "ThinkPad X1 Carbon Gen 10".into(), ..Default::default() };
         assert_eq!((maker_of(&lenovo), lenovo.display_name().as_str()), (Some(Maker::Lenovo), "ThinkPad X1 Carbon Gen 10"));
         let hp = Board { maker: "HP".into(), product: "8A78".into(), system_maker: "HP".into(), system_product: "HP EliteBook 840 G9 Notebook PC".into(), ..Default::default() };

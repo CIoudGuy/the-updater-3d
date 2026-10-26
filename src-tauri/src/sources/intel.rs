@@ -88,6 +88,10 @@ pub struct Release {
     /// Intel marks it a beta
     #[serde(default)]
     pub beta: bool,
+    /// The package also installs an app of Intel's (Killer's suite installs the Killer app with
+    /// its drivers), which its installer only leaves out when "driver only" is picked in it.
+    #[serde(default)]
+    pub bundles_app: bool,
 }
 
 pub fn is_gpu(p: &Present) -> bool {
@@ -167,10 +171,11 @@ pub fn for_device_with(p: &Present, configs: &[Config], windows11: bool, categor
                 url: file.url.clone(),
                 size: file.size,
                 notes_url: super::drivers::safe_link(c.url.clone()),
-                args: c.install_options.as_deref().map(|o| o.split_whitespace().map(String::from).collect()).unwrap_or_default(),
+                args: install_args(c, comp),
                 silent: c.allow_silent_installation,
                 notes: super::drivers::html_notes(html),
                 beta: c.is_beta,
+                bundles_app: c.components.iter().any(|k| k.category.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("OtherDownloads"))),
             })
         })
         .max_by(|a, b| super::tools::cmp_ver(&a.version, &b.version))
@@ -184,6 +189,18 @@ fn driver_version(c: &Config, k: &Component) -> Option<String> {
         return None;
     }
     k.version.clone().or_else(|| c.version.as_deref().and_then(|v| v.split_whitespace().next()).map(String::from)).filter(|v| v.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+}
+
+/// The installer's arguments: Intel's own for the package, and for a graphics package
+/// `--noExtras`, which installs the driver alone. Without it Intel's graphics installer also puts
+/// on Intel Graphics Software, Intel Driver & Support Assistant, GameAssist and a usage report
+/// service (the package's "Resources\Extras"; the switch is in its installation readme).
+fn install_args(c: &Config, k: &Component) -> Vec<String> {
+    let mut args: Vec<String> = c.install_options.as_deref().map(|o| o.split_whitespace().map(String::from).collect()).unwrap_or_default();
+    if k.category.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("Graphics")) && !args.iter().any(|a| a.eq_ignore_ascii_case("--noExtras")) {
+        args.push("--noExtras".into());
+    }
+    args
 }
 
 /// `for_device` for graphics packages only.
@@ -276,7 +293,7 @@ mod tests {
         let list: Vec<Config> = serde_json::from_str(LIST).unwrap();
         let r = for_card(&card("PCI\\VEN_8086&DEV_56A0&SUBSYS_10208086"), &list, true).unwrap();
         assert_eq!((r.version.as_str(), r.name.as_str(), r.date.as_deref()), ("32.0.101.9150", "Intel Arc Graphics - Windows", Some("2026.10.02")));
-        assert_eq!((r.size, r.args.clone(), r.silent), (Some(904501568), vec!["--nouninstall".to_string()], false));
+        assert_eq!((r.size, r.args.clone(), r.silent), (Some(904501568), vec!["--nouninstall".to_string(), "--noExtras".to_string()], false));
         let igpu = for_card(&card("PCI\\VEN_8086&DEV_9A49"), &list, true).unwrap();
         assert_eq!(igpu.version, "32.0.101.7092");
         // Windows 10 has no file for the 11th-14th Gen package here.
@@ -302,6 +319,22 @@ mod tests {
         // Intel's apps are no device's driver.
         let only_app: Vec<Config> = list.into_iter().filter(|c| c.id == 739868).collect();
         assert!(for_device(&npu, &only_app, true, None).is_none());
+    }
+
+    #[test]
+    fn a_killer_card_is_told_that_its_package_also_installs_killers_app() {
+        // Intel's Killer suite as its data lists it: Killer's app next to the drivers.
+        let list: Vec<Config> = serde_json::from_str(r#"[
+          {"Id":927577,"Version":"50.26.820.2552","Name":"Intel® Killer™ Performance Suite","IsBeta":false,"AllowSilentInstallation":false,
+           "Files":[{"Url":"https://downloadmirror.intel.com/927577/KillerPerformanceSuite_50.26.820.2552_UWD_x64.exe","Size":182128120,"OperatingSystems":["windows-11-25h2-64"]}],
+           "Components":[{"Category":"OtherDownloads","Version":"50.26.820","DetectionValues":["VEN_8086&DEV_51F1&SUBSYS_*1A56"]},{"Category":"Wireless","Version":"24.70.0.3","DetectionValues":["VEN_8086&DEV_51F1&SUBSYS_*1A56"]}]}
+        ]"#).unwrap();
+        let killer = Present { matching_id: r"PCI\VEN_8086&DEV_51F1&SUBSYS_16721A56&REV_01".into(), class: "Net".into(), version: "23.30.0.6".into(), desc: "Killer(R) Wi-Fi 6E AX1675i 160MHz Wireless Network Adapter (211NGW)".into(), ..Default::default() };
+        let r = for_device(&killer, &list, true, None).expect("Killer's package");
+        assert_eq!(r.version, "24.70.0.3");
+        assert!(r.bundles_app);
+        // Not a graphics package: no graphics switch.
+        assert!(!r.args.iter().any(|a| a == "--noExtras"));
     }
 
     #[test]
@@ -340,7 +373,9 @@ mod tests {
         let plan = plan_install("driver:intel:x", "Intel Arc A770", &r).unwrap();
         assert_eq!((plan.downloads[0].signer.as_deref(), plan.downloads[0].size), (Some(SIGNER), Some(904501568)));
         let Step::Run { args, elevated, .. } = &plan.steps[0] else { panic!() };
-        assert!(*elevated && args == &vec!["--nouninstall".to_string()], "not silent: Intel does not allow it");
+        // The driver alone: not Intel Graphics Software, Intel Driver & Support Assistant and the
+        // rest of the package's extras. Not silent: Intel does not allow it.
+        assert!(*elevated && args == &vec!["--nouninstall".to_string(), "--noExtras".to_string()], "{args:?}");
         assert!(plan.steps[0].label().starts_with(crate::sources::WAITING_FOR_YOU));
     }
 
