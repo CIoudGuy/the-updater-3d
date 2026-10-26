@@ -747,6 +747,21 @@ fn an_installer_that_really_installs_per_user_updates_the_per_user_copy_once_lea
 }
 
 #[test]
+fn an_install_whose_version_the_catalog_writes_another_way_counts_as_done_and_is_learned() {
+    // Microsoft's OpenJDK 17: the catalog says 17.0.21.1021, Windows lists 17.0.21.21.
+    let x = Expect { app_id: "other:Microsoft.OpenJDK.17".into(), pkg: "Microsoft.OpenJDK.17".into(), pkg_version: "17.0.21.1021".into(), expected: "17.0.21.1021".into(), before: Some("17.0.20.101".into()), ..Default::default() };
+    let copy = |v: &str, rewritten: bool| PkgCopy { id: "other:Microsoft.OpenJDK.17".into(), scope: "machine", version: v.into(), rewritten };
+    assert_eq!(check_install(&x, &[copy("17.0.21.21", true)]), Check::Done { shows: Some("17.0.21.21".into()), scope: None });
+    // The old copy, untouched: not done. Another release: not done.
+    assert_eq!(check_install(&x, &[copy("17.0.20.101", false)]), Check::Shows("17.0.20.101".into()));
+    assert_eq!(check_install(&x, &[copy("17.0.22.5", true)]), Check::Done { shows: None, scope: None });
+    let older = Expect { before: Some("17.0.21.50".into()), ..x.clone() };
+    assert_eq!(check_install(&older, &[copy("17.0.21.21", true)]), Check::Shows("17.0.21.21".into()));
+    // What it showed is remembered: the next check does not offer the same update again.
+    assert!(at_version("17.0.21.21", "17.0.21.1021", None, Some("17.0.21.21")));
+}
+
+#[test]
 fn an_install_that_moved_the_app_or_shortened_its_version_counts_as_done_and_is_learned() {
     let x = Expect { app_id: "other:Mega.MEGASync".into(), pkg: "Mega.MEGASync".into(), pkg_version: "6.7.0.3".into(), expected: "6.7.0.3".into(), declared_scope: Some("machine".into()), before: Some("6.6.2".into()), ..Default::default() };
     let copy = |scope: &'static str, v: &str, rewritten: bool| PkgCopy { id: "other:Mega.MEGASync".into(), scope, version: v.into(), rewritten };

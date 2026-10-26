@@ -640,11 +640,32 @@ pub struct DriversState {
     last_check: Option<String>,
     /// Windows Update's last answer: shown again while it is asked anew (it is the slow one)
     wu: Option<drivers::Feed>,
+    /// Asked for while a check ran (the user chose Game Ready or Studio): one more check after it
+    again: bool,
+}
+
+impl DriversState {
+    /// Start a check. False while one runs: that one is then followed by another, so a change
+    /// asked for meanwhile is not lost.
+    fn begin(&mut self) -> bool {
+        if self.checking {
+            self.again = true;
+            return false;
+        }
+        self.checking = true;
+        true
+    }
+
+    /// End a check. True when another was asked for while it ran.
+    fn finish(&mut self) -> bool {
+        self.checking = false;
+        std::mem::take(&mut self.again)
+    }
 }
 
 impl From<drivers::Saved> for DriversState {
     fn from(s: drivers::Saved) -> Self {
-        DriversState { found: s.found, checking: false, last_check: s.last_check, wu: s.wu }
+        DriversState { found: s.found, checking: false, last_check: s.last_check, wu: s.wu, again: false }
     }
 }
 
@@ -1220,13 +1241,22 @@ impl Core {
         if !self.settings.read().sources.drivers {
             return;
         }
-        {
-            let mut d = self.drivers.lock();
-            if d.checking {
-                return;
-            }
-            d.checking = true;
+        if !self.drivers.lock().begin() {
+            return;
         }
+        // A choice made while a check runs (Game Ready or Studio) is checked right after it.
+        loop {
+            self.driver_pass().await;
+            let again = self.drivers.lock().finish();
+            if !again || !self.drivers.lock().begin() {
+                break;
+            }
+        }
+    }
+
+    /// One driver check: every source at the same time, the list shown as soon as the makers
+    /// answered (Windows Update, the slow one, follows).
+    async fn driver_pass(self: &Arc<Self>) {
         let t0 = Instant::now();
         let wu_task = tauri::async_runtime::spawn(drivers::fetch());
         // Windows' own updates, asked at the same time (listed under Windows).
@@ -1373,7 +1403,6 @@ impl Core {
         let saved = {
             let mut d = self.drivers.lock();
             d.found = found;
-            d.checking = false;
             d.last_check = Some(now());
             if wu.is_some() {
                 d.wu = wu;
@@ -5049,6 +5078,17 @@ fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u6
 #[cfg(test)]
 mod tests {
     use super::{update_notice, with_download_size};
+
+    #[test]
+    fn a_driver_check_asked_for_while_one_runs_follows_it() {
+        let mut d = super::DriversState::default();
+        assert!(d.begin());
+        // Game Ready chosen again while the check for Studio still runs.
+        assert!(!d.begin());
+        assert!(d.finish(), "the change is checked after all");
+        assert!(d.begin());
+        assert!(!d.finish());
+    }
 
     #[test]
     fn a_size_measured_from_a_folder_the_app_no_longer_has_is_not_shown() {

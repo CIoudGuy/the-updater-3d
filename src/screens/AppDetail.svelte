@@ -62,7 +62,8 @@
     store.patchSettings({ preReleases: { ...(store.settings.preReleases ?? {}), [app.id]: v === "pre" } });
   }
   /** Game Ready or Studio driver: shown for an NVIDIA card that has a Studio driver */
-  const studioOn = $derived(app?.studio ?? null);
+  // The choice shows at once; the driver check that follows it takes a while (Windows Update).
+  const studioOn = $derived(app?.studio == null ? null : (store.settings.driverStudio?.[app.id] ?? app.studio));
   const studioOpts = [
     { value: "gr", label: "Game Ready" },
     { value: "studio", label: "Studio" },

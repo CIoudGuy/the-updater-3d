@@ -1962,6 +1962,14 @@ pub fn at_version(shown: &str, expected: &str, range: Option<&(String, String)>,
     !version::newer(expected, shown) || range.is_some_and(|(lo, hi)| !version::newer(lo, shown) && !version::newer(shown, hi)) || learned.is_some_and(|l| version::cmp(l, shown).is_eq())
 }
 
+/// "17.0.21.21" for "17.0.21.1021": the same release (its first three numbers), the last part
+/// written another way than the catalog says.
+pub fn same_release(shown: &str, expected: &str) -> bool {
+    let (d, e) = (version::parts(shown), version::parts(expected));
+    let plain = |v: &str| v.trim().chars().next().is_some_and(|c| c.is_ascii_digit());
+    plain(shown) && plain(expected) && d.len() >= 3 && e.len() >= 3 && d[..3] == e[..3] && d != e
+}
+
 /// "6.7.0" for "6.7.0.3": the same version with its last parts left off, as some installers
 /// write it to the uninstall list.
 pub fn truncated(shown: &str, expected: &str) -> bool {
@@ -2114,7 +2122,11 @@ pub fn check_install(x: &Expect, copies: &[PkgCopy]) -> Check {
     });
     let Some(c) = found else { return Check::Missing };
     let at = at_version(&c.version, &x.expected, x.range.as_ref(), x.learned.as_deref());
-    let short = !at && truncated(&c.version, &x.expected) && (c.rewritten || x.before.as_deref().is_none_or(|b| b != c.version));
+    let changed = c.rewritten || x.before.as_deref().is_none_or(|b| b != c.version);
+    // The release the catalog names with another last part than the app writes (OpenJDK
+    // 17.0.21.1021 shows "17.0.21.21"), never older than the copy was.
+    let same = same_release(&c.version, &x.expected) && x.before.as_deref().is_none_or(|b| !version::newer(b, &c.version));
+    let short = !at && (truncated(&c.version, &x.expected) || same) && changed;
     if !at && !short {
         return Check::Shows(c.version.clone());
     }

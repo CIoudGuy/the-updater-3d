@@ -2,7 +2,7 @@
   "name": "the-updater-3d",
   "private": true,
   "license": "MIT",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
