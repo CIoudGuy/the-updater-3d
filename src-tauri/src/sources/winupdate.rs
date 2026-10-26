@@ -4,9 +4,9 @@
 //! says when Windows waits for a restart, is paused or is managed by an organization. One installs
 //! through the Windows Update Agent, by running this program again elevated
 //! (`--install-windows-update <update id> <progress file>`), like a Windows Update driver.
-//! Feature updates (a new Windows version) and updates that ask questions while they install are
-//! only listed: Settings > Windows Update installs them. Automatic mode never installs any of
-//! these: Windows installs them itself, on its own schedule.
+//! Feature updates (a new Windows version) install the same way. Updates that ask questions while
+//! they install are only listed: Settings > Windows Update installs them. Automatic mode never
+//! installs any of these: Windows installs them itself, on its own schedule.
 
 use super::drivers::{Found, How};
 use super::{Plan, Step, Verify};
@@ -91,7 +91,7 @@ pub fn is_windows(id: &str) -> bool {
     id.starts_with(ID_PREFIX)
 }
 
-/// A feature update: a new version of Windows. Only Settings installs those.
+/// A feature update: a new version of Windows.
 pub fn is_upgrade(o: &Offer) -> bool {
     static TITLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\bfeature update to windows\b|\bupgrade to windows\b|^windows \d+, version \d\dh\d$").unwrap());
     o.classes.iter().any(|c| c == CLASS_UPGRADES) || TITLE.is_match(o.title.trim())
@@ -103,10 +103,10 @@ pub fn listed(o: &Offer) -> bool {
     !o.driver && !o.classes.iter().any(|c| c == CLASS_DRIVERS) && is_update_id(&o.update_id)
 }
 
-/// Installed here: not a feature update, and Windows says it asks nothing while it installs.
-/// The others open Settings > Windows Update.
+/// Installed here: Windows says it asks nothing while it installs. The others open Settings >
+/// Windows Update.
 pub fn installable(o: &Offer) -> bool {
-    listed(o) && !is_upgrade(o) && !o.needs_input
+    listed(o) && !o.needs_input
 }
 
 /// Its license terms are accepted for the user only when it installs without asking anything.
@@ -292,10 +292,10 @@ fn offer_entry(o: &Offer, id: String) -> Found {
     e.notes_url = super::drivers::safe_link(o.support_url.clone()).filter(|u| super::drivers::host_is(u, &["microsoft.com"]));
     e.notes = [o.title.trim(), o.description.trim()].iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
     let installs = installable(o);
-    e.note = Some(if is_upgrade(o) {
-        "A new version of Windows. Install it from Windows Update in Settings.".into()
-    } else if !installs {
+    e.note = Some(if !installs {
         "It asks questions while it installs. Install it from Windows Update in Settings.".into()
+    } else if is_upgrade(o) {
+        "A new version of Windows. It downloads several GB, and a restart finishes it.".into()
     } else if o.optional {
         "Optional. Windows does not install it by itself. Some updates need a restart.".into()
     } else {
@@ -600,9 +600,6 @@ fn install(update_id: &str, log: Option<&std::path::Path>) -> Result<bool> {
             return Ok(false);
         }
         let o = offer_of(&update);
-        if is_upgrade(&o) {
-            return Err(anyhow!("Feature updates install from Windows Update in Settings."));
-        }
         if !installable(&o) {
             return Err(anyhow!("This update asks questions while it installs. Install it from Windows Update in Settings."));
         }

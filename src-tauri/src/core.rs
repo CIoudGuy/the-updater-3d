@@ -6069,12 +6069,12 @@ mod windows_update_tests {
     }
 
     #[test]
-    fn feature_updates_and_the_windows_update_entry_open_settings() {
+    fn feature_updates_install_here_and_the_windows_update_entry_opens_settings() {
         let found = listed(&["Feature update to Windows 11, version 25H2"]);
         let status = driver_app(&found[0].entry, found[0].entry.status, found[0].how.is_some(), None, None);
         assert_eq!((status.name.as_str(), status.group.as_str(), status.manual_url.as_deref()), ("Windows Update", "Windows", Some(winupdate::SETTINGS_URL)));
         let feature = driver_app(&found[1].entry, AppStatus::Update, found[1].how.is_some(), None, None);
-        assert_eq!(feature.manual_url.as_deref(), Some(winupdate::SETTINGS_URL));
+        assert_eq!(feature.manual_url, None);
         assert!(!auto_installs(&feature));
     }
 }

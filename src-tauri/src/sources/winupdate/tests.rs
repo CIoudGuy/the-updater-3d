@@ -19,7 +19,7 @@ fn check(answer: Result<&Feed, u32>, policy: &Policy, restart: bool) -> Vec<Foun
 }
 
 #[test]
-fn feature_updates_are_listed_but_never_installed_here() {
+fn feature_updates_install_here_like_the_others() {
     let by_class = offer("Windows 11, version 25H2", &[CLASS_UPGRADES]);
     let by_title = offer("Feature update to Windows 11, version 25H2", &[]);
     let upgrade = offer("Upgrade to Windows 11 Pro", &[]);
@@ -28,8 +28,8 @@ fn feature_updates_are_listed_but_never_installed_here() {
     for o in [&by_class, &by_title, &upgrade, &bare] {
         assert!(is_upgrade(o), "{}", o.title);
         assert!(listed(o));
-        assert!(!installable(o));
-        assert!(!may_accept_eula(o));
+        assert!(installable(o));
+        assert!(may_accept_eula(o));
         assert_eq!(kind(o), "Feature update");
     }
     // A cumulative update for a Windows version is not a feature update.
@@ -38,13 +38,17 @@ fn feature_updates_are_listed_but_never_installed_here() {
     assert!(installable(&lcu));
     let net = offer("2026-10 Cumulative Update for .NET Framework 3.5 and 4.8.1 for Windows 11, version 24H2 for x64 (KB5000002)", &[CLASS_SECURITY]);
     assert!(!is_upgrade(&net));
-    // Listed with a button to Settings > Windows Update, not with an install.
-    let f = check(Ok(&Feed { offers: vec![by_title] }), &Policy::default(), false);
+    // Installed with Update, like any other Windows update.
+    let f = check(Ok(&Feed { offers: vec![by_title.clone()] }), &Policy::default(), false);
     let e = &f[1];
-    assert!(e.how.is_none());
+    assert_eq!(e.how, Some(How::Windows { update_id: ID.into() }));
     assert_eq!(e.entry.status, AppStatus::Update);
-    assert_eq!(e.entry.vendor_url.as_deref(), Some(SETTINGS_URL));
-    assert_eq!(page_link(e.entry.vendor_url.clone()).as_deref(), Some(SETTINGS_URL));
+    assert_eq!(e.entry.vendor_url, None);
+    // One that would ask questions while it installs still opens Settings.
+    let asks = Offer { needs_input: true, ..by_title };
+    let f = check(Ok(&Feed { offers: vec![asks] }), &Policy::default(), false);
+    assert!(f[1].how.is_none());
+    assert_eq!(f[1].entry.vendor_url.as_deref(), Some(SETTINGS_URL));
 }
 
 #[test]
