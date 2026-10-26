@@ -156,3 +156,9 @@ fn get_apps_counts_an_app_from_another_installer_kind_as_installed() {
     assert!(same_app_ids("Google.Chrome").contains(&"google.chrome.exe".to_string()));
     assert!(!same_app_ids("Google.Chrome").contains(&"google.chrome.beta".to_string()));
 }
+
+#[test]
+fn this_app_in_the_catalog_is_left_to_its_own_updates() {
+    assert_eq!(excluded_package("CIoudGuy.TheUpdater3D"), Some("updates itself"));
+    assert_eq!(excluded_package("cioudguy.theupdater3d"), Some("updates itself"));
+}

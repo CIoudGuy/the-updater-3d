@@ -41,6 +41,8 @@ const HANDLED: &[&str] = &["BlenderFoundation.Blender", "OBSProject.OBSStudio", 
 /// Packages that update themselves, belong to Windows or are security software, with the reason.
 const EXCLUDED: &[(&str, &str)] = &[
     ("Microsoft.Edge", "updates itself"),
+    // This app in the catalog: it updates itself from its own feed.
+    ("CIoudGuy.TheUpdater3D", "updates itself"),
     ("Microsoft.EdgeWebView2Runtime", "part of Windows"),
     ("Microsoft.Office", "updates itself"),
     ("Microsoft.Teams", "updates itself"),
