@@ -391,6 +391,30 @@ fn run_tracked(step: &Step, exe: &Path, mut c: std::process::Command, on_procs: 
                 }
             });
         }
+        // A window the user answers opens behind the app when the admin helper started it (the
+        // helper is started by its scheduled task, which gives it no right to the front): it is
+        // brought forward from here, with the same rights as the installer's.
+        if step.waits_for_user() {
+            let done = &done;
+            let job = job.as_ref();
+            s.spawn(move || {
+                let mine = |pid: u32| pid == root || job.is_some_and(|j| j.pids().contains(&pid));
+                let t = std::time::Instant::now();
+                let mut flashed = false;
+                while !done.load(std::sync::atomic::Ordering::Relaxed) && t.elapsed() < Duration::from_secs(120) {
+                    if let Some((hwnd, _)) = winutil::titled_windows().into_iter().find(|(_, pid)| *pid != me && mine(*pid)) {
+                        if winutil::bring_to_front(hwnd) {
+                            break;
+                        }
+                        if !flashed {
+                            winutil::flash(hwnd);
+                            flashed = true;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            });
+        }
         let r = (|| {
             let out = child.wait_with_output().with_context(|| format!("Could not run {}", exe.display()))?;
             if let Some(job) = job.as_ref() {

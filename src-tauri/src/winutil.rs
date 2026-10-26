@@ -807,6 +807,58 @@ pub fn has_windows(pid: u32) -> bool {
     ask.found
 }
 
+/// Visible top-level windows with a title, and the process each belongs to.
+pub fn titled_windows() -> Vec<(isize, u32)> {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible, GW_OWNER};
+    unsafe extern "system" fn each(hwnd: HWND, lp: LPARAM) -> windows::core::BOOL {
+        let out = unsafe { &mut *(lp.0 as *mut Vec<(isize, u32)>) };
+        let owned = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid());
+        if unsafe { IsWindowVisible(hwnd) }.as_bool() && !owned && unsafe { GetWindowTextLengthW(hwnd) } > 0 {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            out.push((hwnd.0 as isize, pid));
+        }
+        true.into()
+    }
+    let mut out: Vec<(isize, u32)> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut out as *mut Vec<(isize, u32)> as isize));
+    }
+    out
+}
+
+/// Bring a window to the front: restored when minimized, then made the foreground window.
+/// Windows lets a program take the front only when it had the last key or click, so a press of
+/// F24 (a key no keyboard has, which no app acts on) comes first. The admin helper does it for
+/// an installer it started: one started by its scheduled task opens behind everything else, and
+/// this app can not do it for a program with admin rights. True when the window is in front now.
+pub fn bring_to_front(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_F24};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE};
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    unsafe {
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
+        keybd_event(VK_F24.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_F24.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        let _ = SetForegroundWindow(h);
+        GetForegroundWindow() == h
+    }
+}
+
+/// Flash a window and its taskbar button until it is brought up.
+pub fn flash(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO, FLASHW_ALL, FLASHW_TIMERNOFG};
+    let info = FLASHWINFO { cbSize: std::mem::size_of::<FLASHWINFO>() as u32, hwnd: HWND(hwnd as *mut core::ffi::c_void), dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG, uCount: 0, dwTimeout: 0 };
+    unsafe {
+        let _ = FlashWindowEx(&info);
+    }
+}
+
 /// End a process at once.
 pub fn kill_process(pid: u32) {
     use windows::Win32::Foundation::CloseHandle;

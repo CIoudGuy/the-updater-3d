@@ -205,6 +205,11 @@ impl Step {
             Step::RemoveFile { .. } => "Cleaning up",
         }
     }
+    /// Does the step run a program whose window the user answers (an uninstaller with no silent
+    /// mode, an installer that waits for clicks)?
+    pub fn waits_for_user(&self) -> bool {
+        matches!(self, Step::Run { label, .. } if label.contains("answer its") || label.starts_with(WAITING_FOR_YOU))
+    }
     pub fn elevated(&self) -> bool {
         match self {
             Step::Run { elevated, .. } | Step::ExtractZip { elevated, .. } | Step::RemoveDir { elevated, .. } | Step::WriteFile { elevated, .. } | Step::RemoveIfOnlyUninstaller { elevated, .. } | Step::Leftover { elevated, .. } | Step::AddPackage { elevated, .. } | Step::RemovePackage { elevated, .. } | Step::ReplacePortable { elevated, .. } => *elevated,

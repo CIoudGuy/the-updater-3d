@@ -566,6 +566,12 @@ fn a_per_user_uninstaller_that_needs_admin_rights_gets_them_on_a_second_try() {
     assert!(matches!(&p.steps[0], crate::sources::Step::Run { elevated: false, .. }));
     let fb = p.fallback.as_deref().expect("a second try");
     assert!(matches!(&fb.steps[..], [crate::sources::Step::Run { elevated: true, exe, .. }] if exe.ends_with("uninst.exe")));
+    // Its window is one the user answers: whoever runs it brings that window to the front.
+    assert!(p.steps[0].waits_for_user() && fb.steps[0].waits_for_user());
+    let mut silent = e.clone();
+    silent.quiet_uninstall_string = r#""C:\Users\Alex\AppData\Local\CapCut\Apps\uninst.exe" /S"#.into();
+    let quiet = super::run::plan(&programs::make(&silent, None, None, &|_| true, None)).unwrap();
+    assert!(!quiet.steps[0].waits_for_user());
     // A program Windows would not start says why, so the job knows to try with admin rights.
     let r = crate::elevate::execute(&crate::sources::Step::Run { exe: PathBuf::from(r"C:\Nowhere\uninst.exe"), args: vec![], cwd: None, ok_codes: vec![0], elevated: false, label: String::new(), log: None });
     assert!(!r.ok && r.message.contains("os error"), "{}", r.message);
