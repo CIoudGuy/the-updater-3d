@@ -81,6 +81,15 @@ const DRIVERS: MockDriver[] = [
   { id: "driver:intel:usb\\vid_8087&pid_0036", name: "Intel(R) Wireless Bluetooth(R)", code: "In", fg: "#FFFFFF", bg: "#0B5CAD", version: "24.70.0.4", latest: "24.70.0.4", tagline: "Bluetooth driver from Intel", note: "Intel Wireless Bluetooth Drivers from Intel" },
   { id: "driver:bios", name: "B850 GAMING X WIFI6E ICE BIOS", code: "GB", fg: "#EDEDED", bg: "#3A4A5C", version: "F12a", latest: "F13", status: "update", tagline: "BIOS from Gigabyte", manualUrl: "https://www.gigabyte.com/Motherboard/B850-GAMING-X-WIFI6E-ICE-rev-1x/support#support-dl-bios", note: "BIOS F13 is out. It is never flashed from here: download it from Gigabyte's page, put it on a USB stick and flash it yourself with Q-Flash in the BIOS." },
 ];
+/** Windows' own updates as the backend lists them: the "Windows Update" entry, then one per update. */
+const WIN = { code: "Win", fg: "#FFFFFF", bg: "#0067B8" };
+const WINDOWS: MockDriver[] = [
+  { id: "driver:win:status", name: "Windows Update", ...WIN, version: "26100.4000", latest: "26100.4000", tagline: "Windows 11, version 24H2", manualUrl: "ms-settings:windowsupdate", note: "Restart your PC to finish installing updates." },
+  { id: "driver:win:0b5a4a1e-1111-4c2d-9e3f-0123456789a0", name: "Cumulative Update for Windows 11 Version 24H2 for x64-based Systems", ...WIN, version: "KB5000001", latest: "KB5000001", status: "update", updateSize: 712 * MB, tagline: "Security update", note: "From Windows Update. Some updates need a restart." },
+  { id: "driver:win:0b5a4a1e-1111-4c2d-9e3f-0123456789a1", name: "Cumulative Update for .NET Framework 3.5 and 4.8.1 for Windows 11, version 24H2 for x64", ...WIN, version: "KB5000002", latest: "KB5000002", status: "update", updateSize: 74 * MB, tagline: "Optional .NET update", note: "Optional. Windows does not install it by itself. Some updates need a restart." },
+  { id: "driver:win:0b5a4a1e-1111-4c2d-9e3f-0123456789a2", name: "Security Intelligence Update for Microsoft Defender Antivirus - KB2267602 (Version 1.400.0.0)", ...WIN, version: "KB2267602", latest: "KB2267602", status: "update", updateSize: 2 * MB, tagline: "Microsoft Defender update", note: "From Windows Update. Some updates need a restart." },
+  { id: "driver:win:0b5a4a1e-1111-4c2d-9e3f-0123456789a3", name: "Feature update to Windows 11, version 25H2", ...WIN, version: "Update", latest: "Update", status: "update", updateSize: 3900 * MB, tagline: "Feature update", manualUrl: "ms-settings:windowsupdate", note: "A new version of Windows. Install it from Windows Update in Settings." },
+];
 const DRIVER_NOTES: Record<string, string[]> = {
   "driver:nvidia:1022": ["## Game Ready for Phantom Blade Zero", "This new Game Ready Driver provides the best gaming experience for the latest new games.", "## Fixed Gaming Bugs", "Wuthering Waves: may crash during gameplay with Freestyle filters and Frame Generation", "Star Citizen: a crash with the Vulkan API", "## Fixed General Bugs", "QHD monitor at 360 Hz may flash black during gameplay"],
   "driver:amd-chipset": ["## Release Highlights", "Bug fixes included", "## Known Issues", "On a non-English Windows, some driver names may appear in English"],
@@ -224,6 +233,7 @@ function seedApps(): AppEntry[] {
       note: "Its uninstaller is missing. Remove from list cleans up what is left.", canRollback: false,
     }),
     ...DRIVERS.map((d) => app({ ...d, source: "drivers", group: "Drivers", canUninstall: false, canRollback: false })),
+    ...WINDOWS.map((d) => app({ ...d, source: "drivers", group: "Windows", canUninstall: false, canRollback: false })),
   );
   if (MODE === "current") {
     const ps = list.find((x) => x.id === "adobe:PHSP")!;
@@ -1028,6 +1038,10 @@ function otherVersions(id: string): VersionInfo[] {
 
 function versionsFor(a: AppEntry): VersionInfo[] {
   const list: VersionInfo[] = [];
+  if (a.source === "drivers" && a.group === "Windows" && a.status === "update") {
+    // A Windows update is not installed: its one version is the one offered.
+    return [{ version: a.latest!, date: iso(12 * DAY), notes: [a.name, "Install this update to resolve issues in Windows."], notesUrl: a.manualUrl ? null : "https://support.microsoft.com/help/5000001", size: a.updateSize, installed: false, latest: true, prerelease: false }];
+  }
   if (a.source === "drivers") {
     const newer = a.latest && a.latest !== a.version && !a.manualUrl;
     if (newer) list.push({ version: a.latest!, date: iso(3 * DAY), notes: DRIVER_NOTES[a.id] ?? [], notesUrl: a.id.startsWith("driver:nvidia") ? "https://www.nvidia.com/en-gb/drivers/details/282478/" : null, size: a.updateSize, installed: false, latest: true, prerelease: false });

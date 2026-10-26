@@ -13,7 +13,7 @@
   import { ui, type InstalledFilter, type InstalledGroup, type InstalledScope, type SortKey } from "../lib/ui.svelte";
   import { enter, reduced, rise } from "../lib/motion";
   import type { AppEntry, AppStatus } from "../lib/types";
-  import { groupOrAll, installedNone } from "../lib/view";
+  import { groupOrAll, installedNone, isWindows } from "../lib/view";
 
   let searchInput = $state<HTMLInputElement>();
   onMount(() => {
@@ -30,7 +30,7 @@
   // Every program is listed; "Other programs" in the Source menu narrows to the ones no catalog updates.
   const inScope = $derived(store.apps);
   const programCount = $derived(store.apps.filter((a) => a.source === "programs").length);
-  const driverCount = $derived(store.apps.filter((a) => a.source === "drivers").length);
+  const driverCount = $derived(store.apps.filter((a) => a.source === "drivers" && !isWindows(a)).length);
   // a source filter whose last app was uninstalled falls back to All, like in Get apps
   const presentGroups = $derived(GROUPS.filter((g) => inScope.some((a) => a.group === g)));
   const group = $derived(groupOrAll(ui.group, presentGroups));
@@ -44,7 +44,7 @@
   const filtered = $derived(
     scoped.filter((a) => {
       if (ui.filter === "updates") return a.status === "update";
-      if (ui.filter === "drivers") return a.source === "drivers";
+      if (ui.filter === "drivers") return a.source === "drivers" && !isWindows(a);
       if (ui.filter === "recent") return !!a.updatedAt && Date.now() - +new Date(a.updatedAt) < RECENT_MS;
       return true;
     }),

@@ -50,6 +50,8 @@ miniz_oxide = "0.9"
 
 # Same version as Tauri uses: turns off browser-only behaviour of the web view.
 webview2-com = "0.39"
+# The callbacks Windows Update's asynchronous download and install call (see `winupdate`).
+windows-core = "0.62"
 
 [dependencies.windows]
 version = "0.62"

@@ -13,6 +13,11 @@ export function listedOnly(app: { source: string; github?: string | null; isSelf
   return app.source === "programs" && !app.github && !app.isSelf;
 }
 
+/** One of Windows' own updates, or the "Windows Update" entry: listed with the drivers, in their own group "Windows". */
+export function isWindows(app: { source: string; id: string }): boolean {
+  return app.source === "drivers" && app.id.startsWith("driver:win:");
+}
+
 /** The short description an app's page shows under its version, like Get apps does. An Other
  * program's line is its publisher and a driver's its kind (shown in Details), and a copy another
  * app manages already says so in its note. */

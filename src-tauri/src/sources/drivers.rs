@@ -180,7 +180,7 @@ fn search() -> Result<Feed> {
 }
 
 /// An OLE date (days since 1899-12-30) as "2024.05.01".
-fn ole_date(d: f64) -> Option<String> {
+pub fn ole_date(d: f64) -> Option<String> {
     let base = chrono::NaiveDate::from_ymd_opt(1899, 12, 30)?;
     (d > 0.0).then(|| (base + chrono::Duration::days(d as i64)).format("%Y.%m.%d").to_string())
 }
@@ -276,6 +276,8 @@ pub enum How {
     AmdChipset(super::chipset::Release),
     /// A package from the board's or PC's maker (Dell, HP, Lenovo catalogs)
     Maker(Box<super::board::MakerDriver>),
+    /// One of Windows' own updates (see `winupdate`)
+    Windows { update_id: String },
 }
 
 /// A driver as the apps list shows it, with how to install its update (if there is one).
@@ -739,6 +741,7 @@ pub fn plan(f: &Found) -> Result<Plan> {
         How::Intel(r) => super::intel::plan_install(&e.id, &e.name, r),
         How::AmdChipset(r) => super::chipset::plan_install(&e.id, &e.name, r),
         How::Maker(d) => super::board::plan_install(&e.id, &e.name, d),
+        How::Windows { update_id } => super::winupdate::plan_install(e, update_id),
         How::WindowsUpdate { update_id } => {
             let me = std::env::current_exe()?;
             Ok(Plan {
