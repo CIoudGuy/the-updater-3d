@@ -88,10 +88,6 @@ pub struct Release {
     /// Intel marks it a beta
     #[serde(default)]
     pub beta: bool,
-    /// The package also installs an app of Intel's (Killer's suite installs the Killer app with
-    /// its drivers), which its installer only leaves out when "driver only" is picked in it.
-    #[serde(default)]
-    pub bundles_app: bool,
 }
 
 pub fn is_gpu(p: &Present) -> bool {
@@ -157,6 +153,10 @@ pub fn for_device_with(p: &Present, configs: &[Config], windows11: bool, categor
     configs
         .iter()
         .filter(|c| beta || !c.is_beta)
+        // A package with an app of Intel's in it (Killer's suite: Killer's services and Killer
+        // Intelligence Center with the drivers) is no driver update: its installer has no
+        // driver-only switch. Those devices get their driver from Windows Update, driver only.
+        .filter(|c| !c.components.iter().any(|k| k.category.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("OtherDownloads"))))
         .filter_map(|c| {
             let comp = c.components.iter().find(|k| category.is_none_or(|want| k.category.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(want))) && driver_version(c, k).is_some() && k.detection_values.iter().any(|v| fits(&p.matching_id, v)))?;
             let file = c.files.iter().find(|f| f.url.ends_with(".exe") && f.operating_systems.iter().any(|o| o.starts_with(os) && o.ends_with("-64")))?;
@@ -175,7 +175,6 @@ pub fn for_device_with(p: &Present, configs: &[Config], windows11: bool, categor
                 silent: c.allow_silent_installation,
                 notes: super::drivers::html_notes(html),
                 beta: c.is_beta,
-                bundles_app: c.components.iter().any(|k| k.category.as_deref().is_some_and(|x| x.eq_ignore_ascii_case("OtherDownloads"))),
             })
         })
         .max_by(|a, b| super::tools::cmp_ver(&a.version, &b.version))
@@ -322,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn a_killer_card_is_told_that_its_package_also_installs_killers_app() {
+    fn a_killer_card_is_not_offered_killers_suite() {
         // Intel's Killer suite as its data lists it: Killer's app next to the drivers.
         let list: Vec<Config> = serde_json::from_str(r#"[
           {"Id":927577,"Version":"50.26.820.2552","Name":"Intel® Killer™ Performance Suite","IsBeta":false,"AllowSilentInstallation":false,
@@ -330,11 +329,8 @@ mod tests {
            "Components":[{"Category":"OtherDownloads","Version":"50.26.820","DetectionValues":["VEN_8086&DEV_51F1&SUBSYS_*1A56"]},{"Category":"Wireless","Version":"24.70.0.3","DetectionValues":["VEN_8086&DEV_51F1&SUBSYS_*1A56"]}]}
         ]"#).unwrap();
         let killer = Present { matching_id: r"PCI\VEN_8086&DEV_51F1&SUBSYS_16721A56&REV_01".into(), class: "Net".into(), version: "23.30.0.6".into(), desc: "Killer(R) Wi-Fi 6E AX1675i 160MHz Wireless Network Adapter (211NGW)".into(), ..Default::default() };
-        let r = for_device(&killer, &list, true, None).expect("Killer's package");
-        assert_eq!(r.version, "24.70.0.3");
-        assert!(r.bundles_app);
-        // Not a graphics package: no graphics switch.
-        assert!(!r.args.iter().any(|a| a == "--noExtras"));
+        // Its only package also installs Killer's app: none from Intel (Windows Update has the driver).
+        assert!(for_device(&killer, &list, true, None).is_none());
     }
 
     #[test]

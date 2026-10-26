@@ -662,11 +662,7 @@ fn intel_entry(e: &mut DriverEntry, r: &super::intel::Release, have: &str) {
     e.notes_url = safe_link(r.notes_url.clone());
     e.notes = r.notes.clone();
     let name = if r.beta { format!("{} (beta)", r.name) } else { r.name.clone() };
-    e.note = Some(match (newer, r.silent, r.bundles_app) {
-        (true, false, true) => format!("{name} from Intel. Intel's installer opens: choose the driver only install there, or it also installs Intel's app."),
-        (true, false, false) => format!("{name} from Intel. Intel's installer opens: click through it to finish."),
-        _ => format!("{name} from Intel"),
-    });
+    e.note = Some(if newer && !r.silent { format!("{name} from Intel. Intel's installer opens: click through it to finish.") } else { format!("{name} from Intel") });
 }
 
 /// The version Windows has now for a driver entry, read fresh: the AMD chipset drivers from
