@@ -1892,14 +1892,15 @@ impl Core {
         }
 
         // Tell the user about updates they have not heard about yet.
+        let told = told_updates(&updates, &settings);
         let fresh: Vec<&&AppEntry> = {
             let p = self.persisted.lock();
-            updates.iter().filter(|a| p.notified.get(&a.id) != a.latest.as_ref()).collect()
+            told.iter().filter(|a| p.notified.get(&a.id) != a.latest.as_ref()).collect()
         };
         if !fresh.is_empty() && settings.notify_updates && !manual {
             let fresh_names: Vec<String> = fresh.iter().map(|a| a.name.clone()).collect();
-            let (title, body) = update_notice(updates.len(), &fresh_names);
-            let ids: Vec<&str> = updates.iter().map(|a| a.id.as_str()).collect();
+            let (title, body) = update_notice(told.len(), &fresh_names);
+            let ids: Vec<&str> = told.iter().map(|a| a.id.as_str()).collect();
             self.notify(&title, &body, notice::updates_target(&ids));
         }
         {
@@ -1912,7 +1913,7 @@ impl Core {
             store::save_state(&p);
         }
         if !manual {
-            self.auto_install(&apps);
+            self.auto_install(Some(&apps));
         }
         if online {
             if let Err(e) = self.check_self(settings.notify_updates).await {
@@ -1960,21 +1961,33 @@ impl Core {
         }
     }
 
-    fn in_window(start: &str, end: &str) -> bool {
-        let parse = |s: &str| chrono::NaiveTime::parse_from_str(s, "%H:%M").ok();
-        let (Some(a), Some(b)) = (parse(start), parse(end)) else { return true };
-        let t = chrono::Local::now().time();
-        if a <= b { t >= a && t < b } else { t >= a || t < b }
-    }
-
-    fn auto_install(self: &Arc<Self>, apps: &[AppEntry]) {
+    /// Queue the updates set to install automatically, when it is time for them (see
+    /// `auto_install_due`). `apps`: the list a check just made; None on the scheduler's tick.
+    fn auto_install(self: &Arc<Self>, apps: Option<&[AppEntry]>) {
         let s = self.settings.read().clone();
+        if s.auto_mode != AutoMode::Install && !s.exceptions.values().any(|m| *m == AutoMode::Install) {
+            return;
+        }
+        let last = self.persisted.lock().last_auto_install_day.clone();
+        let Some(day) = auto_install_due(chrono::Local::now().naive_local(), &s.window_start, &s.window_end, last.as_deref(), apps.is_some()) else { return };
+        {
+            let mut p = self.persisted.lock();
+            p.last_auto_install_day = Some(day.to_string());
+            store::save_state(&p);
+        }
+        let listed;
+        let apps = match apps {
+            Some(a) => a,
+            None => {
+                listed = self.apps();
+                &listed
+            }
+        };
         let mut queued = 0;
         // Drivers ask for admin rights and some restart the screen; a game or a release that
         // only downloads from its page is updated there.
         for a in apps.iter().filter(|a| a.status == AppStatus::Update && a.source != Source::Drivers && a.manual_url.is_none()) {
-            let mode = s.exceptions.get(&a.id).copied().unwrap_or(s.auto_mode);
-            if mode != AutoMode::Install || !Self::in_window(&s.window_start, &s.window_end) || a.running {
+            if auto_mode_of(&s, &a.id) != AutoMode::Install || a.running {
                 continue;
             }
             if self.enqueue(JobRequest::Update { app_id: a.id.clone(), version: None }).is_ok() {
@@ -2025,19 +2038,20 @@ impl Core {
                 self.rescan().await;
             }
             let hours = self.settings.read().check_interval;
-            if hours == 0 {
-                continue;
+            if hours != 0 {
+                let due = self
+                    .persisted
+                    .lock()
+                    .last_check
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_none_or(|t| chrono::Utc::now().signed_duration_since(t).num_minutes() >= hours as i64 * 60);
+                if due {
+                    let _ = self.check_now(false).await;
+                }
             }
-            let due = self
-                .persisted
-                .lock()
-                .last_check
-                .as_deref()
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                .is_none_or(|t| chrono::Utc::now().signed_duration_since(t).num_minutes() >= hours as i64 * 60);
-            if due {
-                let _ = self.check_now(false).await;
-            }
+            // Updates a check found before the install window opened are installed in it.
+            self.auto_install(None);
         }
     }
 
@@ -4812,6 +4826,42 @@ fn still_running_notice(busy: bool) -> (&'static str, &'static str) {
     ("The Updater 3D is still running", body)
 }
 
+/// What happens to an app's updates: its own rule, or the one for every app.
+fn auto_mode_of(s: &Settings, id: &str) -> AutoMode {
+    s.exceptions.get(id).copied().unwrap_or(s.auto_mode)
+}
+
+/// The updates the "updates ready" notice tells about: not those whose automatic updates are
+/// Off (for every app, or by the app's own rule).
+fn told_updates<'a>(updates: &[&'a AppEntry], s: &Settings) -> Vec<&'a AppEntry> {
+    updates.iter().copied().filter(|a| auto_mode_of(s, &a.id) != AutoMode::Off).collect()
+}
+
+/// The day the install window open at `now` opened on, or None while it is closed. A window
+/// past midnight (22:00 to 02:00) at 01:00 opened the day before. Times that do not read leave
+/// it always open.
+fn window_day(now: chrono::NaiveDateTime, start: &str, end: &str) -> Option<chrono::NaiveDate> {
+    let parse = |s: &str| chrono::NaiveTime::parse_from_str(s, "%H:%M").ok();
+    let (Some(a), Some(b)) = (parse(start), parse(end)) else { return Some(now.date()) };
+    let t = now.time();
+    if a <= b {
+        (t >= a && t < b).then_some(now.date())
+    } else if t >= a {
+        Some(now.date())
+    } else {
+        (t < b).then(|| now.date() - chrono::Days::new(1))
+    }
+}
+
+/// Is it time for automatic installs, and in which day's window? After a background check:
+/// whenever the window is open (the check may have found more). On the scheduler's tick: once
+/// per window, so what a check made outside the window found (checks every 12 hours or once a
+/// day may never land in it) is installed in it. `last_day`: the window they last ran in.
+fn auto_install_due(now: chrono::NaiveDateTime, start: &str, end: &str, last_day: Option<&str>, after_check: bool) -> Option<chrono::NaiveDate> {
+    let day = window_day(now, start, end)?;
+    (after_check || last_day != Some(day.to_string().as_str())).then_some(day)
+}
+
 /// The "updates ready" notification: the title counts every update waiting, the text names the
 /// ones the user has not heard about yet.
 fn update_notice(total: usize, fresh: &[String]) -> (String, String) {
@@ -5118,6 +5168,52 @@ mod tests {
         assert_eq!(title, "3 updates ready");
         assert_eq!(body, "Blender 5.2, Blender 4.5, MEGAsync");
         assert_eq!(update_notice(1, &fresh[..1]).0, "1 update ready");
+    }
+
+    #[test]
+    fn automatic_updates_off_tells_nothing_about_that_apps_updates() {
+        use crate::model::{AppStatus, AutoMode, DriverEntry, Settings};
+        let app = |id: &str| {
+            let d = DriverEntry { id: id.into(), name: id.into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.0".into(), latest: Some("2.0".into()), status: AppStatus::Update, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None };
+            super::driver_app(&d, AppStatus::Update, true, None, None)
+        };
+        let (krita, obs) = (app("tools:krita"), app("tools:obs"));
+        let updates = vec![&krita, &obs];
+        let ids = |s: &Settings| super::told_updates(&updates, s).iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        let mut s = Settings { auto_mode: AutoMode::Off, ..Settings::default() };
+        assert!(ids(&s).is_empty());
+        // An app's own rule wins over the one for every app, both ways.
+        s.exceptions.insert("tools:obs".into(), AutoMode::Notify);
+        assert_eq!(ids(&s), ["tools:obs"]);
+        s.auto_mode = AutoMode::Install;
+        s.exceptions.insert("tools:obs".into(), AutoMode::Off);
+        assert_eq!(ids(&s), ["tools:krita"]);
+        s.exceptions.clear();
+        s.auto_mode = AutoMode::Notify;
+        assert_eq!(ids(&s), ["tools:krita", "tools:obs"]);
+    }
+
+    #[test]
+    fn automatic_installs_run_in_the_window_even_when_no_check_lands_in_it() {
+        use super::auto_install_due;
+        let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let day = |s: &str| Some(chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap());
+        // Checks once a day at 15:00: the minute tick at 03:00 installs what that check found,
+        // once per window.
+        assert_eq!(auto_install_due(at("2026-10-26 03:00"), "02:00", "06:00", None, false), day("2026-10-26"));
+        assert_eq!(auto_install_due(at("2026-10-26 03:00"), "02:00", "06:00", Some("2026-10-25"), false), day("2026-10-26"));
+        assert_eq!(auto_install_due(at("2026-10-26 03:01"), "02:00", "06:00", Some("2026-10-26"), false), None);
+        // A check inside the window installs what it found, whenever it runs.
+        assert_eq!(auto_install_due(at("2026-10-26 04:00"), "02:00", "06:00", Some("2026-10-26"), true), day("2026-10-26"));
+        // Never outside the window.
+        assert_eq!(auto_install_due(at("2026-10-26 15:00"), "02:00", "06:00", None, false), None);
+        assert_eq!(auto_install_due(at("2026-10-26 15:00"), "02:00", "06:00", None, true), None);
+        assert_eq!(auto_install_due(at("2026-10-26 06:00"), "02:00", "06:00", None, false), None);
+        // A window past midnight is one window: it does not run again after midnight.
+        assert_eq!(auto_install_due(at("2026-10-26 23:00"), "22:00", "02:00", None, false), day("2026-10-26"));
+        assert_eq!(auto_install_due(at("2026-10-27 01:00"), "22:00", "02:00", Some("2026-10-26"), false), None);
+        assert_eq!(auto_install_due(at("2026-10-27 01:00"), "22:00", "02:00", Some("2026-10-25"), false), day("2026-10-26"));
+        assert_eq!(auto_install_due(at("2026-10-27 12:00"), "22:00", "02:00", None, false), None);
     }
 
     #[test]
