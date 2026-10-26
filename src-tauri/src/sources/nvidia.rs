@@ -1,5 +1,6 @@
-//! NVIDIA graphics drivers, straight from NVIDIA: the newest Game Ready / Studio-branch driver
-//! for each NVIDIA card in this PC, from the same lookup nvidia.com's driver search uses.
+//! NVIDIA graphics drivers, straight from NVIDIA: the newest Game Ready or Studio driver (the
+//! user's choice per card) for each NVIDIA card in this PC, from the same lookup nvidia.com's
+//! driver search uses.
 //! NVIDIA publishes no checksum, so the download must be signed by NVIDIA (Authenticode).
 
 use super::drivers::Present;
@@ -150,10 +151,15 @@ pub async fn products() -> Result<Vec<(String, String)>> {
     Ok(list)
 }
 
+/// The lookup's address for a product id; `filter` picks the branch: "&isWHQL=1" for the Game
+/// Ready release, "&beta=1" for its beta, "&upCRD=1" for the Studio driver.
+fn lookup_url(pfid: &str, filter: &str) -> String {
+    format!("{LOOKUP_URL}?func=DriverManualLookup&pfid={pfid}&osID={}&dch=1{filter}", os_id())
+}
+
 /// The newest DCH (standard Windows 10/11) driver for a product id.
 pub async fn latest(pfid: &str) -> Result<Release> {
-    let url = format!("{LOOKUP_URL}?func=DriverManualLookup&pfid={pfid}&osID={}&dch=1&isWHQL=1", os_id());
-    let f = crate::http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await?;
+    let f = crate::http::get_cached(&lookup_url(pfid, "&isWHQL=1"), &[], Duration::from_secs(30 * 60)).await?;
     let mut r = parse_lookup(&String::from_utf8_lossy(&f.body))?;
     r.size = exact_size(&r.url).await;
     Ok(r)
@@ -162,11 +168,25 @@ pub async fn latest(pfid: &str) -> Result<Release> {
 /// The newest beta driver NVIDIA lists for a product id, if it has one (NVIDIA's own beta
 /// filter; most of the time there is none).
 pub async fn latest_beta(pfid: &str) -> Option<Release> {
-    let url = format!("{LOOKUP_URL}?func=DriverManualLookup&pfid={pfid}&osID={}&dch=1&beta=1", os_id());
-    let f = crate::http::get_cached(&url, &[], Duration::from_secs(30 * 60)).await.ok()?;
+    let f = crate::http::get_cached(&lookup_url(pfid, "&beta=1"), &[], Duration::from_secs(30 * 60)).await.ok()?;
     let mut r = parse_lookup(&String::from_utf8_lossy(&f.body)).ok().filter(|r| r.beta)?;
     r.size = exact_size(&r.url).await;
     Some(r)
+}
+
+/// The newest Studio driver NVIDIA lists for a product id, if it has one. It can be older than
+/// the Game Ready driver. A card without a Studio branch may get NVIDIA's default driver back,
+/// so only an answer that is a Studio driver counts.
+pub async fn latest_studio(pfid: &str) -> Option<Release> {
+    let f = crate::http::get_cached(&lookup_url(pfid, "&upCRD=1"), &[], Duration::from_secs(30 * 60)).await.ok()?;
+    let mut r = parse_lookup(&String::from_utf8_lossy(&f.body)).ok().filter(is_studio)?;
+    r.size = exact_size(&r.url).await;
+    Some(r)
+}
+
+/// Is this NVIDIA's Studio driver ("NVIDIA Studio Driver")?
+pub fn is_studio(r: &Release) -> bool {
+    r.name.to_ascii_lowercase().contains("studio")
 }
 
 /// The file's exact size from the download server (the lookup only gives a rounded one).
@@ -176,23 +196,50 @@ async fn exact_size(url: &str) -> Option<u64> {
     r.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.parse::<u64>().ok().filter(|&n| n > 1_000_000)
 }
 
+/// The parts of a GeForce package to install, by the package's file name; None for any other
+/// package (RTX workstation, Quadro, data center), which installs as NVIDIA made it.
+///
+/// Run with only "-s", NVIDIA's setup installs every default part: the driver, but also the
+/// NVIDIA App, FrameView SDK, ShadowPlay, the overlay and telemetry. NVIDIA's installation guide
+/// lets the parts to install be named after "-s", so the driver comes with what a card needs
+/// and nothing else: the display driver, HD audio (sound over HDMI and DisplayPort), PhysX, and
+/// the NVIDIA Control Panel (which pulls in its own background services). A laptop package also
+/// has NVPCF (the laptop's power sharing between CPU and GPU) and USB-C. The names are those in
+/// the 621.01 notebook package's own part files; desktop packages are the same without the laptop
+/// parts, so a name is only given for the package kind that has it. The NVIDIA App and its parts
+/// (telemetry, message bus, backend) are left out; one that is already installed stays.
+pub fn parts(file: &str) -> Option<Vec<&'static str>> {
+    let kind = file.split_once('-').map(|(_, rest)| rest)?;
+    let mut parts = vec!["Display.Driver", "HDAudio.Driver", "Display.PhysX", "Display.NvApp.NvCPL"];
+    if kind.starts_with("notebook-win") {
+        parts.extend(["NVPCF", "USBC"]);
+    } else if !kind.starts_with("desktop-win") {
+        return None;
+    }
+    Some(parts)
+}
+
 /// Download NVIDIA's package and run it silently. Its own setup keeps the user's settings and
 /// asks for no restart; Windows switches to the new driver right away (the screen may blink).
+/// A GeForce package installs the driver parts only (see `parts`). When setup refuses those
+/// names (a package that renamed a part), a second try installs the display driver alone,
+/// which every package has, rather than the whole default set.
 pub fn plan_install(app_id: &str, name: &str, r: &Release) -> Result<Plan> {
     let file = r.url.rsplit('/').next().filter(|f| f.ends_with(".exe")).ok_or_else(|| anyhow!("NVIDIA's download is not a program"))?;
     let dest = crate::paths::downloads().join("nvidia").join(file);
     let dl = Download { url: r.url.clone(), dest: dest.clone(), size: r.size, sha256: None, md5: None, signer: Some(SIGNER.into()), sha512: None, headers: vec![] };
     super::require_checked(&dl, &format!("{name} {}", r.version))?;
-    Ok(Plan {
+    let make = |parts: &[&str]| Plan {
         app_id: app_id.into(),
         kind: JobKind::Update,
         name: name.into(),
         to_version: r.version.clone(),
-        downloads: vec![dl],
+        downloads: vec![dl.clone()],
         steps: vec![Step::Run {
             exe: dest.clone(),
-            // -s: silent, -noreboot: never restart on its own. 1 means "done, restart later".
-            args: vec!["-s".into(), "-noreboot".into()],
+            // -s: silent, -noreboot: never restart on its own, then the parts to install (none
+            // named: every default part). 1 means "done, restart later".
+            args: ["-s", "-noreboot"].iter().chain(parts).map(|a| a.to_string()).collect(),
             cwd: None,
             ok_codes: vec![0, 1],
             elevated: true,
@@ -203,7 +250,11 @@ pub fn plan_install(app_id: &str, name: &str, r: &Release) -> Result<Plan> {
         block_names: vec![],
         verify: Verify::None,
         fallback: None,
-        cleanup: vec![dest],
+        cleanup: vec![dest.clone()],
+    };
+    Ok(match parts(file) {
+        Some(p) => Plan { fallback: Some(Box::new(make(&["Display.Driver"]))), ..make(&p) },
+        None => make(&[]),
     })
 }
 
@@ -266,6 +317,80 @@ mod tests {
         assert_eq!(plan.downloads[0].size, Some(1_037_190_000));
         let Step::Run { args, elevated, ok_codes, .. } = &plan.steps[0] else { panic!() };
         assert!(*elevated && args.contains(&"-s".to_string()) && ok_codes.contains(&0));
+    }
+
+    fn install_args(url: &str) -> (Vec<String>, Option<Vec<String>>) {
+        let release = Release { version: "621.01".into(), url: url.into(), ..Default::default() };
+        let plan = plan_install("driver:nvidia:1022", "NVIDIA GeForce RTX 4070", &Release { size: Some(1_037_190_000), ..release }).unwrap();
+        let run = |p: &Plan| match &p.steps[0] {
+            Step::Run { args, .. } => args.clone(),
+            _ => panic!(),
+        };
+        (run(&plan), plan.fallback.as_deref().map(run))
+    }
+
+    #[test]
+    fn a_geforce_package_installs_the_driver_without_the_nvidia_app() {
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (desktop, fallback) = install_args("https://us.download.nvidia.com/Windows/621.01/621.01-desktop-win10-win11-64bit-international-dch-whql.exe");
+        assert_eq!(desktop, strs(&["-s", "-noreboot", "Display.Driver", "HDAudio.Driver", "Display.PhysX", "Display.NvApp.NvCPL"]));
+        // If setup refuses a name, the display driver alone goes in, never the default set.
+        assert_eq!(fallback, Some(strs(&["-s", "-noreboot", "Display.Driver"])));
+        let (laptop, _) = install_args("https://us.download.nvidia.com/Windows/621.01/621.01-notebook-win10-win11-64bit-international-dch-whql.exe");
+        assert_eq!(laptop, strs(&["-s", "-noreboot", "Display.Driver", "HDAudio.Driver", "Display.PhysX", "Display.NvApp.NvCPL", "NVPCF", "USBC"]));
+        // The Studio driver is the same package kind.
+        let (studio, _) = install_args("https://us.download.nvidia.com/Windows/617.42/617.42-desktop-win10-win11-64bit-international-nsd-dch-whql.exe");
+        assert_eq!(studio, desktop);
+        // None of them names the NVIDIA App or its parts.
+        for a in laptop.iter().chain(&desktop) {
+            assert!(!["Display.NvApp", "NvTelemetry", "MessageBus", "NvBackend", "ShadowPlay", "FrameView"].contains(&a.as_str()), "{a}");
+        }
+    }
+
+    #[test]
+    fn a_package_of_another_kind_installs_as_nvidia_made_it() {
+        // Part names are only known for GeForce packages: a workstation or data center package
+        // gets none, and no second try.
+        for url in [
+            "https://us.download.nvidia.com/Windows/Quadro_Certified/597.30/597.30-quadro-rtx-desktop-notebook-win10-win11-64bit-international-dch-whql.exe",
+            "https://us.download.nvidia.com/tesla/616.92/616.92-data-center-tesla-desktop-win10-win11-64bit-dch-international.exe",
+        ] {
+            assert_eq!(install_args(url), (vec!["-s".to_string(), "-noreboot".to_string()], None), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_studio_driver_has_its_own_lookup_and_is_told_by_its_name() {
+        let studio = lookup_url("1022", "&upCRD=1");
+        assert!(studio.contains("pfid=1022") && studio.contains("&dch=1&upCRD=1") && !studio.contains("isWHQL"), "{studio}");
+        let json = r#"{"Success":"1","IDS":[{"downloadInfo":{"Name":"NVIDIA%20Studio%20Driver","Version":"617.42","DownloadURL":"https://us.download.nvidia.com/Windows/617.42/617.42-desktop-win10-win11-64bit-international-nsd-dch-whql.exe"}}]}"#;
+        assert!(is_studio(&parse_lookup(json).unwrap()));
+        // A card without a Studio branch gets the default driver back: that is not Studio.
+        assert!(!is_studio(&parse_lookup(&json.replace("NVIDIA%20Studio%20Driver", "Data%20Center%20Driver%20for%20Windows")).unwrap()));
+    }
+
+    /// Asks NVIDIA's lookup, read only (nothing is downloaded or cached), for made-up example
+    /// cards and prints what would be offered: `cargo test --lib live_nvidia -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_nvidia() {
+        let get = |u: String| async move { crate::http::CLIENT.get(u).send().await.expect("NVIDIA").text().await.expect("text") };
+        let products = parse_products(&get(PRODUCTS_URL.to_string()).await);
+        println!("{} products", products.len());
+        for card in ["NVIDIA GeForce RTX 3060", "NVIDIA GeForce RTX 4060 Laptop GPU", "NVIDIA RTX PRO 4000 Blackwell", "NVIDIA RTX A4000", "Quadro RTX 4000", "NVIDIA RTX 4000 Ada Generation"] {
+            let Some(pfid) = product_id(card, &products) else {
+                println!("{card}: NVIDIA does not list this name");
+                continue;
+            };
+            for (what, filter) in [("game ready", "&isWHQL=1"), ("beta", "&beta=1"), ("studio", "&upCRD=1")] {
+                let v: serde_json::Value = serde_json::from_str(&get(lookup_url(&pfid, filter)).await).unwrap_or_default();
+                let names: Vec<String> = v["IDS"].as_array().map(|a| a.iter().map(|i| format!("{} {}", i["downloadInfo"]["Name"].as_str().unwrap_or(""), i["downloadInfo"]["Version"].as_str().unwrap_or(""))).collect()).unwrap_or_default();
+                match parse_lookup(&v.to_string()) {
+                    Ok(r) => println!("{card} (pfid {pfid}) {what}: {} {} beta={} studio={} {}\n    all answers: {names:?}", r.name, r.version, r.beta, is_studio(&r), r.url),
+                    Err(e) => println!("{card} (pfid {pfid}) {what}: nothing ({e})"),
+                }
+            }
+        }
     }
 
     #[test]

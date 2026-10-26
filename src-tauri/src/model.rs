@@ -92,6 +92,10 @@ pub struct AppEntry {
     /// version list shows pre-releases, or the user chose).
     #[serde(default)]
     pub pre_channel: Option<bool>,
+    /// An NVIDIA card that has a Studio driver to choose: whether it follows Studio (true) or
+    /// Game Ready (false). None for everything else.
+    #[serde(default)]
+    pub studio: Option<bool>,
     pub channel: Option<String>,
     pub note: Option<String>,
     pub job_id: Option<String>,
@@ -130,6 +134,10 @@ pub struct DriverEntry {
     /// None when there are none.
     #[serde(default)]
     pub pre_channel: Option<bool>,
+    /// An NVIDIA card that has a Studio driver to choose: does it follow Studio (true) or Game
+    /// Ready (false)? None for everything else.
+    #[serde(default)]
+    pub studio: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -372,6 +380,9 @@ pub struct Settings {
     /// candidates), false only final versions. An app not listed goes by its copy (a pre-release
     /// copy keeps getting pre-releases) or, for the Craft apps, `craft_prereleases`.
     pub pre_releases: BTreeMap<String, bool>,
+    /// NVIDIA cards the user chose the Studio driver for (entry id -> true); a card not listed, or
+    /// false, gets the Game Ready driver.
+    pub driver_studio: BTreeMap<String, bool>,
     pub keep_previous_versions: bool,
     pub bandwidth_limit: u64,
     pub bandwidth_limit_enabled: bool,
@@ -414,6 +425,7 @@ impl Default for Settings {
             exceptions: BTreeMap::new(),
             ignored: BTreeSet::new(),
             pre_releases: BTreeMap::new(),
+            driver_studio: BTreeMap::new(),
             keep_previous_versions: false,
             bandwidth_limit: 40 * 1024 * 1024,
             bandwidth_limit_enabled: false,

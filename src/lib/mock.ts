@@ -74,7 +74,7 @@ const ADOBE = "C:\\Program Files\\Adobe\\";
 /** Drivers as the backend lists them: graphics with the maker's own driver, devices, the chipset and the BIOS. */
 type MockDriver = Pick<AppEntry, "id" | "name" | "code" | "fg" | "bg" | "version"> & Partial<AppEntry>;
 const DRIVERS: MockDriver[] = [
-  { id: "driver:nvidia:1022", name: "NVIDIA GeForce RTX 4070", code: "NV", fg: "#FFFFFF", bg: "#4E7A00", version: "610.88", latest: "621.01", status: "update", updateSize: 1116691496, tagline: "Graphics driver from NVIDIA", note: "GeForce Game Ready Driver from NVIDIA" },
+  { id: "driver:nvidia:1022", name: "NVIDIA GeForce RTX 4070", code: "NV", fg: "#FFFFFF", bg: "#4E7A00", version: "610.88", latest: "621.01", status: "update", updateSize: 1116691496, tagline: "Graphics driver from NVIDIA", note: "GeForce Game Ready Driver from NVIDIA", studio: false },
   { id: "driver:amd-chipset", name: "AMD Chipset Software", code: "AMD", fg: "#FFFFFF", bg: "#9E1B1B", version: "8.06.30.112", latest: "8.09.28.1124", status: "update", updateSize: 81551288, tagline: "Chipset from AMD", note: "AMD's chipset drivers for Ryzen processors and AMD motherboards" },
   { id: "driver:dev:pci\\ven_10ec&dev_8125", name: "Realtek Gaming 2.5GbE Family Controller", code: "Rt", fg: "#EDEDED", bg: "#3A4A5C", version: "1125.21.903.2024", latest: "1125.22.10.2025", status: "update", updateSize: 2_400_000, tagline: "Network driver from Realtek", note: "From Windows Update. Some drivers need a restart." },
   { id: "driver:dev:hdaudio\\func_01&ven_10ec&dev_0897", name: "Realtek High Definition Audio", code: "Rt", fg: "#EDEDED", bg: "#3A4A5C", version: "6.0.9733.1", latest: "6.0.9733.1", tagline: "Audio driver from Realtek", note: "Driver from Realtek" },
@@ -518,6 +518,17 @@ function preFor(a: AppEntry): boolean | null {
   const pres = (TOOLS_RELEASES[a.id.split(":")[1]] ?? []).filter((r) => r.pre && (!own || series(r.v) === series(a.version)));
   if (!pres.length) return null;
   return choice ?? pres.some((r) => r.v === a.version);
+}
+
+/** An NVIDIA card follows its Game Ready or Studio driver by the user's choice (the Studio one is older). */
+function applyStudio() {
+  for (const a of apps) {
+    if (a.studio == null) continue;
+    const on = !!settings.driverStudio?.[a.id];
+    a.studio = on;
+    a.latest = on ? "617.42" : "621.01";
+    a.note = on ? "NVIDIA Studio Driver from NVIDIA" : "GeForce Game Ready Driver from NVIDIA";
+  }
 }
 
 /** Each app's choice of pre-releases, and the version a More apps entry is offered by it. */
@@ -1540,6 +1551,11 @@ const handlers: H = {
     const adobeWas = settings.sources.adobe;
     settings = { ...settings, ...patch, sources: { ...settings.sources, ...(patch.sources ?? {}) } };
     if (settings.sources.adobe !== adobeWas) setAdobe(settings.sources.adobe);
+    if (patch.driverStudio) {
+      applyStudio();
+      emit("apps", apps);
+      for (const id of Object.keys(patch.driverStudio)) setTimeout(() => emit("versions-changed", { id }), 300);
+    }
     if (patch.preReleases) {
       applyPre();
       emit("apps", apps);
