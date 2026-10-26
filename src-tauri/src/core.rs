@@ -1112,7 +1112,8 @@ impl Core {
                     None
                 },
                 size_on_disk: if i.missing { None } else { st.sizes.get(&i.id).copied().or(i.size_hint) },
-                install_dir: i.install_dir.as_ref().map(|d| d.display().to_string()),
+                // An app whose folder is not known still shows its program's folder.
+                install_dir: i.install_dir.clone().or_else(|| i.exe.as_ref().and_then(|e| e.parent().map(std::path::Path::to_path_buf))).map(|d| d.display().to_string()),
                 updated_at: newest_update(recorded.get(&i.id).map(String::as_str), i.updated_at.as_deref()),
                 // A GitHub program: its project's own description.
                 tagline: gh_feed.and_then(|f| f.about_of(&i.id)).map(String::from).or_else(|| i.tagline.clone()),
@@ -1414,6 +1415,11 @@ impl Core {
 
     /// The maker's page for a driver that is updated from there (a BIOS), or the maker's own
     /// updater for a card whose maker was not reached.
+    /// The folder Windows keeps a listed driver's files in.
+    pub fn driver_folder(&self, id: &str) -> Option<PathBuf> {
+        self.drivers.lock().found.iter().find(|f| f.entry.id == id).and_then(|f| f.entry.folder.clone()).map(PathBuf::from)
+    }
+
     pub fn driver_page(&self, id: &str) -> Option<String> {
         // An Other program's newest release that only downloads from its GitHub page.
         if id.starts_with("prog:") {
@@ -4975,7 +4981,7 @@ fn driver_app(e: &DriverEntry, status: AppStatus, installable: bool, updated_at:
         status,
         update_size: if status == AppStatus::Update { e.size } else { None },
         size_on_disk: None,
-        install_dir: None,
+        install_dir: e.folder.clone(),
         updated_at,
         tagline: Some(if windows { e.kind.clone() } else if e.kind == "BIOS" || e.kind == "Chipset" { format!("{} from {}", e.kind, e.maker) } else { format!("{} driver from {}", e.kind, e.maker) }),
         group: if windows { sources::winupdate::GROUP.into() } else { Source::Drivers.group().into() },
@@ -5150,7 +5156,7 @@ mod tests {
     #[test]
     fn the_apps_own_entry_shows_its_own_update_and_is_never_a_job() {
         use crate::model::{AppStatus, DriverEntry, Source};
-        let d = DriverEntry { id: "prog:hkcu:the updater 3d".into(), name: "The Updater 3D".into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.2.0".into(), latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: Some("Mega Limited".into()), notes: vec![], pre_channel: None, studio: None };
+        let d = DriverEntry { id: "prog:hkcu:the updater 3d".into(), name: "The Updater 3D".into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.2.0".into(), latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: Some("Mega Limited".into()), notes: vec![], pre_channel: None, studio: None, folder: None };
         let mut a = super::driver_app(&d, AppStatus::Current, false, None, None);
         a.source = Source::Programs;
         a.manual_url = None;
@@ -5231,7 +5237,7 @@ mod tests {
     fn automatic_updates_off_tells_nothing_about_that_apps_updates() {
         use crate::model::{AppStatus, AutoMode, DriverEntry, Settings};
         let app = |id: &str| {
-            let d = DriverEntry { id: id.into(), name: id.into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.0".into(), latest: Some("2.0".into()), status: AppStatus::Update, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None };
+            let d = DriverEntry { id: id.into(), name: id.into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.0".into(), latest: Some("2.0".into()), status: AppStatus::Update, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None, folder: None };
             super::driver_app(&d, AppStatus::Update, true, None, None)
         };
         let (krita, obs) = (app("tools:krita"), app("tools:obs"));
@@ -5575,7 +5581,7 @@ mod job_fix_tests {
 
     #[test]
     fn an_app_set_to_dont_update_shows_no_update() {
-        let d = crate::model::DriverEntry { id: "other:7zip.7zip".into(), name: "7-Zip".into(), kind: "x".into(), maker: "x".into(), source: "x".into(), version: "24.0".into(), latest: Some("25.0".into()), status: crate::model::AppStatus::Update, size: Some(1), date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None };
+        let d = crate::model::DriverEntry { id: "other:7zip.7zip".into(), name: "7-Zip".into(), kind: "x".into(), maker: "x".into(), source: "x".into(), version: "24.0".into(), latest: Some("25.0".into()), status: crate::model::AppStatus::Update, size: Some(1), date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None, folder: None };
         let mut apps = vec![super::driver_app(&d, crate::model::AppStatus::Update, true, None, None), super::driver_app(&crate::model::DriverEntry { id: "other:vlc".into(), ..d.clone() }, crate::model::AppStatus::Update, true, None, None)];
         skip_ignored(&mut apps, &["other:7zip.7zip".to_string()].into_iter().collect());
         assert_eq!((apps[0].status, apps[0].update_size, apps[0].latest.as_deref()), (crate::model::AppStatus::Current, None, Some("25.0")));

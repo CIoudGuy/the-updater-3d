@@ -338,6 +338,13 @@
           {#if isDriver}
           <dt>Kind</dt>
           <dd>{app.tagline ?? "Driver"}</dd>
+          {#if app.installDir}
+          <dt>Driver files</dt>
+          <dd>
+            <span class="path mono selectable" title={app.installDir}>{#each pathParts as part, i (i)}{part}<wbr />{/each}</span>
+            <button class="lnk2" onclick={() => showInFolder(app.id)}>Show in folder</button>
+          </dd>
+          {/if}
           <dt>Updated</dt>
           <dd>{app.updatedAt ? dateLong(app.updatedAt) : "Not by this app"}</dd>
           {:else}

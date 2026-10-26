@@ -828,6 +828,21 @@ pub fn titled_windows() -> Vec<(isize, u32)> {
     out
 }
 
+/// The folder Windows keeps an installed driver's files in, by the driver's INF as a device names
+/// it ("oem150.inf" gives "C:\Windows\System32\DriverStore\FileRepository\u0412345.inf_amd64_...").
+pub fn driver_store_folder(inf: &str) -> Option<PathBuf> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupGetInfDriverStoreLocationW;
+    if inf.trim().is_empty() || inf.contains(['\\', '/']) {
+        return None;
+    }
+    let mut buf = vec![0u16; 1024];
+    let mut len = 0u32;
+    unsafe { SetupGetInfDriverStoreLocationW(&HSTRING::from(inf), None, PCWSTR::null(), &mut buf, Some(&mut len)) }.ok()?;
+    let n = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+    let path = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+    path.parent().filter(|d| d.is_dir()).map(Path::to_path_buf)
+}
+
 /// Bring a window to the front: restored when minimized, then made the foreground window.
 /// Windows lets a program take the front only when it had the last key or click, so a press of
 /// F24 (a key no keyboard has, which no app acts on) comes first. The admin helper does it for

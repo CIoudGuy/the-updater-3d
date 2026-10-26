@@ -232,7 +232,7 @@ pub struct Inputs<'a> {
 }
 
 fn base(id: String, name: String, kind: String, version: String) -> DriverEntry {
-    DriverEntry { id, name, kind, maker: "Microsoft".into(), source: "windows".into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None }
+    DriverEntry { id, name, kind, maker: "Microsoft".into(), source: "windows".into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None, folder: None }
 }
 
 /// Everything listed under Windows: the "Windows Update" entry first, then one entry per update.

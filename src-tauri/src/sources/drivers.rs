@@ -70,6 +70,8 @@ pub struct Present {
     pub provider: String,
     /// Device class: "Display", "Net", "MEDIA", "Bluetooth"
     pub class: String,
+    /// The driver's INF as Windows names it ("oem150.inf")
+    pub inf: String,
 }
 
 // ---------------------------------------------------------------- links and text
@@ -210,7 +212,7 @@ pub fn present() -> Vec<Present> {
             if matching_id.is_empty() {
                 continue;
             }
-            out.push(Present { matching_id, version: g("DriverVersion"), date: reg_date(&g("DriverDate")), desc: g("DriverDesc"), provider: g("ProviderName"), class: class_name.clone() });
+            out.push(Present { matching_id, version: g("DriverVersion"), date: reg_date(&g("DriverDate")), desc: g("DriverDesc"), provider: g("ProviderName"), class: class_name.clone(), inf: g("InfPath") });
         }
     }
     out
@@ -347,7 +349,7 @@ pub fn short_maker(m: &str) -> String {
 }
 
 fn base_entry(id: String, name: String, kind: String, maker: String, source: &str, version: String) -> DriverEntry {
-    DriverEntry { id, name, kind, maker, source: source.into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None }
+    DriverEntry { id, name, kind, maker, source: source.into(), version, latest: None, status: AppStatus::Current, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None, folder: None }
 }
 
 /// NVIDIA's answer for one card: its matching id, product id ("" when NVIDIA does not list it)
@@ -719,6 +721,14 @@ pub fn collect(inp: &Inputs) -> Vec<Found> {
 
     if let Some(b) = inp.bios {
         out.push(Found { entry: super::board::entry(b), how: None });
+    }
+    // Where Windows keeps each device's driver files, for "Show in folder".
+    for (low, k) in &by_device {
+        if let (Some(f), Some(p)) = (out.get_mut(*k), present.iter().find(|p| p.matching_id.eq_ignore_ascii_case(low))) {
+            if f.entry.folder.is_none() {
+                f.entry.folder = crate::winutil::driver_store_folder(&p.inf).map(|d| d.display().to_string());
+            }
+        }
     }
     out
 }

@@ -260,7 +260,7 @@ mod tests {
     }
 
     fn raid_dev(desc: &str, ver: &str) -> crate::sources::drivers::Present {
-        crate::sources::drivers::Present { matching_id: "pci\\ven_1022&dev_43bd&cc_0104".into(), version: ver.into(), date: None, desc: desc.into(), provider: "Advanced Micro Devices, Inc.".into(), class: "SCSIAdapter".into() }
+        crate::sources::drivers::Present { matching_id: "pci\\ven_1022&dev_43bd&cc_0104".into(), version: ver.into(), date: None, desc: desc.into(), provider: "Advanced Micro Devices, Inc.".into(), class: "SCSIAdapter".into(), inf: String::new() }
     }
 
     fn raid_release() -> RaidRelease {

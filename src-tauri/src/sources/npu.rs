@@ -258,7 +258,7 @@ mod tests {
     const INF: &str = "; kipudrv.inf\r\n[Version]\r\nSignature = \"$Windows NT$\"\r\n; DriverVer = 01/01/2020,1.0.0.1\r\nDriverVer = 04/04/2026,32.00.20101.3760\r\nCatalogFile=kipudrv.cat\r\n[Strings]\r\n%IpuMcdmDriver% = IpuMcdmDriver,PCI\\VEN_1022&DEV_1502\r\n%IpuMcdmDriver% = IpuMcdmDriver,PCI\\VEN_1022&DEV_17F0\r\n";
 
     fn dev(id: &str) -> Present {
-        Present { matching_id: id.into(), version: "32.0.20001.3000".into(), date: None, desc: "NPU Compute Accelerator Device".into(), provider: "Advanced Micro Devices, Inc.".into(), class: "ComputeAccelerator".into() }
+        Present { matching_id: id.into(), version: "32.0.20001.3000".into(), date: None, desc: "NPU Compute Accelerator Device".into(), provider: "Advanced Micro Devices, Inc.".into(), class: "ComputeAccelerator".into(), inf: String::new() }
     }
 
     fn release() -> Release {

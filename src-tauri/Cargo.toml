@@ -83,6 +83,7 @@ features = [
   "Win32_Security_WinTrust",
   "Win32_Security_Cryptography_Catalog",
   "Win32_Security_Cryptography_Sip",
+  "Win32_Devices_DeviceAndDriverInstallation",
   "ApplicationModel",
   "Management_Deployment",
   "Data_Xml_Dom",

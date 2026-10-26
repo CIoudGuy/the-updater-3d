@@ -5,15 +5,15 @@ fn offer(title: &str, hw: &str, date: Option<&str>) -> Offer {
 }
 
 fn present(id: &str, ver: &str, date: Option<&str>) -> Present {
-    Present { matching_id: id.into(), version: ver.into(), date: date.map(Into::into), desc: "Intel(R) Iris(R) Xe Graphics".into(), provider: "Intel Corporation".into(), class: "Display".into() }
+    Present { matching_id: id.into(), version: ver.into(), date: date.map(Into::into), desc: "Intel(R) Iris(R) Xe Graphics".into(), provider: "Intel Corporation".into(), class: "Display".into(), inf: String::new() }
 }
 
 fn device(id: &str, desc: &str, provider: &str, class: &str, ver: &str) -> Present {
-    Present { matching_id: id.into(), version: ver.into(), date: Some("2025.03.01".into()), desc: desc.into(), provider: provider.into(), class: class.into() }
+    Present { matching_id: id.into(), version: ver.into(), date: Some("2025.03.01".into()), desc: desc.into(), provider: provider.into(), class: class.into(), inf: String::new() }
 }
 
 fn gpu(id: &str, desc: &str, ver: &str) -> Present {
-    Present { matching_id: id.into(), version: ver.into(), desc: desc.into(), provider: "x".into(), class: "Display".into(), date: Some("2026.01.01".into()) }
+    Present { matching_id: id.into(), version: ver.into(), desc: desc.into(), provider: "x".into(), class: "Display".into(), inf: String::new(), date: Some("2026.01.01".into()) }
 }
 
 fn with<'a>(wu: Option<&'a Feed>, present: &'a [Present]) -> Inputs<'a> {
@@ -610,4 +610,16 @@ fn a_makers_package_installs_only_checked_and_signed_from_the_makers_server() {
     zip.install.as_mut().unwrap().inner = Some("..\\evil.exe".into());
     assert!(crate::sources::board::plan_install("driver:x", "x", &zip).is_err());
     assert!(hw_match("PCI\\VEN_8086&DEV_A0F0", "pci\\ven_8086&dev_a0f0&subsys_0a1f1028") && !hw_match("PCI\\VEN_8086&DEV_A0F", "PCI\\VEN_8086&DEV_A0F0"));
+}
+
+#[test]
+fn a_device_driver_entry_names_the_folder_windows_keeps_its_files_in() {
+    // No INF named: no folder (the tests' devices are made up).
+    assert_eq!(crate::winutil::driver_store_folder(""), None);
+    assert_eq!(crate::winutil::driver_store_folder(r"..\oem1.inf"), None);
+    // A driver of this PC: its INF gives its driver store folder, which is there.
+    if let Some(p) = super::present().into_iter().find(|p| p.inf.starts_with("oem")) {
+        let d = crate::winutil::driver_store_folder(&p.inf).expect("its driver store folder");
+        assert!(d.is_dir() && d.to_string_lossy().to_ascii_lowercase().contains("driverstore"), "{}", d.display());
+    }
 }

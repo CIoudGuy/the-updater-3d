@@ -138,6 +138,9 @@ pub struct DriverEntry {
     /// Ready (false)? None for everything else.
     #[serde(default)]
     pub studio: Option<bool>,
+    /// The folder Windows keeps this driver's files in (its driver store folder)
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -117,6 +117,10 @@ pub fn open_store_page(core: C<'_>, app_id: String) -> Res<()> {
 
 #[tauri::command]
 pub fn show_in_folder(core: C<'_>, app_id: String) -> Res<()> {
+    // A driver: the folder Windows keeps its files in.
+    if let Some(d) = core.driver_folder(&app_id) {
+        return if d.is_dir() { winutil::show_in_folder(&d).map_err(err) } else { Err("The driver's folder is gone".into()) };
+    }
     let i = core.installed(&app_id).ok_or("That app is no longer installed")?;
     match (i.exe.filter(|e| e.exists()), i.install_dir.filter(|d| d.exists())) {
         (Some(e), _) => winutil::show_in_folder(&e).map_err(err),

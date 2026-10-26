@@ -345,6 +345,7 @@ pub fn entry(b: &Bios) -> DriverEntry {
         notes,
         pre_channel: None,
         studio: None,
+        folder: None,
     }
 }
 
