@@ -51,24 +51,11 @@ pub fn is_portable(i: &Installed) -> bool {
 /// The shortcut folders read for portable apps: the Start menu, the desktops and the taskbar.
 pub fn shortcut_dirs() -> Vec<PathBuf> {
     let mut v = locate::start_menu_dirs();
-    v.extend(desktops());
+    v.extend(locate::desktop_dirs());
     if let Some(p) = std::env::var_os("APPDATA") {
         v.push(PathBuf::from(p).join("Microsoft\\Internet Explorer\\Quick Launch\\User Pinned"));
     }
     v
-}
-
-fn desktops() -> Vec<PathBuf> {
-    use windows::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_PublicDesktop, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
-    [FOLDERID_Desktop, FOLDERID_PublicDesktop]
-        .iter()
-        .filter_map(|id| unsafe {
-            let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
-            let s = p.to_string().ok();
-            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
-            s.map(PathBuf::from)
-        })
-        .collect()
 }
 
 /// What a program file says about itself, read once per file version.
@@ -476,7 +463,7 @@ pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
     let label = format!("Uninstalling {}", inst.name);
     let elevated = crate::uninstall::Target::Dir { path: dir.clone() }.elevated();
     let mut steps = vec![if same_path(&dir, &root) { Step::RemoveFile { path: exe.clone() } } else { Step::RemoveDir { path: dir.clone(), elevated, label: label.clone() } }];
-    for s in locate::shortcuts_in(&locate::start_menu_dirs().into_iter().chain(desktops()).collect::<Vec<_>>()) {
+    for s in locate::shortcuts_in(&locate::start_menu_dirs().into_iter().chain(locate::desktop_dirs()).collect::<Vec<_>>()) {
         if same_path(&s.target, &exe) {
             let target = crate::uninstall::Target::File { path: s.lnk };
             steps.push(Step::Leftover { elevated: target.elevated(), target, label: format!("Removing the shortcut {}", s.name) });

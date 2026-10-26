@@ -110,8 +110,8 @@ impl Env {
         let env = |n: &str| std::env::var_os(n).map(PathBuf::from);
         let start_menus = crate::sources::locate::start_menu_dirs();
         let startup: Vec<PathBuf> = start_menus.iter().map(|d| d.join("Startup")).collect();
-        let mut desktops: Vec<PathBuf> = env("USERPROFILE").map(|h| h.join("Desktop")).into_iter().collect();
-        desktops.extend(env("PUBLIC").map(|p| p.join("Desktop")));
+        // Where Windows keeps the desktops (OneDrive's Desktop folder when it backs them up).
+        let mut desktops = crate::sources::locate::desktop_dirs();
         desktops.extend(env("APPDATA").map(|p| p.join("Microsoft\\Internet Explorer\\Quick Launch")));
         let run = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
         let run32 = "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run";

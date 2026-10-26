@@ -178,6 +178,36 @@ pub fn start_menu_dirs() -> Vec<PathBuf> {
     v
 }
 
+/// The desktops, this user's and everyone's: where Windows keeps them (a desktop OneDrive backs
+/// up is in the OneDrive folder) and the profile's own Desktop folders.
+pub fn desktop_dirs() -> Vec<PathBuf> {
+    use windows::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_PublicDesktop, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    let known: Vec<PathBuf> = [FOLDERID_Desktop, FOLDERID_PublicDesktop]
+        .iter()
+        .filter_map(|id| unsafe {
+            let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+            let s = p.to_string().ok();
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
+            s.map(PathBuf::from)
+        })
+        .collect();
+    let plain = [std::env::var_os("USERPROFILE"), std::env::var_os("PUBLIC")].into_iter().flatten().map(|d| PathBuf::from(d).join("Desktop"));
+    desktops_from(known, plain.collect())
+}
+
+/// `known` (where Windows keeps the desktops) and `plain` (the profiles' own Desktop folders),
+/// each folder once.
+pub fn desktops_from(known: Vec<PathBuf>, plain: Vec<PathBuf>) -> Vec<PathBuf> {
+    let key = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_ascii_lowercase();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in known.into_iter().chain(plain) {
+        if !out.iter().any(|o| key(o) == key(&d)) {
+            out.push(d);
+        }
+    }
+    out
+}
+
 /// Shortcut targets already read, by shortcut file and its time stamp.
 static LNK_MEMO: Lazy<Mutex<HashMap<PathBuf, (Option<SystemTime>, Option<PathBuf>)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 

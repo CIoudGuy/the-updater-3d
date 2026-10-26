@@ -79,8 +79,8 @@ impl Guard {
         let ad = home.join("AppData");
         trees.extend(BROWSERS.iter().map(|b| ad.join(b)));
         let mut shortcut_dirs = crate::sources::locate::start_menu_dirs();
-        shortcut_dirs.push(home.join("Desktop"));
-        shortcut_dirs.extend(env("PUBLIC").map(|p| p.join("Desktop")));
+        // Where Windows keeps the desktops (OneDrive's Desktop folder when it backs them up).
+        shortcut_dirs.extend(crate::sources::locate::desktop_dirs());
         shortcut_dirs.extend(env("APPDATA").map(|p| p.join("Microsoft\\Internet Explorer\\Quick Launch")));
         Guard { roots, trees, others, shortcut_dirs }
     }

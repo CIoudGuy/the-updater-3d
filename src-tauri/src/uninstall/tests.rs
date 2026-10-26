@@ -580,6 +580,17 @@ fn a_per_user_uninstaller_that_needs_admin_rights_gets_them_on_a_second_try() {
 /// The PC-wide cleanup lists shortcuts whose program is gone, and nothing else: not live ones,
 /// not ones to a drive that is not there right now (an unplugged disk), not network shares.
 #[test]
+fn a_desktop_onedrive_backs_up_is_read_and_its_shortcuts_may_go() {
+    // OneDrive keeps this user's desktop in its own folder; the profile's Desktop folder stays.
+    let d = crate::sources::locate::desktops_from(vec![PathBuf::from(r"C:\Users\Alex\OneDrive\Desktop"), PathBuf::from(r"C:\Users\Public\Desktop")], vec![PathBuf::from(r"C:\Users\Alex\Desktop"), PathBuf::from(r"C:\Users\Public\Desktop\")]);
+    assert_eq!(d, vec![PathBuf::from(r"C:\Users\Alex\OneDrive\Desktop"), PathBuf::from(r"C:\Users\Public\Desktop"), PathBuf::from(r"C:\Users\Alex\Desktop")]);
+    // The scan and the guard read every desktop Windows has.
+    let here = crate::sources::locate::desktop_dirs();
+    let env = Env::system(vec![], vec![]);
+    assert!(here.iter().all(|h| env.desktops.contains(h) && env.guard.shortcut_dirs.contains(h)), "{here:?}");
+}
+
+#[test]
 fn dead_shortcuts_are_found_anywhere_and_live_ones_stay() {
     let fx = Fixture::new("deadlinks");
     let key = TestKey::new("deadlinks");
