@@ -513,6 +513,12 @@ fn runs_key(plan: &Plan) -> String {
     format!("{}:{}", plan.app_id, if plan.kind == JobKind::Uninstall { "uninstall" } else { "install" })
 }
 
+/// Is a finished job's installer deleted right away? "Keep previous version" keeps it to roll back
+/// without downloading again; Adobe's and drivers' installers serve no rollback, so they go.
+fn installer_goes_after(keep_previous: bool, app_id: &str) -> bool {
+    !keep_previous || app_id.starts_with("adobe:") || app_id.starts_with("driver:")
+}
+
 /// Does a Run step remove an app (an uninstaller, `msiexec /x`)?
 fn run_removes(step: &sources::Step) -> bool {
     let sources::Step::Run { exe, args, label, .. } = step else { return false };
@@ -3713,7 +3719,7 @@ impl Core {
             Ok(Outcome::Done) => {
                 let total = self.with_job(id, |j| j.job.total).unwrap_or(0);
                 let s = self.settings.read().clone();
-                if !s.keep_previous_versions || plan.app_id.starts_with("adobe:") {
+                if installer_goes_after(s.keep_previous_versions, &plan.app_id) {
                     for c in &plan.cleanup {
                         if c.is_dir() {
                             let _ = std::fs::remove_dir_all(c);
@@ -5078,6 +5084,16 @@ fn with_download_size(mut l: Latest, app_id: &str, dl_sizes: &HashMap<String, u6
 #[cfg(test)]
 mod tests {
     use super::{update_notice, with_download_size};
+
+    #[test]
+    fn kept_installers_are_only_those_a_rollback_can_use() {
+        assert!(!crate::core::installer_goes_after(true, "other:Pkg.A"));
+        assert!(!crate::core::installer_goes_after(true, "tools:obs"));
+        assert!(crate::core::installer_goes_after(true, "adobe:PHSP"));
+        assert!(crate::core::installer_goes_after(true, "driver:nvidia:2786"));
+        assert!(crate::core::installer_goes_after(true, "driver:maker:bios"));
+        assert!(crate::core::installer_goes_after(false, "other:Pkg.A"));
+    }
 
     #[test]
     fn a_driver_check_asked_for_while_one_runs_follows_it() {

@@ -670,3 +670,24 @@ fn trim_cache_deletes_files_with_their_notes_and_keeps_open_jobs() {
     assert!(job.exists() && unpacked.exists() && rum_zip.exists());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// "Keep previous version" keeps a finished installer past the age limit for every kind of app
+/// that can roll back from it: also those updated from their GitHub releases.
+#[test]
+fn kept_installers_of_github_apps_outlive_the_age_limit() {
+    let root = scratch("keepgh");
+    let winget = root.join("other").join("Pkg.A").join("a.exe");
+    let github = root.join("github").join("owner-repo").join("b.exe");
+    let old = std::time::SystemTime::now() - Duration::from_secs(20 * 86_400);
+    for f in [&winget, &github] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, b"x").unwrap();
+        save_meta(&sidecar(f), &Meta { key: "sha256:ab".into(), size: Some(1), segs: vec![], complete: true });
+        std::fs::File::options().write(true).open(f).unwrap().set_modified(old).unwrap();
+    }
+    trim_cache(&root, &Default::default(), true);
+    assert!(winget.exists() && github.exists());
+    trim_cache(&root, &Default::default(), false);
+    assert!(!winget.exists() && !github.exists());
+    let _ = std::fs::remove_dir_all(&root);
+}

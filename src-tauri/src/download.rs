@@ -380,7 +380,7 @@ pub fn trim_cache(root: &Path, in_use: &std::collections::HashSet<PathBuf>, keep
             let finished = load_meta(&sidecar(&p)).is_some_and(|m| m.complete);
             files.push(CacheFile {
                 in_use: busy.contains(&low_path(&p)) || busy_dirs.iter().any(|d| low_path(&p).starts_with(d.as_str())),
-                keep: keep_previous && finished && ["other", "tools", "craft", "blender"].contains(&top.as_str()),
+                keep: keep_previous && finished && ["other", "github", "tools", "craft", "blender"].contains(&top.as_str()),
                 done: top == "self" && age > Duration::from_secs(600),
                 path: p,
                 size: m.len(),
