@@ -204,7 +204,7 @@ fn windows_update_does_not_double_up_graphics_cards() {
 #[test]
 fn amd_cards_get_amds_own_driver_when_amds_site_answers() {
     let cards = vec![gpu("PCI\\VEN_1002&DEV_744C", "AMD Radeon RX 7900 XTX", "32.0.21001.9024"), gpu("PCI\\VEN_1002&DEV_67DF", "Radeon RX 580 Series", "32.0.21045.16010")];
-    let r = crate::sources::amd::Release { version: "26.10.1".into(), store_versions: vec!["32.0.32015.7029".into(), "32.0.21045.16010".into()], url: "u".into(), size: Some(1), notes_url: "https://www.amd.com/en/resources/support-articles/release-notes/RN-RAD-WIN-26-10-1.html".into(), notes: vec!["Fixed a crash".into()] };
+    let r = crate::sources::amd::Release { version: "26.10.1".into(), store_versions: vec!["32.0.32015.7029".into(), "32.0.21045.16010".into()], url: "u".into(), size: Some(1), notes_url: "https://www.amd.com/en/resources/support-articles/release-notes/RN-RAD-WIN-26-10-1.html".into(), notes: vec!["Fixed a crash".into()], ..Default::default() };
     let mut wu = offer("Advanced Micro Devices - Display - 32.0.21025.1000", "PCI\\VEN_1002&DEV_744C", None);
     wu.update_id = "amd".into();
     let feed = Feed { offers: vec![wu] };
@@ -216,6 +216,116 @@ fn amd_cards_get_amds_own_driver_when_amds_site_answers() {
     assert_eq!(new.entry.notes, vec!["Fixed a crash".to_string()]);
     // The RX 580 is on AMD's older branch and already has its newest driver.
     assert_eq!((list[1].entry.status, list[1].how.is_none()), (AppStatus::Current, true));
+}
+
+fn pro_release() -> crate::sources::amd::Release {
+    crate::sources::amd::Release {
+        version: "26.Q3".into(),
+        store_versions: vec!["32.0.31036.15".into()],
+        url: "https://drivers.amd.com/drivers/prographics/amd-software-pro-edition-26.q3-win11-b.exe".into(),
+        size: Some(915_537_728),
+        notes_url: "https://www.amd.com/en/resources/support-articles/release-notes/RN-PRO-WIN-26-Q3.html".into(),
+        page: "https://www.amd.com/en/support/downloads/drivers.html/graphics/radeon-pro/radeon-pro-w7000-series/amd-radeon-pro-w7800.html".into(),
+        notes: vec![],
+    }
+}
+
+#[test]
+fn a_radeon_pro_card_gets_the_pro_edition_and_never_adrenalin() {
+    let id = "PCI\\VEN_1002&DEV_7448";
+    let cards = vec![gpu(id, "AMD Radeon PRO W7800", "32.0.31000.1"), gpu("PCI\\VEN_1002&DEV_744C", "AMD Radeon RX 7900 XTX", "32.0.21001.9024")];
+    let adrenalin = crate::sources::amd::Release { version: "26.10.1".into(), store_versions: vec!["32.0.32015.7029".into()], url: "u".into(), notes_url: "https://www.amd.com/en/resources/support-articles/release-notes/RN-RAD-WIN-26-10-1.html".into(), ..Default::default() };
+    let pro = pro_release();
+    let answers = vec![(id.to_string(), Some(pro.clone()))];
+    let list = collect(&Inputs { amd: Some(&adrenalin), amd_pro: &answers, ..with(None, &cards) });
+    assert_eq!(list.len(), 2, "{list:#?}");
+    let w = &list[0];
+    assert_eq!((w.entry.source.as_str(), w.entry.status, w.entry.latest.as_deref()), ("amd", AppStatus::Update, Some("32.0.31036.15")));
+    assert_eq!(w.how, Some(How::Amd(pro.clone())));
+    assert_eq!(w.entry.note.as_deref(), Some("AMD Software: PRO Edition 26.Q3 from AMD"));
+    // The consumer card next to it keeps Adrenalin.
+    assert_eq!(list[1].how, Some(How::Amd(adrenalin.clone())));
+    // Up to date on the PRO driver: current, nothing to install.
+    let now = vec![gpu(id, "AMD Radeon PRO W7800", "32.0.31036.15")];
+    let list = collect(&Inputs { amd: Some(&adrenalin), amd_pro: &answers, ..with(None, &now) });
+    assert_eq!((list[0].entry.status, list[0].how.is_none()), (AppStatus::Current, true));
+    // No PRO Edition AMD lists for this card that the app can read: not Adrenalin instead.
+    let unknown = vec![(id.to_string(), None)];
+    let list = collect(&Inputs { amd: Some(&adrenalin), amd_pro: &unknown, ..with(None, &cards[..1]) });
+    assert_eq!(list.len(), 1);
+    assert!(list[0].how.is_none() && list[0].entry.source == "vendor", "{list:#?}");
+    assert!(list[0].entry.note.as_deref().unwrap().contains("PRO Edition"));
+    // PRO cards only: Adrenalin is not asked for, and the card is still listed.
+    let list = collect(&with(None, &cards[..1]));
+    assert!(list[0].how.is_none() && list[0].entry.source == "vendor");
+}
+
+fn raid_release() -> crate::sources::chipset::RaidRelease {
+    crate::sources::chipset::RaidRelease { version: "9.3.3.00291".into(), package: "8.03.24.733".into(), url: "https://drivers.amd.com/drivers/amd_raid_software_8.03.24.733.zip".into(), page: "p".into(), notes_url: "https://www.amd.com/en/resources/support-articles/release-notes/RN-RYZEN-RAID-8-03-24-733.html".into(), ..Default::default() }
+}
+
+#[test]
+fn amds_raid_driver_is_one_entry_for_a_pc_with_an_amd_raid_controller() {
+    let parts = vec![
+        device("PCI\\VEN_1022&DEV_43BD&CC_0104", "AMD-RAID Bottom Device", "Advanced Micro Devices, Inc.", "SCSIAdapter", "9.3.2.267"),
+        device("SCSI\\ProcessorAMD-RAIDConfiguration___V9.0", "AMD-RAID Config Device", "Advanced Micro Devices, Inc.", "System", "9.3.2.267"),
+        device("PCI\\VEN_10EC&DEV_8125", "Realtek Gaming 2.5GbE Family Controller", "Realtek", "Net", "1125.21.903.2024"),
+    ];
+    let r = raid_release();
+    let feed = Feed::default();
+    let list = collect(&Inputs { raid: Some(("9.3.2.267", &r)), ..with(Some(&feed), &parts) });
+    let names: Vec<&str> = list.iter().map(|f| f.entry.name.as_str()).collect();
+    assert_eq!(names, vec!["Realtek Gaming 2.5GbE Family Controller", "AMD RAID Driver"], "the parts are one entry");
+    let raid = &list[1];
+    assert_eq!((raid.entry.id.as_str(), raid.entry.kind.as_str(), raid.entry.status, raid.entry.latest.as_deref(), raid.entry.version.as_str()), ("driver:amd-raid", "Storage", AppStatus::Update, Some("9.3.3.00291"), "9.3.2.267"));
+    assert_eq!(raid.how, Some(How::AmdRaid(r.clone())));
+    assert!(raid.entry.note.as_deref().unwrap().contains("two restarts"));
+    let plan = plan(raid).unwrap();
+    assert_eq!(plan.to_version, "9.3.3.00291");
+    // The newest already: current, and nothing to install (Windows writes 9.3.3.291 for 9.3.3.00291).
+    let list = collect(&Inputs { raid: Some(("9.3.3.291", &r)), ..with(Some(&feed), &parts) });
+    let raid = list.iter().find(|f| f.entry.id == "driver:amd-raid").unwrap();
+    assert_eq!((raid.entry.status, raid.how.is_none(), raid.entry.latest.as_deref()), (AppStatus::Current, true, Some("9.3.3.291")));
+    // AMD's page has nothing for this PC (an older board): the parts are listed as any device.
+    let list = collect(&with(Some(&feed), &parts));
+    assert_eq!(list.len(), 3);
+    assert!(list.iter().all(|f| f.how.is_none() && f.entry.id != "driver:amd-raid"));
+    // No RAID driver on the PC: no entry, whatever AMD's page has.
+    let none = vec![device("PCI\\VEN_10EC&DEV_8125", "Realtek Gaming 2.5GbE Family Controller", "Realtek", "Net", "1125.21.903.2024")];
+    assert_eq!(collect(&with(Some(&feed), &none)).len(), 1);
+}
+
+#[test]
+fn the_npu_gets_amds_driver_only_when_its_id_is_one_the_driver_lists() {
+    let r = crate::sources::npu::Release {
+        version: "32.0.20101.3760".into(),
+        date: Some("2026.04.04".into()),
+        url: "https://download.amd.com/opendownload/RyzenAI/Driver/NPU_RAI_376_WHQL.zip".into(),
+        size: Some(26_936_876),
+        hardware_ids: vec!["PCI\\VEN_1022&DEV_1502".into(), "PCI\\VEN_1022&DEV_17F0".into()],
+        notes_url: "https://ryzenai.docs.amd.com/en/latest/inst.html".into(),
+    };
+    let npu = device("PCI\\VEN_1022&DEV_17F0", "NPU Compute Accelerator Device", "Advanced Micro Devices, Inc.", "ComputeAccelerator", "32.0.20001.3000");
+    let other = device("PCI\\VEN_1022&DEV_15E2", "AMD Audio Coprocessor", "Advanced Micro Devices, Inc.", "MEDIA", "6.0.0.80");
+    let both = vec![npu.clone(), other];
+    let feed = Feed::default();
+    let list = collect(&Inputs { npu: Some(&r), ..with(Some(&feed), &both) });
+    assert_eq!(list.len(), 2);
+    let n = &list[0];
+    assert_eq!((n.entry.id.as_str(), n.entry.kind.as_str(), n.entry.maker.as_str(), n.entry.source.as_str()), ("driver:dev:pci\\ven_1022&dev_17f0", "NPU", "AMD", "amd"));
+    assert_eq!((n.entry.status, n.entry.latest.as_deref(), n.entry.date.as_deref(), n.entry.size), (AppStatus::Update, Some("32.0.20101.3760"), Some("2026.04.04"), Some(26_936_876)));
+    assert_eq!(n.how, Some(How::AmdNpu(r.clone())));
+    assert!(n.entry.note.as_deref().unwrap().contains("license"));
+    assert!(matches!(plan(n).unwrap().verify, Verify::Driver { .. }));
+    // The other AMD device is not the NPU: nothing from the NPU zip for it.
+    assert!(list[1].how.is_none() && list[1].entry.source == "device");
+    // Already on it: current. The driver's date is the installed one's.
+    let have = vec![Present { version: "32.0.20101.3760".into(), ..npu.clone() }];
+    let list = collect(&Inputs { npu: Some(&r), ..with(Some(&feed), &have) });
+    assert_eq!((list[0].entry.status, list[0].how.is_none(), list[0].entry.latest.as_deref()), (AppStatus::Current, true, Some("32.0.20101.3760")));
+    // AMD not reached: a device like any other.
+    let list = collect(&with(Some(&feed), &have));
+    assert_eq!((list[0].entry.source.as_str(), list[0].entry.kind.as_str()), ("device", "ComputeAccelerator"));
 }
 
 #[test]
