@@ -555,6 +555,22 @@ fn a_program_plan_runs_its_uninstaller_and_checks_it_is_gone() {
     assert!(super::run::plan(&broken).is_err());
 }
 
+#[test]
+fn a_per_user_uninstaller_that_needs_admin_rights_gets_them_on_a_second_try() {
+    // CapCut, as Windows lists it: per user, its uninstaller asks for the highest rights the user
+    // has, so Windows will not start it without them (error 740).
+    let mut e = entry("CapCut", "CapCut", r#""C:\Users\Alex\AppData\Local\CapCut\Apps\uninst.exe""#);
+    e.hive = "HKCU";
+    let i = programs::make(&e, None, None, &|_| true, None);
+    let p = super::run::plan(&i).unwrap();
+    assert!(matches!(&p.steps[0], crate::sources::Step::Run { elevated: false, .. }));
+    let fb = p.fallback.as_deref().expect("a second try");
+    assert!(matches!(&fb.steps[..], [crate::sources::Step::Run { elevated: true, exe, .. }] if exe.ends_with("uninst.exe")));
+    // A program Windows would not start says why, so the job knows to try with admin rights.
+    let r = crate::elevate::execute(&crate::sources::Step::Run { exe: PathBuf::from(r"C:\Nowhere\uninst.exe"), args: vec![], cwd: None, ok_codes: vec![0], elevated: false, label: String::new(), log: None });
+    assert!(!r.ok && r.message.contains("os error"), "{}", r.message);
+}
+
 /// The PC-wide cleanup lists shortcuts whose program is gone, and nothing else: not live ones,
 /// not ones to a drive that is not there right now (an unplugged disk), not network shares.
 #[test]

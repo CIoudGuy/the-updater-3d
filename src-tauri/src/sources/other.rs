@@ -3377,19 +3377,25 @@ pub fn plan_uninstall(inst: &Installed) -> Result<Plan> {
     let exe = PathBuf::from(&u[0]);
     let in_pf = starts_dir(&u[0], &paths::program_files()) || starts_dir(&u[0], &paths::program_files_x86());
     let elevated = !user || in_pf;
-    Ok(Plan {
+    let make = |elevated: bool| Plan {
         app_id: inst.id.clone(),
         kind: JobKind::Uninstall,
         name: inst.name.clone(),
         to_version: inst.version.clone(),
         downloads: vec![],
-        steps: vec![Step::Run { exe, args: u[1..].to_vec(), cwd: None, ok_codes: vec![0, 3010, 1641, 1605], elevated, label: format!("Uninstalling {}", inst.name), log: None }],
+        steps: vec![Step::Run { exe: exe.clone(), args: u[1..].to_vec(), cwd: None, ok_codes: vec![0, 3010, 1641, 1605], elevated, label: format!("Uninstalling {}", inst.name), log: None }],
         block_dirs: inst.install_dir.iter().filter(|d| own_dir(d)).cloned().collect(),
         block_names: vec![],
         verify: Verify::Removed { app_id: inst.id.clone() },
         fallback: None,
         cleanup: vec![],
-    })
+    };
+    let mut plan = make(elevated);
+    // A per-user uninstaller that Windows only starts with admin rights gets them on a second try.
+    if !elevated {
+        plan.fallback = Some(Box::new(make(true)));
+    }
+    Ok(plan)
 }
 
 /// Guess of how long an install takes, in seconds, before it has been learned.

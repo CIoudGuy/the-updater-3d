@@ -99,19 +99,27 @@ pub fn plan(inst: &Installed) -> Result<Plan> {
     // whether it removed the program, whatever it returns.
     let ok_codes: Vec<u32> = if c.silent { vec![0, 3010, 1641, 1605] } else { (0..=255).chain([3010, 1641, 1605, 1614]).collect() };
     let label = if c.silent { format!("Uninstalling {}", inst.name) } else { format!("Uninstalling {}: answer its uninstaller's window", inst.name) };
-    Ok(Plan {
+    let run = |elevated: bool| Step::Run { exe: PathBuf::from(&c.args[0]), args: c.args[1..].to_vec(), cwd: None, ok_codes: ok_codes.clone(), elevated, label: label.clone(), log: None };
+    let make = |step: Step| Plan {
         app_id: inst.id.clone(),
         kind: JobKind::Uninstall,
         name: inst.name.clone(),
         to_version: inst.version.clone(),
         downloads: vec![],
-        steps: vec![Step::Run { exe: PathBuf::from(&c.args[0]), args: c.args[1..].to_vec(), cwd: None, ok_codes, elevated, label, log: None }],
+        steps: vec![step],
         block_dirs: inst.install_dir.iter().filter(|d| crate::sources::other::own_dir(d)).cloned().collect(),
         block_names: vec![],
         verify: Verify::Removed { app_id: inst.id.clone() },
         fallback: None,
         cleanup: vec![],
-    })
+    };
+    let mut plan = make(run(elevated));
+    // A per-user uninstaller that Windows only starts with admin rights (CapCut's asks for the
+    // highest rights the user has) gets them on a second try.
+    if !elevated {
+        plan.fallback = Some(Box::new(make(run(true))));
+    }
+    Ok(plan)
 }
 
 /// A leftover scan, for the window.

@@ -485,7 +485,9 @@ pub fn execute_with(step: &Step, on_procs: &(dyn Fn(Vec<String>) + Sync)) -> Ste
     match r {
         Ok((code, output)) => StepResult { ok: true, code, message: String::new(), output },
         Err(e) => {
-            let s = e.to_string();
+            // With its causes: "Could not start X: ... requires elevation. (os error 740)" is what
+            // tells that the program needs admin rights.
+            let s = format!("{e:#}");
             // Run failures carry "code|output"
             if let Some((code, out)) = s.split_once('|') {
                 if let Ok(c) = code.parse::<u32>() {
