@@ -5209,7 +5209,7 @@ mod tests {
     fn automatic_updates_off_tells_nothing_about_that_apps_updates() {
         use crate::model::{AppStatus, AutoMode, DriverEntry, Settings};
         let app = |id: &str| {
-            let d = DriverEntry { id: id.into(), name: id.into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.0".into(), latest: Some("2.0".into()), status: AppStatus::Update, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None };
+            let d = DriverEntry { id: id.into(), name: id.into(), kind: String::new(), maker: String::new(), source: String::new(), version: "1.0".into(), latest: Some("2.0".into()), status: AppStatus::Update, size: None, date: None, notes_url: None, vendor_url: None, note: None, notes: vec![], pre_channel: None, studio: None };
             super::driver_app(&d, AppStatus::Update, true, None, None)
         };
         let (krita, obs) = (app("tools:krita"), app("tools:obs"));
