@@ -203,6 +203,7 @@ fn toggle_popup(app: &AppHandle, rect: Rect) {
                 .skip_taskbar(true)
                 .visible(false)
                 .focused(true)
+                .disable_drag_drop_handler()
                 .background_color(tauri::window::Color(0x1A, 0x1A, 0x1A, 0xFF))
                 .build()
             else {
@@ -256,5 +257,20 @@ pub fn set_count(app: &AppHandle, n: usize) {
             n => format!("The Updater 3D, {n} updates ready"),
         };
         let _ = t.set_tooltip(Some(tip));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// No window takes dropped files: with the handler on, the window library asserts that
+    /// Windows registered it, and a refusal (seen in the log as "assertion failed:
+    /// RegisterDragDrop") crashes the whole app.
+    #[test]
+    fn every_window_is_built_without_a_drop_handler() {
+        for (file, src) in [("tray.rs", include_str!("tray.rs")), ("render.rs", include_str!("render.rs"))] {
+            let built = src.matches(concat!("WebviewWindowBuilder", "::new(")).count();
+            let off = src.matches(concat!(".disable_drag_drop", "_handler()")).count();
+            assert!(built > 0 && built == off, "{file}: {built} windows, {off} without a drop handler");
+        }
     }
 }

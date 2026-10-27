@@ -147,6 +147,7 @@ pub async fn render_in(app: &AppHandle, url: &str, data_dir: Option<PathBuf>) ->
         .skip_taskbar(true)
         .inner_size(1280.0, 900.0)
         .incognito(true)
+        .disable_drag_drop_handler()
         // Only the page's own site: a hand-off to a bot check or another site ends the read.
         .on_navigation(move |u| u.as_str() == "about:blank" || (u.scheme() == "https" && u.host_str().is_some_and(|h| same_site(h, &nav_site))))
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
