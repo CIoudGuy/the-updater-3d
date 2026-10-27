@@ -1,0 +1,184 @@
+# Builds a release from a version tag (v1.2.3) and attaches the installer to a draft GitHub
+# release. When SignPath is set up (the SIGNPATH_* repository variables and the SIGNPATH_API_TOKEN
+# secret), the program is signed first, the installer is built around the signed program, and the
+# installer is signed too. Each signing request waits for its approval in SignPath.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # A dry run: builds an existing tag and keeps the installer as a workflow artifact only.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build, like v1.2.3"
+        required: true
+      attach:
+        description: "Also attach the installer to that tag's release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+      SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+      SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The tag matches the app's version
+        id: ver
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne $env:TAG -or $conf -ne $version) {
+            throw "Tag $env:TAG does not match package.json $version / tauri.conf.json $conf"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install
+        run: npm ci
+
+      - name: Tests
+        run: |
+          npm run check
+          npm test
+          cd src-tauri
+          cargo test --release --lib
+
+      - name: Build the program
+        run: npx tauri build --no-bundle
+
+      # Packing the installer writes the bundle type into the copy of the program it packs, which
+      # would break a signature made before. Written here first (the same bytes Tauri writes), the
+      # signed program goes into the installer unchanged; Tauri then only warns that it found no
+      # placeholder left to fill.
+      - name: Write the bundle type into the program
+        run: python -I -c "import sys;p=sys.argv[1];d=open(p,'rb').read();a=b'__TAURI_BUNDLE_TYPE_VAR_UNK';assert d.count(a)==1, 'placeholder not found once';open(p,'wb').write(d.replace(a,b'__TAURI_BUNDLE_TYPE_VAR_NSS'))" src-tauri/target/release/the-updater-3d.exe
+
+      - name: Stage the program for signing
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/program | Out-Null
+          Copy-Item src-tauri/target/release/the-updater-3d.exe out/program/
+
+      - name: Upload the program
+        id: program
+        if: env.SIGNPATH_ORGANIZATION_ID != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: program
+          path: out/program/the-updater-3d.exe
+          if-no-files-found: error
+
+      - name: Sign the program
+        if: env.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: program
+          github-artifact-id: ${{ steps.program.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: out/program-signed
+
+      - name: Put the signed program in the build
+        if: env.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          $signed = "out/program-signed/the-updater-3d.exe"
+          if ((Get-AuthenticodeSignature $signed).Status -ne "Valid") { throw "The program came back without a valid signature" }
+          Copy-Item $signed src-tauri/target/release/the-updater-3d.exe -Force
+
+      - name: Build the installer
+        run: npx tauri bundle --bundles nsis
+
+      - name: The installer holds the program as it was signed
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe | Select-Object -First 1
+          & 7z x -y -oout/check $installer.FullName | Out-Null
+          $packed = Get-ChildItem out/check -Recurse -Filter the-updater-3d.exe | Select-Object -First 1
+          if (-not $packed) { throw "The program is not in the installer" }
+          $want = (Get-FileHash src-tauri/target/release/the-updater-3d.exe).Hash
+          if ((Get-FileHash $packed.FullName).Hash -ne $want) { throw "The program in the installer differs from the one built and signed" }
+          if ($env:SIGNPATH_ORGANIZATION_ID -and (Get-AuthenticodeSignature $packed.FullName).Status -ne "Valid") { throw "The program in the installer is not validly signed" }
+          Remove-Item out/check -Recurse -Force
+
+      - name: Stage the installer
+        id: installer_file
+        shell: pwsh
+        run: |
+          $src = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter *.exe | Select-Object -First 1
+          $name = "TheUpdater3D_${{ steps.ver.outputs.version }}_x64-setup.exe"
+          New-Item -ItemType Directory -Force out/installer | Out-Null
+          Copy-Item $src.FullName "out/installer/$name"
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Upload the installer
+        id: installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: out/installer/${{ steps.installer_file.outputs.name }}
+          if-no-files-found: error
+
+      - name: Sign the installer
+        if: env.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.installer.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: out/installer-signed
+
+      - name: Use the signed installer
+        if: env.SIGNPATH_ORGANIZATION_ID != ''
+        shell: pwsh
+        run: |
+          $signed = "out/installer-signed/${{ steps.installer_file.outputs.name }}"
+          if ((Get-AuthenticodeSignature $signed).Status -ne "Valid") { throw "The installer came back without a valid signature" }
+          Copy-Item $signed "out/installer/${{ steps.installer_file.outputs.name }}" -Force
+
+      - name: Attach the installer to a draft release
+        if: github.event_name == 'push' || inputs.attach
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          $file = "out/installer/${{ steps.installer_file.outputs.name }}"
+          (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $file --clobber
+          } else {
+            gh release create $tag $file --draft --verify-tag --title "The Updater 3D ${{ steps.ver.outputs.version }}" --notes "Release notes to follow."
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Could not attach the installer" }

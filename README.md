@@ -87,6 +87,19 @@ Microsoft's winget catalog, and its own update feed to check for new versions of
 check sends the app's version and a random install ID (made once, not linked to you) so new
 versions can be counted; nothing else.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
+- Committers and reviewers: [CIoudGuy](https://github.com/CIoudGuy)
+- Approvers: [CIoudGuy](https://github.com/CIoudGuy)
+
+Every release is built from this repository by GitHub Actions (see the
+[release workflow](.github/workflows/release.yml)), and each signing request is approved by hand.
+Only what this repository builds is signed: the app and its installer. What the app sends over the
+network is described under [Privacy](#privacy).
+
 ## Build from source
 
 Requires [Rust](https://rustup.rs) 1.95+ and Node.js 20+.
