@@ -10,6 +10,7 @@ pub struct Proc {
     pub pid: u32,
     pub name: String,
     pub exe: Option<PathBuf>,
+    pub parent: Option<u32>,
     /// percent of the whole machine
     pub cpu: f32,
     pub memory: u64,
@@ -45,6 +46,7 @@ pub fn list_fresh() -> Vec<Proc> {
             pid: p.pid().as_u32(),
             name: p.name().to_string_lossy().to_string(),
             exe: p.exe().map(Path::to_path_buf),
+            parent: p.parent().map(|x| x.as_u32()),
             cpu: p.cpu_usage() / cores,
             memory: p.memory(),
         })
@@ -133,6 +135,21 @@ pub fn running_as(procs: &[Proc], app: &str) -> Vec<String> {
     out
 }
 
+/// The process to close for `pid`: the first one of its program. A browser's camera helper leads
+/// to the browser, which would only start the helper again if the helper alone were ended.
+pub fn owner(procs: &[Proc], pid: u32) -> u32 {
+    let mut cur = pid;
+    for _ in 0..16 {
+        let Some(p) = procs.iter().find(|x| x.pid == cur) else { break };
+        let Some(up) = p.parent.and_then(|u| procs.iter().find(|x| x.pid == u)) else { break };
+        if !up.name.eq_ignore_ascii_case(&p.name) {
+            break;
+        }
+        cur = up.pid;
+    }
+    cur
+}
+
 /// Friendly name for a blocking process: "Photoshop" from "Photoshop.exe".
 pub fn friendly(name: &str) -> String {
     name.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()
@@ -193,7 +210,7 @@ mod live {
 mod tests {
     #[test]
     fn an_app_is_found_running_by_its_name_wherever_it_runs() {
-        let p = |pid: u32, name: &str, exe: &str| super::Proc { pid, name: name.into(), exe: Some(exe.into()), cpu: 0.0, memory: 0 };
+        let p = |pid: u32, name: &str, exe: &str| super::Proc { pid, name: name.into(), exe: Some(exe.into()), parent: None, cpu: 0.0, memory: 0 };
         let list = vec![
             p(10, "ShareX.exe", r"C:\Program Files (x86)\Steam\steamapps\common\ShareX\ShareX.exe"),
             p(11, "sharex.exe", r"D:\Portable\ShareX\sharex.exe"),
@@ -207,6 +224,19 @@ mod tests {
         assert!(super::running_as(&[p(20, "GoogleDrive.exe", r"C:\g.exe")], "Go").is_empty());
         assert!(super::running_as(&list, "OBS Studio").is_empty());
         assert!(super::running_as(&list, "  ").is_empty());
+    }
+
+    #[test]
+    fn a_helper_leads_to_the_program_that_would_start_it_again() {
+        let p = |pid: u32, name: &str, parent: Option<u32>| super::Proc { pid, name: name.into(), exe: None, parent, cpu: 0.0, memory: 0 };
+        let list = vec![p(1, "explorer.exe", None), p(10, "Browser.exe", Some(1)), p(11, "browser.exe", Some(10)), p(12, "browser.exe", Some(11)), p(20, "wenativehost.exe", Some(10)), p(30, "obs64.exe", Some(99))];
+        // The camera helper, however deep: the browser itself, not what started the browser.
+        assert_eq!(super::owner(&list, 12), 10);
+        assert_eq!(super::owner(&list, 10), 10);
+        // Another program started by it, a parent that is gone, a process that is gone.
+        assert_eq!(super::owner(&list, 20), 20);
+        assert_eq!(super::owner(&list, 30), 30);
+        assert_eq!(super::owner(&list, 500), 500);
     }
 
     #[test]

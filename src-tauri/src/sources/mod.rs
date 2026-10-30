@@ -81,7 +81,7 @@ impl StoreRef {
 #[derive(Clone, Debug)]
 pub enum SourceData {
     Adobe { sap: String, codex: String, platform: String, product_name: String },
-    Craft { key: String, msi_product_code: Option<String> },
+    Craft { key: String, msi_product_code: Option<String>, for_everyone: bool },
     Blender { series: String, kind: BlenderKind, msi_product_code: Option<String> },
     /// OBS Studio, Krita, FreeCAD, Godot, Unity. `series` is what makes an installed copy unique
     /// for apps that install side by side (FreeCAD "1.1", Godot "4.7.2", Unity "6000.3.27f1").
@@ -271,6 +271,12 @@ impl Plan {
         }
     }
 
+    /// Did the installer stop, changing nothing, because a program had one of `block_files` in
+    /// use? (A program can load them after the check before the install.)
+    pub fn stopped_for_files(&self, code: Option<u32>) -> bool {
+        self.app_id == "tools:obs" && code == Some(6)
+    }
+
     /// What the plan writes to: the app and the folders it unpacks into or deletes, lowercase.
     /// Two jobs that share one of these never run their steps at the same time.
     pub fn write_keys(&self) -> Vec<String> {
@@ -360,6 +366,14 @@ pub fn check_signer(path: &std::path::Path, want: &str, got: Option<String>) -> 
 #[cfg(test)]
 mod plan_tests {
     use super::*;
+
+    #[test]
+    fn obs_stopping_for_its_files_is_told_from_other_exits() {
+        assert!(plan("tools:obs", vec![]).stopped_for_files(Some(6)));
+        // Code 5 is OBS itself running; another app's 6 means something else.
+        assert!(!plan("tools:obs", vec![]).stopped_for_files(Some(5)));
+        assert!(!plan("tools:krita", vec![]).stopped_for_files(Some(6)));
+    }
 
     fn plan(app_id: &str, steps: Vec<Step>) -> Plan {
         Plan { app_id: app_id.into(), kind: JobKind::Update, name: "X".into(), to_version: "1".into(), downloads: vec![], steps, block_dirs: vec![], block_names: vec![], verify: Verify::None, fallback: None, cleanup: vec![] }

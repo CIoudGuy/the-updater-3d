@@ -184,6 +184,8 @@ export interface Job {
   detail?: string;
   /** Processes that must close before this job continues */
   blockedBy: string[];
+  /** blockedBy are other apps using this app's files, not the app itself */
+  blockedByFiles?: boolean;
   error: JobError | null;
   startedAt: string | null;
   finishedAt: string | null;

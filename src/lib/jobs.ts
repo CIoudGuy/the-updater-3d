@@ -72,13 +72,22 @@ export function cancelTip(j: Pick<Job, "state" | "cancelable">, label = "Cancel"
   return canCancel(j) ? label + keys : NO_STOP_TIP;
 }
 
+/** Words that start a sentence in the messages. Any other first word can be a name ("Windows Installer", "Photoshop") and keeps its capital. */
+const PLAIN_START = /^(The|This|That|These|Those|It|Its|A|An|Another|Some|Most|No|Not|Nothing|Files?|Could|Can|Cannot|Download|Downloads|Installing|Updating|Removing|Uninstalling|Unpacking|Checking|Preparing|Installer|Uninstaller|Checksum|Low)\b/;
+
 /** Status of a failed job in a list row: "Failed, files in use" from the message, the code only if there is no message. */
 export function failedLine(j: Pick<Job, "error">): string {
   if (!j.error) return "Failed";
   const first = j.error.message.trim().split(/\.\s/)[0].replace(/\.$/, "");
   if (!first) return `Failed, ${j.error.code}`;
-  const lower = /^[A-Z][a-z]/.test(first) ? first[0].toLowerCase() + first.slice(1) : first;
+  const lower = PLAIN_START.test(first) ? first[0].toLowerCase() + first.slice(1) : first;
   return `Failed, ${lower}`;
+}
+
+/** Status of a finished job in a list row. A job that ended with nothing done says why ("Adobe has no update for this PC yet"). */
+export function finishedLine(j: Pick<Job, "state" | "step" | "error">): string {
+  if (j.state === "done") return "Finished";
+  return j.state === "failed" ? failedLine(j) : j.step || "Canceled";
 }
 
 // ----- queue sections -----

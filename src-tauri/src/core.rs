@@ -632,6 +632,10 @@ fn blockers(list: &[procs::Proc], dirs: &[PathBuf], names: &[String], files: &[P
     let mut b = procs::blocking(list, dirs, names);
     if !files.is_empty() {
         let using = procs::using_files(files);
+        // A program that started moments ago (a browser starts its camera helper again the moment
+        // it ends) is not in a list taken before that, and it holds the file all the same.
+        let fresh = using.iter().any(|p| !list.iter().any(|x| x.pid == *p)).then(procs::list_fresh);
+        let list = fresh.as_deref().unwrap_or(list);
         let more: Vec<procs::Proc> = list.iter().filter(|p| using.contains(&p.pid) && !b.iter().any(|x| x.pid == p.pid)).cloned().collect();
         b.extend(more);
     }
@@ -861,6 +865,7 @@ impl Core {
             job.speed = 0.0;
             job.eta = None;
             job.blocked_by.clear();
+            job.blocked_by_files = false;
             job.cancelable = false;
             job.ready = false;
             // Asked again when its turn comes; the old "needs admin rights" no longer holds.
@@ -1544,11 +1549,13 @@ impl Core {
         let keep_patch = self.settings.read().blender_keep_patch_versions;
         let pre = self.settings.read().pre_releases.clone();
         let opre = self.other_pre.read().clone();
+        let held = self.persisted.lock().not_offered.clone();
+        let at = chrono::Utc::now();
         let mut st = self.st.lock();
         let mut latest = HashMap::new();
         for i in &installed {
             let l = match i.source {
-                Source::Adobe => cat.as_ref().and_then(|c| adobe::latest(i, &installed, c)),
+                Source::Adobe => cat.as_ref().and_then(|c| adobe::latest(i, &installed, c)).filter(|l| !not_offered(held.get(&i.id), &l.version, at)),
                 Source::Craft => cf.as_ref().and_then(|f| craft::latest_with(i, f, pre.get(&i.id).copied())),
                 Source::Blender => bf.as_ref().and_then(|f| blender::latest_kept(i, &installed, f, keep_patch)),
                 Source::Tools => tf.as_ref().and_then(|f| tools::latest_with(i, &installed, f, pre.get(&i.id).copied())),
@@ -3188,6 +3195,7 @@ impl Core {
                 step: "Waiting".into(),
                 detail: String::new(),
                 blocked_by: vec![],
+                blocked_by_files: false,
                 error: None,
                 started_at: None,
                 finished_at: None,
@@ -3335,7 +3343,10 @@ impl Core {
                 return;
             }
             let left = tauri::async_runtime::spawn_blocking(move || {
-                let pids: Vec<u32> = blockers(&procs::list_fresh(), &d, &n, &f).iter().map(|p| p.pid).collect();
+                let list = procs::list_fresh();
+                let mut pids: Vec<u32> = blockers(&list, &d, &n, &f).iter().map(|p| procs::owner(&list, p.pid)).collect();
+                pids.sort_unstable();
+                pids.dedup();
                 let mut left = procs::close(&pids, Duration::from_secs(12));
                 // A background helper its parent starts again right away (a browser restarts
                 // its native messaging host): end the new ones too, for a few seconds.
@@ -3742,6 +3753,7 @@ impl Core {
                     j.step = "Done".into();
                     j.detail.clear();
                     j.blocked_by.clear();
+                    j.blocked_by_files = false;
                     j.finished_at = Some(now());
                     name = j.name.clone();
                     kind = j.kind;
@@ -3819,6 +3831,24 @@ impl Core {
                 });
                 self.emit_apps();
             }
+            Ok(Outcome::NotOffered) => {
+                {
+                    let mut p = self.persisted.lock();
+                    p.not_offered.insert(plan.app_id.clone(), (plan.to_version.clone(), now()));
+                    store::save_state(&p);
+                }
+                self.set_job(id, |j| {
+                    j.state = JobState::Canceled;
+                    j.step = "Adobe has no update for this PC yet".into();
+                    j.detail.clear();
+                    j.speed = 0.0;
+                    j.eta = None;
+                    j.finished_at = Some(now());
+                });
+                self.log_activity(ActivityKind::Check, format!("Adobe has no {} {} for this PC yet", plan.name, plan.to_version), Some("Nothing changed. Creative Cloud installs it once Adobe offers it, and it is checked again in a week.".into()), None);
+                let me = self.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || me.show_versions_now()).await;
+            }
             Ok(Outcome::Canceled) => {
                 self.set_job(id, |j| {
                     j.state = JobState::Canceled;
@@ -3857,10 +3887,12 @@ impl Core {
             let mut names: Vec<String> = b.iter().map(|p| procs::friendly(&p.name)).collect();
             names.sort();
             names.dedup();
+            let by_files = procs::blocking(&b, &block.0, &block.1).is_empty();
             let changed = self.with_job(id, |j| {
                 let was = j.job.state != JobState::Blocked;
                 j.job.state = JobState::Blocked;
                 j.job.blocked_by = names.clone();
+                j.job.blocked_by_files = by_files;
                 j.job.step = format!("Waiting for {} to close", names.join(", "));
                 if !j.job.detail.starts_with("Could not close") {
                     j.job.detail = "Downloaded and checked. It installs once that is closed".into();
@@ -3876,6 +3908,7 @@ impl Core {
         self.set_job(id, |j| {
             j.state = JobState::Installing;
             j.blocked_by.clear();
+            j.blocked_by_files = false;
             j.detail.clear();
         });
         self.with_job(id, |j| j.block = Default::default());
@@ -4202,6 +4235,25 @@ impl Core {
                 self.set_job(id, |j| j.step = label.clone());
                 res = self.elevator.run_with(step.clone(), silent, checks.clone(), self.window_open()).await;
             }
+            // A program loaded the files after the check before the install: wait for it like for
+            // one found then, and run the installer again.
+            let mut held_tries = 0;
+            while res.as_ref().ok().is_some_and(|r| !r.ok && plan.stopped_for_files(r.code)) {
+                let files = plan.block_files();
+                let held = {
+                    let files = files.clone();
+                    tauri::async_runtime::spawn_blocking(move || blockers(&procs::list_fresh(), &[], &[], &files)).await.unwrap_or_default()
+                };
+                if held.is_empty() || held_tries >= 3 {
+                    break;
+                }
+                held_tries += 1;
+                if !self.wait_closed(id, &ctl, (vec![], vec![], files)).await {
+                    return Ok(Outcome::Canceled);
+                }
+                self.set_job(id, |j| j.step = label.clone());
+                res = self.elevator.run_with(step.clone(), silent, checks.clone(), self.window_open()).await;
+            }
             let res = match res {
                 // A program already ran: the job can not wait and start over, so it fails.
                 Err(e) if ran_program && crate::elevate::admin_unavailable(&e) => return Err(anyhow!("{e:#}")),
@@ -4215,6 +4267,11 @@ impl Core {
             }
             if !res.ok {
                 return Err(anyhow!("{}", step_failure(&res, step.label(), step_log(step).as_deref())));
+            }
+            // Adobe's updater finished at once, with nothing for this PC: no need to wait for a
+            // new version to show up.
+            if is_rum(step) && rum_offered_nothing(since) {
+                return Ok(Outcome::NotOffered);
             }
         }
 
@@ -4735,6 +4792,40 @@ fn rum_watch(step: &sources::Step, to_version: &str, sizes: &HashMap<String, u64
     let sap = args.iter().find_map(|a| a.strip_prefix("--productVersions="))?.split('#').next()?.to_string();
     let expected = sizes.get(&format!("{sap}@{to_version}")).copied().unwrap_or(0);
     Some((paths::local_app_data().join("Adobe").join("RemoteUpdateManager_Downloads"), format!("{sap}_"), expected))
+}
+
+fn is_rum(step: &sources::Step) -> bool {
+    matches!(step, sources::Step::Run { exe, .. } if exe.to_string_lossy().contains("RemoteUpdateManager"))
+}
+
+/// Did Remote Update Manager, in the run that just ended, find nothing to install on this PC? It
+/// still exits with 0 then. Its log is in the temp folder, newest run last.
+fn rum_offered_nothing(since: std::time::SystemTime) -> bool {
+    let log = std::env::temp_dir().join("RemoteUpdateManager.log");
+    let fresh = std::fs::metadata(&log).and_then(|m| m.modified()).is_ok_and(|t| t >= since);
+    fresh && wide_log_tail(&log).is_some_and(|t| rum_run_found_nothing(&t))
+}
+
+fn rum_run_found_nothing(log: &str) -> bool {
+    log.rsplit("Launching the RemoteUpdateManager").next().is_some_and(|run| run.contains("No new applicable Updates"))
+}
+
+/// The end of a UTF-16 log.
+fn wide_log_tail(p: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024) & !1)).ok()?;
+    let mut b = Vec::new();
+    f.read_to_end(&mut b).ok()?;
+    let wide: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Some(String::from_utf16_lossy(&wide))
+}
+
+/// Adobe's updater said this PC gets no `version` yet (`held`: that version and when): it is not
+/// offered for a week, by when Adobe may have released it here. A newer version is offered at once.
+fn not_offered(held: Option<&(String, String)>, version: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    held.is_some_and(|(v, at)| v == version && chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|t| now.signed_duration_since(t) < chrono::Duration::days(7)))
 }
 
 /// Bytes in the sub-folders of `dir` whose names start with `prefix`.
@@ -5651,7 +5742,64 @@ mod job_fix_tests {
     use std::path::PathBuf;
 
     fn proc(pid: u32, exe: &str) -> Proc {
-        Proc { pid, name: "blender.exe".into(), exe: Some(PathBuf::from(exe)), cpu: 0.0, memory: 0 }
+        Proc { pid, name: "blender.exe".into(), exe: Some(PathBuf::from(exe)), parent: None, cpu: 0.0, memory: 0 }
+    }
+
+    #[test]
+    fn a_program_that_just_started_still_blocks_the_install() {
+        let dir = std::env::temp_dir().join(format!("u3d-just-started-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("obs-virtualcam-module64.dll");
+        std::fs::write(&f, b"x").unwrap();
+        let mut child = crate::winutil::cmd("powershell.exe").args(["-NoProfile", "-Command", &format!("$f=[IO.File]::Open('{}','Open','Read','Read'); Start-Sleep 30", f.display())]).spawn().unwrap();
+        // The list was taken before the program started, like the 1.5 s cache of `procs::list`.
+        let stale: Vec<Proc> = vec![];
+        let t = std::time::Instant::now();
+        let mut found = vec![];
+        while found.is_empty() && t.elapsed() < std::time::Duration::from_secs(15) {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            found = super::blockers(&stale, &[], &[], std::slice::from_ref(&f));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![child.id()]);
+    }
+
+    #[test]
+    fn nothing_from_adobes_updater_is_told_from_an_update() {
+        let run = |what: &str| format!("x | Launching the RemoteUpdateManager...\r\nx | {what}\r\nx | Ending the RemoteUpdateManager Return Code (0)\r\n");
+        let nothing = run("No new applicable Updates. Seems like all products are up-to-date.");
+        let update = run("Following Updates are applicable on the system :");
+        assert!(super::rum_run_found_nothing(&nothing));
+        assert!(!super::rum_run_found_nothing(&update));
+        // Only the run that just ended counts: the log keeps the earlier ones.
+        assert!(!super::rum_run_found_nothing(&format!("{nothing}{update}")));
+        assert!(super::rum_run_found_nothing(&format!("{update}{nothing}")));
+        assert!(!super::rum_run_found_nothing(""));
+    }
+
+    #[test]
+    fn adobes_log_is_read_as_utf16() {
+        let p = std::env::temp_dir().join(format!("u3d-rum-{}.log", std::process::id()));
+        let mut b = vec![0xFF, 0xFE];
+        b.extend("x | Launching the RemoteUpdateManager...\r\nx | No new applicable Updates.\r\n".encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&p, &b).unwrap();
+        let text = super::wide_log_tail(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert!(super::rum_run_found_nothing(&text), "{text}");
+    }
+
+    #[test]
+    fn a_version_adobe_does_not_offer_waits_a_week() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let held = ("4.19.5".to_string(), at.to_rfc3339());
+        assert!(super::not_offered(Some(&held), "4.19.5", at + chrono::Duration::days(6)));
+        // Asked again after a week, and a newer version is offered at once.
+        assert!(!super::not_offered(Some(&held), "4.19.5", at + chrono::Duration::days(8)));
+        assert!(!super::not_offered(Some(&held), "4.19.6", at));
+        assert!(!super::not_offered(None, "4.19.5", at));
+        assert!(!super::not_offered(Some(&("4.19.5".to_string(), "soon".to_string())), "4.19.5", at));
     }
 
     #[test]
@@ -5726,6 +5874,7 @@ mod queue_tests {
             step: "Downloading".into(),
             detail: String::new(),
             blocked_by: vec![],
+            blocked_by_files: false,
             error: None,
             started_at: None,
             finished_at: None,

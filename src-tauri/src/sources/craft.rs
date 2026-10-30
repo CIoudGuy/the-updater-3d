@@ -10,7 +10,7 @@ use crate::model::{CatalogEntry, JobKind, Source, VersionInfo};
 use crate::{http, paths, version, winutil};
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const FEED_URL: &str = "https://api.storyteller.ai/v1/craft_apps/release_info";
@@ -308,9 +308,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry]) -> Vec<Installed> {
                 candidates.push(p.to_path_buf());
             }
         }
-        candidates.push(paths::program_files().join(a.name));
-        candidates.push(paths::local_app_data().join("Programs").join(a.name));
-        candidates.push(paths::local_app_data().join(a.name));
+        candidates.extend(usual_dirs(&paths::program_files(), &paths::local_app_data(), a.name));
         let dir = candidates.into_iter().find(|d| d.join(&exe_name).exists() || (d.exists() && a.key == "artcraft"));
         let exe = dir.as_ref().map(|d| d.join(&exe_name)).filter(|p| p.exists());
         let msi_code = if e.key.starts_with('{') { Some(e.key.clone()) } else { None };
@@ -349,7 +347,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry]) -> Vec<Installed> {
             read_only: false,
             store: None,
             icon_remote: None,
-            data: SourceData::Craft { key: a.key.to_string(), msi_product_code: msi_code },
+            data: SourceData::Craft { key: a.key.to_string(), msi_product_code: msi_code, for_everyone: e.hive != "HKCU" },
         });
     }
     out
@@ -468,6 +466,29 @@ async fn sha_for(r: &Release, asset: &Asset) -> Option<String> {
     })
 }
 
+/// Where the installers put an app: since 0.17 in an ArtCraft folder, for everyone or only for
+/// this user. Their uninstall entries name no folder.
+fn usual_dirs(program_files: &Path, local: &Path, name: &str) -> Vec<PathBuf> {
+    vec![
+        program_files.join(name),
+        program_files.join("ArtCraft").join(name),
+        local.join("Programs").join(name),
+        local.join("Programs").join("ArtCraft").join(name),
+        local.join(name),
+    ]
+}
+
+/// msiexec for a Craft app. Since 0.17 the installers default to "only for me" and stop (1603)
+/// while a copy for everyone is there, so the update of such a copy has to say it is for everyone.
+fn msi_step(name: &str, version: &str, msi: &Path, log: PathBuf, for_everyone: bool) -> Step {
+    let mut args: Vec<String> = vec!["/i".into(), msi.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "MSIFASTINSTALL=7".into()];
+    if for_everyone {
+        args.push("ALLUSERS=1".into());
+    }
+    args.extend(["/l*".to_string(), log.to_string_lossy().into()]);
+    Step::Run { exe: PathBuf::from("msiexec.exe"), args, cwd: None, ok_codes: vec![0, 3010, 1641], elevated: true, label: format!("Installing {name} {version}"), log: Some(log) }
+}
+
 pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: Option<&Installed>, feed: Option<&Feed>, prereleases: bool) -> Result<Plan> {
     let a = def(key).ok_or_else(|| anyhow!("unknown Craft app {key}"))?;
     let r = find_release(a, ver, feed, prereleases).await?;
@@ -497,15 +518,8 @@ pub async fn plan_install(key: &str, ver: Option<&str>, kind: JobKind, current: 
     }
     let is_msi = asset.name.to_ascii_lowercase().ends_with(".msi");
     if is_msi {
-        steps.push(Step::Run {
-            exe: PathBuf::from("msiexec.exe"),
-            args: vec!["/i".into(), dest.to_string_lossy().into(), "/qn".into(), "/norestart".into(), "MSIFASTINSTALL=7".into(), "/l*".into(), log.to_string_lossy().into()],
-            cwd: None,
-            ok_codes: vec![0, 3010, 1641],
-            elevated: true,
-            label: format!("Installing {} {}", a.name, r.version),
-            log: Some(log),
-        });
+        let for_everyone = current.is_some_and(|c| matches!(c.data, SourceData::Craft { for_everyone: true, .. }));
+        steps.push(msi_step(a.name, &r.version, &dest, log, for_everyone));
     } else {
         steps.push(Step::Run {
             exe: dest.clone(),
@@ -586,7 +600,7 @@ mod tests {
             missing: false,
             read_only: false,
             icon_remote: None,
-            data: SourceData::Craft { key: "photocraft".into(), msi_product_code: None },
+            data: SourceData::Craft { key: "photocraft".into(), msi_product_code: None, for_everyone: true },
             store: None,
         };
         let mut feed = Feed::default();
@@ -608,6 +622,29 @@ mod tests {
         assert_eq!(latest_with(&inst, &quiet, Some(true)).map(|l| l.version).as_deref(), Some("1.5.0"));
         let (s, p) = split_newest(vec![rel("2.0.0-rc.1", true), rel("1.9.0", false), rel("1.9.0-rc.1", true)]);
         assert_eq!((s.map(|r| r.version), p.map(|r| r.version)), (Some("1.9.0".to_string()), Some("2.0.0-rc.1".to_string())));
+    }
+
+    #[test]
+    fn a_copy_for_everyone_is_updated_for_everyone() {
+        let args = |for_everyone: bool| match msi_step("PhotoCraft", "0.17.0", Path::new(r"C:\d\photocraft.msi"), PathBuf::from(r"C:\l\p.log"), for_everyone) {
+            Step::Run { args, .. } => args,
+            _ => panic!("not a program"),
+        };
+        // Without it the 0.17 installers stop: "This app is already installed for everyone".
+        assert!(args(true).iter().any(|a| a == "ALLUSERS=1"));
+        // A copy only for this user, or no copy, is left to the installer's default.
+        assert!(!args(false).iter().any(|a| a.starts_with("ALLUSERS")));
+        // The log switch stays right before its path.
+        let a = args(true);
+        assert_eq!(a[a.len() - 2..], ["/l*".to_string(), r"C:\l\p.log".to_string()]);
+    }
+
+    #[test]
+    fn apps_are_found_in_the_folders_of_the_new_installers() {
+        let d = usual_dirs(Path::new(r"C:\Program Files"), Path::new(r"C:\Users\Alex\AppData\Local"), "PhotoCraft");
+        assert!(d.contains(&PathBuf::from(r"C:\Program Files\PhotoCraft")));
+        assert!(d.contains(&PathBuf::from(r"C:\Program Files\ArtCraft\PhotoCraft")));
+        assert!(d.contains(&PathBuf::from(r"C:\Users\Alex\AppData\Local\Programs\ArtCraft\PhotoCraft")));
     }
 
     #[test]

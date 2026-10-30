@@ -67,6 +67,8 @@ pub enum Outcome {
     Done,
     Paused,
     Canceled,
+    /// The publisher's own updater has no update for this PC yet: nothing changed, nothing failed.
+    NotOffered,
 }
 
 /// Progress counter shared with the job runner.

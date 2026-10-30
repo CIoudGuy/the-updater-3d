@@ -221,6 +221,9 @@ pub struct Persisted {
     /// "auto" once the source was set without one. Applied once, so later changes in Settings win.
     #[serde(default)]
     pub adobe_choice: Option<String>,
+    /// Adobe app id -> the version Adobe's updater had nothing for on this PC, and when it said so
+    #[serde(default)]
+    pub not_offered: std::collections::BTreeMap<String, (String, String)>,
 }
 
 pub fn load_state() -> Persisted {

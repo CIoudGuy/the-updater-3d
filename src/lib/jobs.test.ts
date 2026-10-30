@@ -1,8 +1,27 @@
 // node --test src/lib/jobs.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupQueue, jobDetail, jobStatus, queueGroup, queueSections, queueSummary, readyLine } from "./jobs.ts";
+import { failedLine, finishedLine, groupQueue, jobDetail, jobStatus, queueGroup, queueSections, queueSummary, readyLine } from "./jobs.ts";
 import type { Job } from "./types";
+
+test("a failure reads as one sentence and names keep their capitals", () => {
+  const line = (message: string) => failedLine({ error: { code: "Error 1603", message, detail: "", logPath: null } });
+  assert.equal(line("Windows Installer hit a fatal error. The log has the details."), "Failed, Windows Installer hit a fatal error");
+  assert.equal(line("Photoshop is running. Close it."), "Failed, Photoshop is running");
+  assert.equal(line("OBS Studio is running."), "Failed, OBS Studio is running");
+  assert.equal(line("The installer finished, but Krita reports 5.2 instead of 5.3"), "Failed, the installer finished, but Krita reports 5.2 instead of 5.3");
+  assert.equal(line("Another app is using its files."), "Failed, another app is using its files");
+  assert.equal(line("Files are in use."), "Failed, files are in use");
+  assert.equal(failedLine({ error: { code: "Error 5", message: " ", detail: "", logPath: null } }), "Failed, Error 5");
+});
+
+test("a job that ended with nothing done says why, without Failed or Retry wording", () => {
+  assert.equal(finishedLine({ state: "canceled", step: "Adobe has no update for this PC yet", error: null }), "Adobe has no update for this PC yet");
+  assert.equal(finishedLine({ state: "canceled", step: "Canceled", error: null }), "Canceled");
+  assert.equal(finishedLine({ state: "canceled", step: "", error: null }), "Canceled");
+  assert.equal(finishedLine({ state: "done", step: "Done", error: null }), "Finished");
+  assert.equal(finishedLine({ state: "failed", step: "x", error: null }), "Failed");
+});
 
 test("the detail line shows for running and waiting jobs only", () => {
   assert.equal(jobDetail({ state: "downloading", detail: "Downloading over 6 connections from github.com" }), "Downloading over 6 connections from github.com");

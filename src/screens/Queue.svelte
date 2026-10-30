@@ -14,7 +14,7 @@
   import { store } from "../lib/store.svelte";
   import { isPaused, togglePauseAll } from "../lib/actions";
   import { approx, bytes, clock, countOf, inUnit, speed, speedParts, unitFor } from "../lib/format";
-  import { NO_STOP_TIP, canCancel, canPause, cancelTip, failedLine, groupQueue, jobDetail, jobStatus, jobWhat, pauseTip, pct, queueSummary, readyLine } from "../lib/jobs";
+  import { NO_STOP_TIP, canCancel, canPause, cancelTip, finishedLine, groupQueue, jobDetail, jobStatus, jobWhat, pauseTip, pct, queueSummary, readyLine } from "../lib/jobs";
   import { timeLeft } from "../lib/view";
   import { enter, reduced } from "../lib/motion";
   import type { Job } from "../lib/types";
@@ -252,7 +252,7 @@
           </svelte:element>
           <span class="st fin ellipsis" title={j.error ? `${j.error.code}. ${j.error.message}` : undefined} style:color={j.state === "failed" ? "var(--err)" : j.state === "done" ? "var(--ok)" : "var(--text-3)"}>
             <Dab color={j.state === "failed" ? "#D9706A" : j.state === "done" ? "#7FB77E" : "#6E6E6E"} />
-            {j.state === "done" ? "Finished" : j.state === "failed" ? failedLine(j) : "Canceled"}
+            {finishedLine(j)}
           </span>
           <span class="tm">{j.finishedAt ? clock(j.finishedAt) : ""}</span>
           {#if j.state === "failed"}

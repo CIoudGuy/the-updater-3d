@@ -150,10 +150,10 @@ fn craft_and_obs_settings_and_add_ons() {
     let r = roots("craft");
     let pc = mk(r.roaming.join("Photocraft"));
     let launcher = mk(r.roaming.join("ai.storyteller.artcraft-launcher"));
-    let me = app("craft:photocraft", "PhotoCraft", "0.12.0", None, SourceData::Craft { key: "photocraft".into(), msi_product_code: None });
+    let me = app("craft:photocraft", "PhotoCraft", "0.12.0", None, SourceData::Craft { key: "photocraft".into(), msi_product_code: None, for_everyone: true });
     // Windows paths ignore case: "PhotoCraft" is the "Photocraft" folder.
     assert_eq!(targets(&steps(&me, &[], &r)).iter().map(|t| t.to_lowercase()).collect::<Vec<_>>(), vec![s(&pc).to_lowercase()]);
-    let la = app("craft:artcraft-launcher", "ArtCraft Launcher", "0.6.1", None, SourceData::Craft { key: "artcraft-launcher".into(), msi_product_code: None });
+    let la = app("craft:artcraft-launcher", "ArtCraft Launcher", "0.6.1", None, SourceData::Craft { key: "artcraft-launcher".into(), msi_product_code: None, for_everyone: true });
     assert_eq!(targets(&steps(&la, &[], &r)), vec![s(&launcher)]);
     let obs_cfg = mk(r.roaming.join("obs-studio"));
     let obs_plugins = mk(r.program_data.join("obs-studio"));

@@ -281,6 +281,9 @@ pub struct Job {
     #[serde(default)]
     pub detail: String,
     pub blocked_by: Vec<String>,
+    /// The programs in `blocked_by` are other apps using this app's files, not the app itself
+    #[serde(default)]
+    pub blocked_by_files: bool,
     pub error: Option<JobError>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
