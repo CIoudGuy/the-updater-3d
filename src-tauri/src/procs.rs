@@ -150,6 +150,14 @@ pub fn owner(procs: &[Proc], pid: u32) -> u32 {
     cur
 }
 
+/// A program that keeps `file` open until it is killed, as a game keeps OBS's capture hook loaded.
+/// ping has next to nothing to load: PowerShell took over 15 s to start on a busy GitHub runner.
+#[cfg(test)]
+pub(crate) fn holder_of(file: &Path) -> std::process::Child {
+    let f = std::fs::File::open(file).unwrap();
+    crate::winutil::cmd("ping.exe").args(["-n", "60", "127.0.0.1"]).stdin(f).stdout(std::process::Stdio::null()).spawn().unwrap()
+}
+
 /// Friendly name for a blocking process: "Photoshop" from "Photoshop.exe".
 pub fn friendly(name: &str) -> String {
     name.trim_end_matches(".exe").trim_end_matches(".EXE").to_string()
@@ -246,11 +254,7 @@ mod tests {
         let f = dir.join("graphics-hook64.dll");
         std::fs::write(&f, b"x").unwrap();
         assert!(super::using_files(&[f.clone()]).is_empty());
-        // A program that keeps the file open (as a game keeps OBS's capture hook loaded).
-        let mut child = crate::winutil::cmd("powershell.exe")
-            .args(["-NoProfile", "-Command", &format!("$f=[IO.File]::Open('{}','Open','Read','Read'); Start-Sleep 30", f.display())])
-            .spawn()
-            .unwrap();
+        let mut child = super::holder_of(&f);
         let t = std::time::Instant::now();
         let mut found = vec![];
         while found.is_empty() && t.elapsed() < std::time::Duration::from_secs(15) {

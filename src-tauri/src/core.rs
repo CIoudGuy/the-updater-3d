@@ -5751,7 +5751,7 @@ mod job_fix_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("obs-virtualcam-module64.dll");
         std::fs::write(&f, b"x").unwrap();
-        let mut child = crate::winutil::cmd("powershell.exe").args(["-NoProfile", "-Command", &format!("$f=[IO.File]::Open('{}','Open','Read','Read'); Start-Sleep 30", f.display())]).spawn().unwrap();
+        let mut child = crate::procs::holder_of(&f);
         // The list was taken before the program started, like the 1.5 s cache of `procs::list`.
         let stale: Vec<Proc> = vec![];
         let t = std::time::Instant::now();
