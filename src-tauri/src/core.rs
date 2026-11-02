@@ -2159,9 +2159,11 @@ impl Core {
         for a in craft::APPS {
             let url = match a.key {
                 "artcraft" | "artcraft-launcher" => "https://getartcraft.com/artcraft-icon.svg".to_string(),
+                // ArtCraft's site has no picture of this community app; the launcher's repo has.
+                "solidcraft" => "https://raw.githubusercontent.com/storytold/craft-launcher/main/assets/app-icons/solidcraft.png".to_string(),
                 k => format!("https://getartcraft.com/images/apps/{k}/icon.webp"),
             };
-            let ext = if url.ends_with(".svg") { "svg" } else { "webp" };
+            let ext = url.rsplit('.').next().unwrap_or("webp").to_string();
             wanted.push((format!("craft:{}", a.key), url, format!("craft-{}.{ext}", a.key)));
         }
         for a in tools::APPS {

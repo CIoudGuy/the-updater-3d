@@ -42,6 +42,10 @@ pub const APPS: &[AppDef] = &[
     AppDef { key: "deckcraft", repo: "storytold/deckcraft", name: "DeckCraft", tagline: "Presentations and slide shows", code: "Dk", fg: "#E8A15C", bg: "#2E1B0A", tag_prefix: "v" },
     AppDef { key: "cadcraft", repo: "storytold/cadcraft", name: "CADCraft", tagline: "Computer-aided design and drafting", code: "Cd", fg: "#B5C46A", bg: "#22260E", tag_prefix: "v" },
     AppDef { key: "gridcraft", repo: "storytold/gridcraft", name: "GridCraft", tagline: "Spreadsheets and data analysis", code: "Gr", fg: "#6AC48A", bg: "#0E2617", tag_prefix: "v" },
+    AppDef { key: "texturecraft", repo: "storytold/texturecraft", name: "TextureCraft", tagline: "3D texture painting", code: "Tx", fg: "#E58A4E", bg: "#2B1608", tag_prefix: "v" },
+    AppDef { key: "craft-anything", repo: "storytold/craft-anything", name: "Craft Anything", tagline: "See how any software works, then craft your own", code: "Ca", fg: "#74AAFF", bg: "#0F1B33", tag_prefix: "v" },
+    // A community app the ArtCraft Launcher lists, released from its own repo.
+    AppDef { key: "solidcraft", repo: "tangency-labs/solidcraft", name: "SolidCraft", tagline: "Parametric 3D CAD", code: "So", fg: "#8CC4FF", bg: "#0E1E33", tag_prefix: "v" },
     AppDef { key: "artcraft", repo: "storytold/artcraft", name: "ArtCraft", tagline: "AI image and video studio", code: "Ar", fg: "#EDEDED", bg: "#3A2A1A", tag_prefix: "artcraft-v" },
 ];
 
@@ -118,8 +122,8 @@ pub async fn fetch(prereleases: bool) -> Result<Feed> {
         }
         Err(e) => log::warn!("craft feed: {e}"),
     }
-    // Apps the feed does not list (FigCraft, ArtCraft today), and the final release of an app the
-    // feed lists a pre-release of, come from GitHub.
+    // Apps the feed does not list (FigCraft, TextureCraft, Craft Anything, SolidCraft and ArtCraft
+    // today), and the final release of an app the feed lists a pre-release of, come from GitHub.
     for a in APPS {
         if feed.stable.contains_key(a.key) {
             continue;
@@ -294,7 +298,7 @@ pub fn scan(uninstall: &[winutil::UninstallEntry]) -> Vec<Installed> {
     for a in APPS {
         let entry = uninstall.iter().find(|e| {
             e.display_name.eq_ignore_ascii_case(a.name)
-                && (e.publisher.contains("Learning Machines") || e.publisher.to_ascii_lowercase().contains("storyteller") || e.url_update_info.contains("storytold") || e.url_update_info.contains("artcraft") || e.publisher.is_empty() || a.key == "artcraft")
+                && (e.publisher.contains("Learning Machines") || e.publisher.to_ascii_lowercase().contains("storyteller") || e.url_update_info.contains("storytold") || e.url_update_info.contains("artcraft") || e.publisher.is_empty() || a.key == "artcraft" || (a.key == "solidcraft" && e.publisher.contains("SolidCraft")))
         });
         let Some(e) = entry else { continue };
         let exe_name = if a.key == "artcraft" { "ArtCraft.exe".to_string() } else { format!("{}.exe", a.key) };
@@ -683,5 +687,44 @@ mod tests {
             ],
         };
         assert_eq!(r.installer().unwrap().name, "photocraft-0.12.0-windows-x64.msi");
+    }
+
+    fn entry(name: &str, publisher: &str, update_info: &str) -> winutil::UninstallEntry {
+        winutil::UninstallEntry {
+            key: "{11111111-2222-3333-4444-555555555555}".into(),
+            hive: "HKLM",
+            display_name: name.into(),
+            display_version: "0.2.0".into(),
+            publisher: publisher.into(),
+            url_update_info: update_info.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_newer_apps_are_found_with_what_their_installers_register() {
+        for (id, e) in [
+            ("craft:texturecraft", entry("TextureCraft", "Learning Machines LLC", "https://getartcraft.com/apps/texturecraft")),
+            ("craft:craft-anything", entry("Craft Anything", "Learning Machines LLC", "https://getartcraft.com/apps/craft-anything")),
+            // A community app: its publisher and update page are not ArtCraft's.
+            ("craft:solidcraft", entry("SolidCraft", "SolidCraft contributors", "https://github.com/bherbruck/solidcraft/releases")),
+        ] {
+            let found = scan(&[e]);
+            assert_eq!(found.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec![id]);
+            assert!(matches!(found[0].data, SourceData::Craft { for_everyone: true, .. }));
+        }
+        // Another program that only shares the name is not it.
+        assert!(scan(&[entry("SolidCraft", "Someone Else", "https://example.com")]).is_empty());
+    }
+
+    #[test]
+    fn the_newer_apps_are_offered_from_their_own_repos() {
+        let mut feed = Feed::default();
+        for (key, repo) in [("texturecraft", "storytold/texturecraft"), ("craft-anything", "storytold/craft-anything"), ("solidcraft", "tangency-labs/solidcraft")] {
+            assert_eq!(def(key).map(|a| a.repo), Some(repo));
+            feed.latest.insert(key.to_string(), rel("0.2.0", false));
+        }
+        let ids: Vec<String> = catalog_entries(&feed, &[]).into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["craft:texturecraft", "craft:craft-anything", "craft:solidcraft"]);
     }
 }

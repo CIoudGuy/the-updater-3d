@@ -88,6 +88,9 @@ pub fn craft(key: &str) -> Option<&'static str> {
         "deckcraft" => "A presentation app for making slide shows, from ArtCraft's family of Craft apps, developed in the open on GitHub.",
         "cadcraft" => "A computer-aided design and drafting app for technical drawings, from ArtCraft's family of Craft apps, developed in the open on GitHub.",
         "gridcraft" => "A spreadsheet app for tables, formulas and data analysis, from ArtCraft's family of Craft apps, developed in the open on GitHub.",
+        "texturecraft" => "A 3D texture painting app for painting materials onto models and exporting them for any engine, from ArtCraft's family of Craft apps, developed in the open on GitHub.",
+        "craft-anything" => "Studies how a website, app or game works, then has an AI coding agent build your own version and checks it against the original, from ArtCraft's family of Craft apps, developed in the open on GitHub.",
+        "solidcraft" => "A parametric 3D CAD app for sketching and building solid parts on an editable timeline. A community app by Tangency Labs that the ArtCraft Launcher lists, developed in the open on GitHub.",
         "artcraft" => "ArtCraft's own studio app for making images and videos with AI models. Installs per user with its own setup program.",
         _ => return None,
     })

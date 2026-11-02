@@ -49,7 +49,7 @@ fn visible_text_len(html: &str) -> usize {
 
 /// Does a page look built by script: it runs scripts and has almost no text of its own?
 pub fn script_built(html: &str) -> bool {
-    let lower = &html[..html.len().min(400_000)].to_ascii_lowercase();
+    let lower = &html[..html.floor_char_boundary(400_000)].to_ascii_lowercase();
     lower.contains("<script") && visible_text_len(html) < 1500
 }
 
@@ -284,6 +284,13 @@ pub fn render_main(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_page_with_a_letter_across_the_read_limit_is_read() {
+        let page = format!("<html><script></script>{}", "\u{4e2d}".repeat(200_000));
+        assert!(!page.is_char_boundary(400_000));
+        assert!(!script_built(&page));
+    }
 
     #[test]
     fn a_page_built_by_script_is_told_from_a_page_with_its_text() {

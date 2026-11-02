@@ -44,6 +44,17 @@ async fn detects_installed_apps_and_finds_latest_versions() {
 
 #[tokio::test]
 #[ignore]
+async fn every_craft_app_has_a_windows_installer_to_offer() {
+    let feed = craft::fetch(false).await.expect("craft feed");
+    for a in craft::APPS {
+        let r = feed.latest.get(a.key).unwrap_or_else(|| panic!("{}: no release", a.key));
+        let i = r.installer().unwrap_or_else(|| panic!("{}: no installer", a.key));
+        println!("{:<20} {:<12} {} sha256={}", a.key, r.version, i.name, i.sha256.is_some());
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn adobe_updates_use_remote_update_manager() {
     let un = winutil::uninstall_entries();
     let cat = adobe::fetch_catalog().await.unwrap();
