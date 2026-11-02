@@ -45,7 +45,7 @@ png = "0.18"
 mslnk = "0.1"
 base64 = "0.23"
 yaml-rust2 = "0.13"
-fancy-regex = "0.19"
+fancy-regex = "0.20"
 miniz_oxide = "0.9"
 
 # Same version as Tauri uses: turns off browser-only behaviour of the web view.
