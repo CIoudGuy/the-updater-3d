@@ -29,7 +29,7 @@ url = "2"
 roxmltree = "0.21"
 rusqlite = { version = "0.40", features = ["bundled"] }
 winreg = "0.56"
-sysinfo = "0.39"
+sysinfo = "0.40"
 sha2 = "0.11"
 md-5 = "0.11"
 hex = "0.4"
